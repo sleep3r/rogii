@@ -1,0 +1,17 @@
+[project]
+name = "rogii"
+version = "0.1.0"
+description = "ROGII wellbore geology prediction training pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "kaggle @ git+https://github.com/Kaggle/kaggle-cli.git",
+    "numpy>=2.0",
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.5",
+]
+
+[tool.uv]
+package = false

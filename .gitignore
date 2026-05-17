@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data and generated outputs
+data/
+artifacts/
+.kaggle_mining/
+submission.csv
