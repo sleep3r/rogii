@@ -33,7 +33,7 @@ def predict_test(
         test_features = wf.features.reindex(columns=feature_names).astype("float32")
         residual_pred = model.predict(test_features)
         predictions_by_well[wf.well] = apply_postprocess(
-            wf.flat_prediction, residual_pred, config
+            wf.flat_prediction, residual_pred, config, features=wf.features
         )
         if i % 50 == 0 or i == len(test_paths):
             if logger is not None:

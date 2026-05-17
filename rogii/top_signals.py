@@ -262,29 +262,39 @@ def particle_filter_signal(
 def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
     keys = [
         "kg_hidden_row",
+        "kg_beam_mean_tvt",
         "kg_beam_mean_minus_flat",
         "kg_beam_std",
+        "kg_ncc_mean_tvt",
         "kg_ncc_mean_minus_flat",
         "kg_ncc_score_mean",
+        "kg_dtw_tvt",
         "kg_dtw_minus_flat",
         "kg_dtw_vs_beam",
+        "kg_dwt_tvt",
         "kg_dwt_minus_flat",
         "kg_dwt_vs_dtw",
         "kg_dwt_vs_beam",
+        "kg_signal_mean_tvt",
         "kg_signal_mean_minus_flat",
         "kg_signal_std",
+        "kg_form_ancc_tvt",
         "kg_form_ancc_minus_flat",
+        "kg_form_mean_tvt",
         "kg_form_mean_minus_flat",
         "kg_form_std",
         "kg_form_range",
         "kg_form_knn_dist",
+        "kg_dense_ancc_tvt",
         "kg_dense_ancc_minus_flat",
         "kg_dense_ancc_std",
         "kg_dense_ancc_dist",
         "kg_dense_vs_form",
+        "kg_pf_z_tvt",
         "kg_pf_z_minus_flat",
         "kg_pf_z_std",
         "kg_pf_z_velocity",
+        "kg_pf_ancc_tvt",
         "kg_pf_ancc_minus_flat",
         "kg_pf_ancc_std",
         "kg_pf_ancc_vs_dense",
@@ -357,6 +367,8 @@ def build_kaggle_top_signal_features(
             int(smooth_radius),
         )
         beam_signals.append(signal)
+        features[f"kg_beam_{tag}_tvt"] = np.zeros(n, dtype=float)
+        features[f"kg_beam_{tag}_tvt"][hidden_idx] = signal
         features[f"kg_beam_{tag}_minus_flat"] = np.zeros(n, dtype=float)
         features[f"kg_beam_{tag}_minus_flat"][hidden_idx] = (
             signal - flat_pred[hidden_idx]
@@ -367,6 +379,7 @@ def build_kaggle_top_signal_features(
     if beam_signals:
         beam_matrix = np.vstack(beam_signals).T
         beam_mean = np.nanmean(beam_matrix, axis=1)
+        features["kg_beam_mean_tvt"][hidden_idx] = beam_mean
         features["kg_beam_mean_minus_flat"][hidden_idx] = (
             beam_mean - flat_pred[hidden_idx]
         )
@@ -384,17 +397,22 @@ def build_kaggle_top_signal_features(
     ncc_signals: list[np.ndarray] = []
     ncc_scores: list[np.ndarray] = []
     for key, value in ncc.items():
-        full = np.zeros(n, dtype=float)
         if key.endswith("_tvt"):
-            full[hidden_idx] = value - flat_pred[hidden_idx]
-            features[f"kg_{key}_minus_flat"] = full
+            tvt_full = np.zeros(n, dtype=float)
+            tvt_full[hidden_idx] = value
+            features[f"kg_{key}"] = tvt_full
+            diff_full = np.zeros(n, dtype=float)
+            diff_full[hidden_idx] = value - flat_pred[hidden_idx]
+            features[f"kg_{key}_minus_flat"] = diff_full
             ncc_signals.append(value)
         else:
+            full = np.zeros(n, dtype=float)
             full[hidden_idx] = value
             features[f"kg_{key}"] = full
             ncc_scores.append(value)
     if ncc_signals:
         ncc_matrix = np.vstack(ncc_signals).T
+        features["kg_ncc_mean_tvt"][hidden_idx] = np.nanmean(ncc_matrix, axis=1)
         features["kg_ncc_mean_minus_flat"][hidden_idx] = (
             np.nanmean(ncc_matrix, axis=1) - flat_pred[hidden_idx]
         )
@@ -412,6 +430,7 @@ def build_kaggle_top_signal_features(
             int(top_cfg.get("dtw_max_ref_points", 700)),
             int(top_cfg.get("dtw_radius", 35)),
         )
+        features["kg_dtw_tvt"][hidden_idx] = dtw_signal[hidden_idx]
         features["kg_dtw_minus_flat"][hidden_idx] = (
             dtw_signal[hidden_idx] - flat_pred[hidden_idx]
         )
@@ -450,6 +469,7 @@ def build_kaggle_top_signal_features(
             ),
             int(top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))),
         )
+        features["kg_dwt_tvt"][hidden_idx] = dwt_signal[hidden_idx]
         features["kg_dwt_minus_flat"][hidden_idx] = (
             dwt_signal[hidden_idx] - flat_pred[hidden_idx]
         )
@@ -476,15 +496,20 @@ def build_kaggle_top_signal_features(
                 )
                 signal = -z[hidden_idx] + form_hidden[:, formation_idx] + b
                 form_signals.append(signal)
-                col = f"kg_form_{formation}_minus_flat"
-                features[col] = np.zeros(n, dtype=float)
-                features[col][hidden_idx] = signal - flat_pred[hidden_idx]
+                tvt_col = f"kg_form_{formation}_tvt"
+                features[tvt_col] = np.zeros(n, dtype=float)
+                features[tvt_col][hidden_idx] = signal
+                diff_col = f"kg_form_{formation}_minus_flat"
+                features[diff_col] = np.zeros(n, dtype=float)
+                features[diff_col][hidden_idx] = signal - flat_pred[hidden_idx]
             form_matrix = np.vstack(form_signals).T
             form_mean = np.nanmean(form_matrix, axis=1)
             form_ancc_signal = form_matrix[:, 0]
+            features["kg_form_ancc_tvt"][hidden_idx] = form_ancc_signal
             features["kg_form_ancc_minus_flat"][hidden_idx] = (
                 form_ancc_signal - flat_pred[hidden_idx]
             )
+            features["kg_form_mean_tvt"][hidden_idx] = form_mean
             features["kg_form_mean_minus_flat"][hidden_idx] = (
                 form_mean - flat_pred[hidden_idx]
             )
@@ -508,6 +533,7 @@ def build_kaggle_top_signal_features(
             else 0.0
         )
         dense_signal = -z[hidden_idx] + dense_ancc + dense_b
+        features["kg_dense_ancc_tvt"][hidden_idx] = dense_signal
         features["kg_dense_ancc_minus_flat"][hidden_idx] = (
             dense_signal - flat_pred[hidden_idx]
         )
@@ -525,6 +551,7 @@ def build_kaggle_top_signal_features(
             float(top_cfg.get("particle_process_noise", 4.0)),
             float(top_cfg.get("particle_observation_scale", 18.0)),
         )
+        features["kg_pf_z_tvt"][hidden_idx] = pf_z
         features["kg_pf_z_minus_flat"][hidden_idx] = pf_z - flat_pred[hidden_idx]
         features["kg_pf_z_std"][hidden_idx] = pf_z_std
         features["kg_pf_z_velocity"][hidden_idx] = np.gradient(pf_z)
@@ -545,12 +572,14 @@ def build_kaggle_top_signal_features(
             float(top_cfg.get("particle_process_noise", 4.0)),
             float(top_cfg.get("particle_observation_scale", 18.0)),
         )
+        features["kg_pf_ancc_tvt"][hidden_idx] = pf_ancc
         features["kg_pf_ancc_minus_flat"][hidden_idx] = pf_ancc - flat_pred[hidden_idx]
         features["kg_pf_ancc_std"][hidden_idx] = pf_ancc_std
         if dense_signal is not None:
             features["kg_pf_ancc_vs_dense"][hidden_idx] = pf_ancc - dense_signal
 
     signal_matrix = np.vstack(signal_stack).T
+    features["kg_signal_mean_tvt"][hidden_idx] = np.nanmean(signal_matrix, axis=1)
     features["kg_signal_mean_minus_flat"][hidden_idx] = (
         np.nanmean(signal_matrix, axis=1) - flat_pred[hidden_idx]
     )

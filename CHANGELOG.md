@@ -362,6 +362,39 @@ ensembles on residuals, and careful validation by wells.
   Kaggle), so future artifacts should either be trained in a Kaggle-compatible
   environment or verified against a Kaggle train+infer run.
 
+### EXP-20260517-7 - Current-Branch 9.251 Notebook Alignment
+
+- Command/config verified: `uv run python -m rogii --config configs/quick.yml`.
+- Data: 3 public train wells / 3 public test wells.
+- Local quick result:
+  - rows: 14,151;
+  - features: 150;
+  - baseline: `last_known_tvt`;
+  - baseline RMSE: 11.53934;
+  - CV RMSE: 9.63298;
+  - best residual weight: 1.0;
+  - best notebook blend: `{alpha: 1.0, tau: 0.0, w_pf: 0.0}`;
+  - postprocess candidates checked: 42;
+  - runtime: 7.49s.
+- What changed:
+  - no separate experiment branch; the changes are integrated into the current
+    framework;
+  - added `features.prediction_baseline` with `flat_tvt` as the default and
+    `last_known_tvt` enabled for `configs/stack.yml` / `configs/quick.yml`;
+  - added `baseline_tvt`, `baseline_minus_flat`, `md_since`, and `idx_since`
+    features;
+  - expanded beam configs toward the public 9.251 notebook's seven alignment
+    regimes;
+  - exposed absolute TVT versions of beam/NCC/DTW/DWT/spatial/PF signals, not
+    only `*_minus_flat` deltas.
+  - added a tiny 9.251-style postprocess search over model delta vs
+    `kg_pf_ancc_tvt` delta; quick CV currently selects the no-op candidate.
+- Takeaway: this keeps the framework simple while moving the main stack toward
+  the public DWT-based solution style. The quick CV moved slightly from 9.63946
+  to 9.63298; the important next check is a full `make train` because the old
+  all-well stack CV 13.50285 was measured before the `last_known_tvt` baseline
+  switch.
+
 ### Current Direction
 
 - Do not over-index on train RMSE; the important local number is grouped CV by

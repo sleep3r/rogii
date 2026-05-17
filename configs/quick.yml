@@ -12,13 +12,18 @@ data:
 features:
   tail_windows: [25, 100]
   rolling_windows: [5, 25]
+  prediction_baseline: last_known_tvt
   include_typewell: true
   include_kaggle_top_signals: true
   kaggle_top:
     beam_configs:
       - [20.0, 144.0, 2, cons]
       - [8.0, 64.0, 2, loose]
+      - [35.0, 220.0, 1, vcons]
       - [14.0, 90.0, 5, sm5]
+      - [4.0, 36.0, 3, vloose]
+      - [12.0, 100.0, 3, mid]
+      - [25.0, 180.0, 2, stiff]
     ncc_windows: [8, 15]
     ncc_stride: 3
     dtw_enabled: true
@@ -74,6 +79,16 @@ postprocess:
   residual_weight: auto
   residual_weight_grid: [0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0]
   residual_clip: 250.0
+  notebook_blend:
+    enabled: true
+    pf_column: kg_pf_ancc_tvt
+    candidates:
+      - {alpha: 1.0, tau: 0.0, w_pf: 0.0}
+      - {alpha: 1.0, tau: 0.0, w_pf: 0.10}
+      - {alpha: 1.0, tau: 0.0, w_pf: 0.25}
+      - {alpha: 0.95, tau: 50.0, w_pf: 0.10}
+      - {alpha: 0.95, tau: 100.0, w_pf: 0.25}
+      - {alpha: 1.05, tau: 50.0, w_pf: 0.10}
 
 outputs:
   output_dir: artifacts/quick

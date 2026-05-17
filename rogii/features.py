@@ -31,6 +31,21 @@ class WellFeatures:
     target_mask: np.ndarray
 
 
+def choose_prediction_baseline(
+    config: dict[str, Any],
+    flat_pred: np.ndarray,
+    last_tvt: float,
+) -> np.ndarray:
+    baseline = str(config["features"].get("prediction_baseline", "flat_tvt")).lower()
+    if baseline in {"flat", "flat_tvt"}:
+        return flat_pred
+    if baseline in {"last_known", "last_known_tvt"}:
+        return np.full(len(flat_pred), float(last_tvt), dtype=float)
+    raise ValueError(
+        "features.prediction_baseline must be 'flat_tvt' or 'last_known_tvt'."
+    )
+
+
 def read_typewell_features(
     path: Path | None, horizontal_gr: np.ndarray, flat_pred: np.ndarray
 ) -> dict[str, np.ndarray | float]:
@@ -151,6 +166,8 @@ def build_well_features(
         first_tvt = 0.0
         last_tvt = 0.0
 
+    base_pred = choose_prediction_baseline(config, flat_pred, last_tvt)
+
     prev_known_idx = (
         pd.Series(np.where(known, idx, np.nan))
         .ffill()
@@ -180,6 +197,8 @@ def build_well_features(
         "z": z,
         "gr": gr,
         "flat_tvt": flat_pred,
+        "baseline_tvt": base_pred,
+        "baseline_minus_flat": base_pred - flat_pred,
         "tvt_input_isna": (~known).astype(float),
         "first_known_idx": float(first_known),
         "last_known_idx": float(last_known),
@@ -187,8 +206,10 @@ def build_well_features(
         "last_known_tvt": last_tvt,
         "anchor_tvt": anchor_tvt,
         "idx_from_last_known": idx - float(last_known),
+        "idx_since": idx - float(last_known),
         "md_from_start": md - md[0],
         "md_from_last_known": md - md[last_known],
+        "md_since": md - md[last_known],
         "z_from_last_known": z - z[last_known],
         "x_from_last_known": x - x[last_known],
         "y_from_last_known": y - y[last_known],
@@ -277,7 +298,7 @@ def build_well_features(
     return WellFeatures(
         well=well,
         features=feature_frame,
-        flat_prediction=flat_pred,
+        flat_prediction=base_pred,
         target=target,
         target_mask=target_mask,
     )

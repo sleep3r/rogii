@@ -96,11 +96,13 @@ def main() -> None:
         X, residual, groups, flat, y_true = build_training_table(
             train_paths, config, top_context, logger
         )
+    baseline_name = config["features"].get("prediction_baseline", "flat_tvt")
     logger.metric(
         "Training table",
         rows=len(X),
         features=len(X.columns),
-        flat_train_rmse=rmse(flat, y_true),
+        baseline=baseline_name,
+        baseline_train_rmse=rmse(flat, y_true),
     )
 
     metrics: dict[str, Any] = {}
@@ -118,6 +120,11 @@ def main() -> None:
             and config["postprocess"].get("residual_weight") == "auto"
         ):
             config["postprocess"]["residual_weight"] = best_weight
+        best_notebook_blend = metrics["cv"].get("best_notebook_blend")
+        notebook_blend_cfg = config["postprocess"].get("notebook_blend") or {}
+        if best_notebook_blend and notebook_blend_cfg.get("enabled", False):
+            notebook_blend_cfg.update(best_notebook_blend)
+            config["postprocess"]["notebook_blend"] = notebook_blend_cfg
     else:
         logger.warn("Cross-validation disabled")
         metrics["cv"] = {"enabled": False}
@@ -129,16 +136,19 @@ def main() -> None:
     metrics["train"] = {
         "rows": int(len(X)),
         "wells": int(len(set(groups))),
+        "baseline": baseline_name,
+        "baseline_rmse": rmse(flat, y_true),
         "flat_rmse": rmse(flat, y_true),
     }
     if config.get("reporting", {}).get("compute_train_metrics", True):
         with logger.step("Evaluate final model on train", rows=len(X)):
-            train_pred = apply_postprocess(flat, model.predict(X), config)
+            train_pred = apply_postprocess(flat, model.predict(X), config, features=X)
         metrics["train"]["rmse"] = rmse(train_pred, y_true)
         logger.metric(
             "Final train summary",
             rmse=metrics["train"]["rmse"],
-            flat_rmse=metrics["train"]["flat_rmse"],
+            baseline=baseline_name,
+            baseline_rmse=metrics["train"]["baseline_rmse"],
             wells=metrics["train"]["wells"],
         )
     else:

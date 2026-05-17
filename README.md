@@ -136,7 +136,8 @@ make logs-kaggle-train
 Training pipeline:
 
 - builds row-level features from trajectory, GR, `TVT_input`, and typewell logs;
-- uses a flat TVT baseline as the physical anchor;
+- keeps `flat_tvt` as a physical anchor feature and can train residuals from
+  either `flat_tvt` or `last_known_tvt`;
 - adds public Kaggle top-solution alignment signals;
 - trains a LightGBM/XGBoost/CatBoost residual stack;
 - validates with grouped CV by well;
@@ -173,16 +174,25 @@ CatBoost with Ridge blending; the stack also supports convex hill-climb
 blending via `model.blend.method: hill_climb`. `configs/hgb.yml` is kept as a
 legacy baseline for comparison.
 
+`configs/stack.yml` also has a small 9.251-style postprocess search: CV can
+choose whether to blend the model delta with the `kg_pf_ancc_tvt` delta. The
+candidate list always includes a no-op candidate, so this is a controlled knob
+rather than a forced correction.
+
 The feature block is controlled by:
 
 ```yaml
 features:
+  prediction_baseline: last_known_tvt
   include_kaggle_top_signals: true
   kaggle_top:
     beam_configs:
       - [20.0, 144.0, 2, cons]
       - [8.0, 64.0, 2, loose]
+      - [35.0, 220.0, 1, vcons]
       - [14.0, 90.0, 5, sm5]
+      - [4.0, 36.0, 3, vloose]
+      - [12.0, 100.0, 3, mid]
       - [25.0, 180.0, 2, stiff]
     ncc_windows: [8, 15, 25]
     dtw_enabled: true
@@ -193,11 +203,13 @@ features:
 Latest smoke-test on the public sample:
 
 ```text
-Flat RMSE: 11.40534
+Baseline: last_known_tvt
+Baseline RMSE: 11.53934
 Legacy HGB CV RMSE: 10.11490
-GBM stack CV RMSE:  9.63946
+GBM stack CV RMSE:  9.63298
 Best stack residual_weight: 1.0
-Kaggle top-signal features: 43
+Best notebook blend: {alpha: 1.0, tau: 0.0, w_pf: 0.0}
+Features: 150
 ```
 
 Latest full local validations on visible train wells:
@@ -217,6 +229,11 @@ GBM stack, all-well CV:
   Best residual_weight: 0.75
   Fold RMSE range: 11.50514-15.36182
 ```
+
+The full GBM stack numbers above are from the previous `flat_tvt` residual
+baseline. After the 9.251-notebook alignment update, `configs/stack.yml` now
+uses `last_known_tvt`; rerun `make train` before treating full-CV numbers as
+current.
 
 Public LB anchors:
 

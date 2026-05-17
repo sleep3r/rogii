@@ -273,6 +273,8 @@ def apply_postprocess(
     residual: np.ndarray,
     config: dict[str, Any],
     residual_weight: float | None = None,
+    features: pd.DataFrame | None = None,
+    notebook_blend: dict[str, float] | None = None,
 ) -> np.ndarray:
     residual = np.asarray(residual, dtype=float)
     clip_value = config["postprocess"].get("residual_clip")
@@ -283,7 +285,77 @@ def apply_postprocess(
         configured = config["postprocess"].get("residual_weight", 1.0)
         residual_weight = 1.0 if configured == "auto" else float(configured)
     weight = float(residual_weight)
-    return np.asarray(flat, dtype=float) + weight * residual
+    pred = np.asarray(flat, dtype=float) + weight * residual
+    return apply_notebook_blend(pred, config, features, notebook_blend)
+
+
+def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] | None]:
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    if not blend_cfg.get("enabled", False):
+        return [None]
+
+    candidates = blend_cfg.get("candidates") or []
+    if candidates:
+        parsed = []
+        for candidate in candidates:
+            parsed.append(
+                {
+                    "alpha": float(candidate.get("alpha", 1.0)),
+                    "tau": float(candidate.get("tau", 0.0)),
+                    "w_pf": float(candidate.get("w_pf", 0.0)),
+                }
+            )
+        return parsed
+
+    return [
+        {
+            "alpha": float(blend_cfg.get("alpha", 1.0)),
+            "tau": float(blend_cfg.get("tau", 0.0)),
+            "w_pf": float(blend_cfg.get("w_pf", 0.0)),
+        }
+    ]
+
+
+def apply_notebook_blend(
+    pred: np.ndarray,
+    config: dict[str, Any],
+    features: pd.DataFrame | None,
+    params: dict[str, float] | None,
+) -> np.ndarray:
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    if not blend_cfg.get("enabled", False) or features is None:
+        return pred
+    if params is None:
+        params = {
+            "alpha": float(blend_cfg.get("alpha", 1.0)),
+            "tau": float(blend_cfg.get("tau", 0.0)),
+            "w_pf": float(blend_cfg.get("w_pf", 0.0)),
+        }
+
+    pf_column = str(blend_cfg.get("pf_column", "kg_pf_ancc_tvt"))
+    required = {"last_known_tvt", "md_since", pf_column}
+    if not required.issubset(features.columns):
+        return pred
+
+    last = features["last_known_tvt"].to_numpy(dtype=float)
+    md_since = features["md_since"].to_numpy(dtype=float)
+    pf_tvt = features[pf_column].to_numpy(dtype=float)
+    valid = np.isfinite(last) & np.isfinite(md_since) & np.isfinite(pf_tvt)
+    if not valid.any():
+        return pred
+
+    alpha = float(params.get("alpha", 1.0))
+    tau = float(params.get("tau", 0.0))
+    w_pf = float(np.clip(params.get("w_pf", 0.0), 0.0, 1.0))
+    model_delta = pred - last
+    pf_delta = pf_tvt - last
+    delta = (1.0 - w_pf) * model_delta + w_pf * pf_delta
+    if tau > 0:
+        delta = delta * (1.0 - np.exp(-np.maximum(md_since, 0.0) / tau))
+
+    blended = pred.copy()
+    blended[valid] = last[valid] + alpha * delta[valid]
+    return blended
 
 
 def tune_residual_weight(
@@ -291,12 +363,29 @@ def tune_residual_weight(
     residual_pred: np.ndarray,
     y_true: np.ndarray,
     config: dict[str, Any],
-) -> tuple[float, list[dict[str, float]]]:
+    features: pd.DataFrame | None = None,
+) -> tuple[float, list[dict[str, float]], dict[str, float] | None]:
     configured = config["postprocess"].get("residual_weight", 1.0)
+    blend_candidates = notebook_blend_candidates(config)
     if configured != "auto":
         weight = float(configured)
-        pred = apply_postprocess(flat, residual_pred, config, residual_weight=weight)
-        return weight, [{"weight": weight, "rmse": rmse(pred, y_true)}]
+        scores = []
+        for blend in blend_candidates:
+            pred = apply_postprocess(
+                flat,
+                residual_pred,
+                config,
+                residual_weight=weight,
+                features=features,
+                notebook_blend=blend,
+            )
+            score = {"weight": weight, "rmse": rmse(pred, y_true)}
+            if blend is not None:
+                score.update(blend)
+            scores.append(score)
+        best = min(scores, key=lambda item: item["rmse"])
+        best_blend = {key: best[key] for key in ("alpha", "tau", "w_pf") if key in best}
+        return weight, scores, best_blend or None
 
     grid = config["postprocess"].get("residual_weight_grid") or [
         0.0,
@@ -308,10 +397,22 @@ def tune_residual_weight(
     scores: list[dict[str, float]] = []
     for weight in grid:
         weight = float(weight)
-        pred = apply_postprocess(flat, residual_pred, config, residual_weight=weight)
-        scores.append({"weight": weight, "rmse": rmse(pred, y_true)})
+        for blend in blend_candidates:
+            pred = apply_postprocess(
+                flat,
+                residual_pred,
+                config,
+                residual_weight=weight,
+                features=features,
+                notebook_blend=blend,
+            )
+            score = {"weight": weight, "rmse": rmse(pred, y_true)}
+            if blend is not None:
+                score.update(blend)
+            scores.append(score)
     best = min(scores, key=lambda item: item["rmse"])
-    return float(best["weight"]), scores
+    best_blend = {key: best[key] for key in ("alpha", "tau", "w_pf") if key in best}
+    return float(best["weight"]), scores, best_blend or None
 
 
 def run_cv(
@@ -373,15 +474,24 @@ def run_cv(
         fold_ids[valid_idx] = fold_id
 
     if logger is not None:
+        residual_candidates = len(
+            config["postprocess"].get("residual_weight_grid") or []
+        )
+        blend_candidates = len(notebook_blend_candidates(config))
         logger.info(
             "Tuning residual blend",
-            candidates=len(config["postprocess"].get("residual_weight_grid") or []),
+            candidates=max(residual_candidates, 1) * max(blend_candidates, 1),
         )
-    best_weight, weight_scores = tune_residual_weight(
-        flat_cv, oof_residual, y_true_cv, config
+    best_weight, weight_scores, best_notebook_blend = tune_residual_weight(
+        flat_cv, oof_residual, y_true_cv, config, X_cv
     )
     oof_pred = apply_postprocess(
-        flat_cv, oof_residual, config, residual_weight=best_weight
+        flat_cv,
+        oof_residual,
+        config,
+        residual_weight=best_weight,
+        features=X_cv,
+        notebook_blend=best_notebook_blend,
     )
     for fold_id in range(1, len(folds) + 1):
         valid_idx = fold_ids == fold_id
@@ -400,19 +510,25 @@ def run_cv(
             )
 
     overall_rmse = rmse(oof_pred, y_true_cv)
-    flat_rmse = rmse(flat_cv, y_true_cv)
+    baseline_rmse = rmse(flat_cv, y_true_cv)
+    baseline_name = config["features"].get("prediction_baseline", "flat_tvt")
     if logger is not None:
         logger.metric(
             "CV summary",
             rmse=overall_rmse,
-            flat_rmse=flat_rmse,
+            baseline=baseline_name,
+            baseline_rmse=baseline_rmse,
             best_residual_weight=f"{best_weight:g}",
+            best_notebook_blend=best_notebook_blend,
         )
     return {
         "enabled": True,
         "rmse": overall_rmse,
-        "flat_rmse": flat_rmse,
+        "baseline": baseline_name,
+        "baseline_rmse": baseline_rmse,
+        "flat_rmse": baseline_rmse,
         "best_residual_weight": best_weight,
+        "best_notebook_blend": best_notebook_blend,
         "residual_weight_scores": weight_scores,
         "rows": int(len(X_cv)),
         "wells": int(len(unique_cv_groups)),
