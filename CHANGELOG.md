@@ -152,6 +152,52 @@ ensembles on residuals, and careful validation by wells.
 - Next: submit after choosing `configs/best.yml` and record public/private LB
   scores here.
 
+### SUBMIT-20260517-1 - First End-to-End Submit Attempt
+
+- Command/config: `make submit MESSAGE="initial hgb submit"` /
+  `configs/best.yml`.
+- Kaggle kernel: `sleep3r/rogii-hgb-submit`, version 1.
+- Result: failed quickly on Kaggle.
+- Error: runner expected `train/` directly under
+  `/kaggle/input/rogii-wellbore-geology-prediction`.
+- Fix: updated the Kaggle runner to search the configured input path, nested
+  `/kaggle/input` folders, and zipped competition archives before starting the
+  training pipeline.
+- Takeaway: Kaggle notebook input layout must be discovered at runtime, not
+  assumed from local `data/`.
+
+### SUBMIT-20260517-2 - Submit Retry With Kaggle Data Discovery
+
+- Command/config: `make submit MESSAGE="initial hgb submit"` /
+  `configs/best.yml`.
+- Kaggle kernel: `sleep3r/rogii-hgb-submit`, version 2.
+- Observed Kaggle runtime:
+  - top-solution spatial context started successfully;
+  - training table loaded all 773 train wells;
+  - training table build took about 13 minutes on Kaggle CPU;
+  - final model training started after 3,783,989 rows and 122 features;
+  - Kaggle kernel completed in 19:08;
+  - output `submission.csv` had 14,151 prediction rows.
+- Kaggle result: submitted to competition, ref `52748619`, status pending.
+- Takeaway: the data discovery fix worked; Kaggle CPU is much slower than the
+  local machine for the row-building phase.
+
+### Remote Kaggle Training Split
+
+- Added `make train-kaggle` for running the training notebook on Kaggle without
+  submitting to the competition.
+- Added `make train-kaggle-dry` for packaging validation.
+- Added `make status-kaggle-train` and `make logs-kaggle-train` for monitoring
+  the remote training kernel.
+- Added `make status-submit` and `make logs-submit` for monitoring the submit
+  kernel.
+- Default remote training kernel: `sleep3r/rogii-hgb-train`.
+- Default remote training config: `configs/hgb.yml`.
+- Output directory downloaded locally: `artifacts/kaggle_train_output`.
+- Difference from `make submit`:
+  - `make train-kaggle` is for remote experiment/validation artifacts;
+  - `make submit` is for the final code competition submission path.
+
 ### Current Direction
 
 - Do not over-index on train RMSE; the important local number is grouped CV by

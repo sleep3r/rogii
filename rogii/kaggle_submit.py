@@ -96,6 +96,77 @@ SOURCE_ZIP_B64 = """
 """
 
 
+def has_competition_layout(path: Path) -> bool:
+    return (path / "train").is_dir() and (path / "test").is_dir()
+
+
+def candidate_roots(root: Path):
+    yielded = set()
+    stack = [root]
+    while stack:
+        current = stack.pop(0)
+        if current in yielded:
+            continue
+        yielded.add(current)
+        yield current
+        if current.exists() and current.is_dir():
+            try:
+                stack.extend(path for path in sorted(current.iterdir()) if path.is_dir())
+            except OSError:
+                pass
+
+
+def describe_tree(root: Path, limit: int = 80) -> list[str]:
+    if not root.exists():
+        return [str(root) + " [missing]"]
+    items = []
+    for index, path in enumerate(sorted(root.rglob("*"))):
+        if index >= limit:
+            items.append("... truncated ...")
+            break
+        try:
+            kind = "dir" if path.is_dir() else "file"
+            items.append("%s [%s]" % (path, kind))
+        except OSError:
+            items.append(str(path))
+    return items
+
+
+def resolve_competition_data_dir(preferred: Path, work_dir: Path) -> Path:
+    search_roots = [preferred, Path("/kaggle/input")]
+    for root in search_roots:
+        for candidate in candidate_roots(root):
+            if has_competition_layout(candidate):
+                print("Resolved competition data dir: %s" % candidate, flush=True)
+                return candidate
+
+    zip_candidates = []
+    for root in search_roots:
+        if root.exists():
+            zip_candidates.extend(sorted(root.rglob("*.zip")))
+
+    if zip_candidates:
+        extract_dir = work_dir / "_rogii_data"
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = zip_candidates[0]
+        print("Extracting competition archive: %s -> %s" % (zip_path, extract_dir), flush=True)
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.extractall(extract_dir)
+        for candidate in candidate_roots(extract_dir):
+            if has_competition_layout(candidate):
+                print("Resolved extracted competition data dir: %s" % candidate, flush=True)
+                return candidate
+
+    print("Could not find Kaggle competition train/test layout.", flush=True)
+    for root in search_roots:
+        print("Tree sample for %s:" % root, flush=True)
+        for line in describe_tree(root):
+            print("  " + line, flush=True)
+    raise FileNotFoundError("No Kaggle competition data directory with train/ and test/ was found.")
+
+
 def main() -> None:
     work_dir = Path.cwd()
     source_dir = work_dir / "_rogii_src"
@@ -110,12 +181,14 @@ def main() -> None:
     sys.path.insert(0, str(source_dir))
     from rogii.pipeline import main as run_pipeline
 
+    resolved_data_dir = resolve_competition_data_dir(Path("{data_dir.as_posix()}"), work_dir)
+
     sys.argv = [
         "run.py",
         "--config",
         str(source_dir / "{config_rel}"),
         "--data-dir",
-        "{data_dir.as_posix()}",
+        str(resolved_data_dir),
         "--submission",
         str(work_dir / "{submission_file}"),
         "--output-dir",
@@ -256,10 +329,11 @@ def download_output(api: KaggleApi, args: argparse.Namespace) -> Path:
 
     ref = kernel_ref(args.user, args.kernel)
     log(f"Downloading kernel output to {output_dir}...")
+    file_pattern = None if args.download_all_output else args.submission_file
     api.kernels_output(
         ref,
         str(output_dir),
-        file_pattern=args.submission_file,
+        file_pattern=file_pattern,
         force=True,
         quiet=False,
     )
@@ -313,6 +387,9 @@ def run_end_to_end(args: argparse.Namespace) -> None:
     wait_for_kernel(api, args)
     submission_path = download_output(api, args)
     validate_submission(submission_path)
+    if args.skip_competition_submit:
+        log("Skipping competition submit. Kaggle training run is complete.")
+        return
     submit_code(api, args, version)
 
 
@@ -348,6 +425,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--accelerator", default="")
     run.add_argument("--message", default="Submission")
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--skip-competition-submit", action="store_true")
+    run.add_argument("--download-all-output", action="store_true")
 
     return parser.parse_args(argv)
 

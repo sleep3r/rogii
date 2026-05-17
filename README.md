@@ -102,6 +102,24 @@ Equivalent command:
 uv run python -m rogii --config configs/submit.yml
 ```
 
+To run training remotely on Kaggle without submitting to the competition:
+
+```bash
+make train-kaggle MESSAGE="remote hgb train"
+```
+
+This pushes a separate private Kaggle script, `sleep3r/rogii-hgb-train`, waits
+for it to finish, downloads all outputs into `artifacts/kaggle_train_output`,
+and stops before the competition submit step. By default it uses
+`configs/hgb.yml`, so it is meant for experiment-quality remote validation.
+
+Monitor the remote training kernel:
+
+```bash
+make status-kaggle-train
+make logs-kaggle-train
+```
+
 Training pipeline:
 
 - builds row-level features from trajectory, GR, `TVT_input`, and typewell logs;
@@ -291,6 +309,10 @@ That command:
 - downloads and validates `submission.csv`;
 - submits that kernel version to the competition.
 
+The submit runner resolves Kaggle data robustly: it searches the configured
+input path, nested `/kaggle/input` folders, and zipped competition archives
+before starting the training pipeline.
+
 By default it uses `configs/best.yml`, which currently inherits
 `configs/submit.yml`. To try another experiment without editing files:
 
@@ -308,6 +330,13 @@ Dry-run the packaging step without pushing or submitting:
 
 ```bash
 make submit-kaggle-dry
+```
+
+Monitor the submit kernel:
+
+```bash
+make status-submit
+make logs-submit
 ```
 
 Prepare only the Kaggle kernel workspace:

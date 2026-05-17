@@ -15,6 +15,12 @@ KERNEL_DIR ?= artifacts/kaggle_kernel
 KERNEL_OUTPUT_DIR ?= artifacts/kaggle_output
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KAGGLE_ARTIFACT_DIR ?= artifacts/submit
+KAGGLE_TRAIN_CONFIG ?= configs/hgb.yml
+KAGGLE_TRAIN_KERNEL ?= rogii-hgb-train
+KAGGLE_TRAIN_TITLE ?= ROGII HGB Train
+KAGGLE_TRAIN_KERNEL_DIR ?= artifacts/kaggle_train_kernel
+KAGGLE_TRAIN_OUTPUT_DIR ?= artifacts/kaggle_train_output
+KAGGLE_TRAIN_ARTIFACT_DIR ?= artifacts/kaggle_train
 KERNEL_TIMEOUT ?= 32400
 KERNEL_WAIT_TIMEOUT ?= 36000
 KERNEL_POLL_INTERVAL ?= 60
@@ -34,7 +40,7 @@ DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry submit-version
+.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit train-kaggle train-kaggle-dry status-kaggle-train logs-kaggle-train mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry status-submit logs-submit submit-version
 
 install-deps:
 	$(UV) sync
@@ -60,6 +66,18 @@ quick-train:
 train-submit: ensure-data
 	$(UV) run python -m rogii --config $(SUBMIT_CONFIG)
 
+train-kaggle:
+	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KAGGLE_TRAIN_KERNEL) --title "$(KAGGLE_TRAIN_TITLE)" --config $(KAGGLE_TRAIN_CONFIG) --kernel-dir $(KAGGLE_TRAIN_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_TRAIN_ARTIFACT_DIR) --output-dir $(KAGGLE_TRAIN_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output
+
+train-kaggle-dry:
+	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KAGGLE_TRAIN_KERNEL) --title "$(KAGGLE_TRAIN_TITLE)" --config $(KAGGLE_TRAIN_CONFIG) --kernel-dir $(KAGGLE_TRAIN_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_TRAIN_ARTIFACT_DIR) --output-dir $(KAGGLE_TRAIN_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output --dry-run
+
+status-kaggle-train:
+	$(KAGGLE) kernels status $(KAGGLE_USER)/$(KAGGLE_TRAIN_KERNEL)
+
+logs-kaggle-train:
+	$(KAGGLE) kernels logs $(KAGGLE_USER)/$(KAGGLE_TRAIN_KERNEL)
+
 mine-code:
 	$(PYTHON) $(CODE_MINER) --competition $(COMPETITION) --db $(MINE_DB) --work-dir $(MINE_WORK_DIR) --pull-limit $(CODE_PULL_LIMIT) --kaggle-cmd "$(KAGGLE)"
 
@@ -84,6 +102,12 @@ submit-kaggle:
 
 submit-kaggle-dry:
 	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KERNEL) --title "$(KERNEL_TITLE)" --config $(BEST_CONFIG) --kernel-dir $(KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_ARTIFACT_DIR) --output-dir $(KERNEL_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --dry-run
+
+status-submit:
+	$(KAGGLE) kernels status $(KAGGLE_USER)/$(KERNEL)
+
+logs-submit:
+	$(KAGGLE) kernels logs $(KAGGLE_USER)/$(KERNEL)
 
 submit-version:
 	@test -n "$(NOTEBOOK)" || (echo "Usage: make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)
