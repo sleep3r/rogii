@@ -56,10 +56,11 @@ added to the main path only when they improve validation or leaderboard.
 
 - Main commands are now:
   - `make train-local` for local training;
-  - `make train-kaggle` for Kaggle training without competition submit;
+  - `make train-kaggle` for push-only Kaggle training;
   - `make submit` for inference-only Kaggle run without competition submit.
 - Removed old submit aliases from the primary workflow; Kaggle UI remains the
   place to press the final submit button.
+- Training prints the resolved YAML config before building features.
 
 ### EXP-20260517-1 - Initial HGB Baseline
 

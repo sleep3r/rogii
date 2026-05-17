@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .config import load_config
 from .features import build_training_table
 from .io import (
@@ -22,6 +24,16 @@ from .modeling import (
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .submission import predict_test, save_outputs
+
+
+def print_config(config: dict[str, Any], logger: RunLogger) -> None:
+    logger.log("CONFIG", "Resolved training config")
+    print("=" * 88, flush=True)
+    print(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=False).rstrip(),
+        flush=True,
+    )
+    print("=" * 88, flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +71,7 @@ def main() -> None:
         config["outputs"]["output_dir"] = str(args.output_dir)
     if args.submission is not None:
         config["outputs"]["submission_path"] = str(args.submission)
+    print_config(config, logger)
     seed = int(config.get("seed", 42))
     data_dir = resolve_data_dir(config)
     train_dir = resolve_train_dir(data_dir, config)

@@ -93,9 +93,9 @@ Remote Kaggle training without competition submit:
 make train-kaggle MESSAGE="baseline remote train"
 ```
 
-This pushes and runs a Kaggle script, downloads all output, and does not call
-the competition submit API. You can submit the produced notebook version from
-the Kaggle UI.
+This pushes a Kaggle script version and returns immediately. It does not wait
+for training, download output, or call the competition submit API. Watch it in
+the Kaggle UI and submit the produced notebook version there when it finishes.
 
 Inference-only Kaggle run from a local artifact:
 

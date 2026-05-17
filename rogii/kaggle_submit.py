@@ -651,6 +651,12 @@ def run_end_to_end(args: argparse.Namespace) -> None:
     if api is None:
         api = make_api()
     version = push_kernel(api, args)
+    if args.push_only:
+        ref = kernel_ref(args.user, args.kernel)
+        log(
+            f"Push-only mode complete: {ref} version {version} was submitted to Kaggle."
+        )
+        return
     wait_for_kernel(api, args)
     submission_path = download_output(api, args)
     validate_submission(submission_path)
@@ -709,6 +715,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--accelerator", default="")
     run.add_argument("--message", default="Submission")
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--push-only", action="store_true")
     run.add_argument("--skip-competition-submit", action="store_true")
     run.add_argument("--download-all-output", action="store_true")
 
