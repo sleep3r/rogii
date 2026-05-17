@@ -40,7 +40,7 @@ DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit train-kaggle train-kaggle-dry status-kaggle-train logs-kaggle-train mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry status-submit logs-submit submit-version
+.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit train-kaggle train-kaggle-dry status-kaggle-train logs-kaggle-train mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry status-submit logs-submit submit-version format check
 
 install-deps:
 	$(UV) sync
@@ -113,3 +113,11 @@ submit-version:
 	@test -n "$(NOTEBOOK)" || (echo "Usage: make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)
 	@test -n "$(VERSION)" || (echo "Usage: make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)
 	$(KAGGLE) competitions submit -c $(COMPETITION) -f $(SUBMISSION) -k $(KAGGLE_USER)/$(NOTEBOOK) -v $(VERSION) -m "$(MESSAGE)"
+
+format:
+	$(PYTHON) -m ruff check --fix --select I .
+	$(PYTHON) -m ruff check --fix .
+	$(PYTHON) -m ruff format .
+
+check:
+	$(PYTHON) -m ruff check .

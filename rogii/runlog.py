@@ -5,6 +5,7 @@ from datetime import datetime
 from time import perf_counter
 from typing import Any
 
+
 def format_duration(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     if seconds < 60.0:
@@ -36,9 +37,14 @@ class RunLogger:
         suffix = ""
         if fields:
             suffix = " | " + " ".join(
-                f"{key}={format_log_value(value)}" for key, value in fields.items() if value is not None
+                f"{key}={format_log_value(value)}"
+                for key, value in fields.items()
+                if value is not None
             )
-        print(f"{timestamp} | +{self.elapsed()} | {status:<6} | {message}{suffix}", flush=True)
+        print(
+            f"{timestamp} | +{self.elapsed()} | {status:<6} | {message}{suffix}",
+            flush=True,
+        )
 
     def info(self, message: str, **fields: Any) -> None:
         self.log("INFO", message, **fields)
@@ -56,7 +62,13 @@ class RunLogger:
         try:
             yield
         except Exception as exc:
-            self.log("FAIL", message, duration=format_duration(perf_counter() - step_started_at), error=exc)
+            self.log(
+                "FAIL",
+                message,
+                duration=format_duration(perf_counter() - step_started_at),
+                error=exc,
+            )
             raise
-        self.log("OK", message, duration=format_duration(perf_counter() - step_started_at))
-
+        self.log(
+            "OK", message, duration=format_duration(perf_counter() - step_started_at)
+        )

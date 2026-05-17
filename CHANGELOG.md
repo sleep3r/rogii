@@ -198,6 +198,18 @@ ensembles on residuals, and careful validation by wells.
   - `make train-kaggle` is for remote experiment/validation artifacts;
   - `make submit` is for the final code competition submission path.
 
+### Formatting Toolchain
+
+- Fixed `make format` so it no longer calls global `black`/`isort` binaries.
+- Added `ruff` as a project dev dependency in `pyproject.toml` and `uv.lock`.
+- `make format` now runs project-local `python -m ruff` for import fixes,
+  lint fixes, and formatting.
+- Added `make check` for project-local lint checks.
+- Cleaned two lint issues found by Ruff:
+  - removed unused `anchor_idx` in `rogii/features.py`;
+  - reused shared numeric alignment helpers in `rogii/top_signals.py` instead
+    of redefining `fill_numeric`.
+
 ### Current Direction
 
 - Do not over-index on train RMSE; the important local number is grouped CV by

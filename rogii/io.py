@@ -5,6 +5,7 @@ from typing import Any
 
 from .constants import KAGGLE_INPUT_DIR
 
+
 def path_or_none(value: Any) -> Path | None:
     if value in (None, ""):
         return None
@@ -46,7 +47,11 @@ def resolve_test_dir(data_dir: Path, config: dict[str, Any]) -> Path:
     configured = path_or_none(config["data"].get("test_dir"))
     candidates = [configured, data_dir / "test"]
     for path in candidates:
-        if path is not None and path.exists() and list(path.glob("*__horizontal_well.csv")):
+        if (
+            path is not None
+            and path.exists()
+            and list(path.glob("*__horizontal_well.csv"))
+        ):
             return path
     raise FileNotFoundError(
         f"No test horizontal well files found under {data_dir}. Run `make unzip-data` first, "
@@ -54,7 +59,9 @@ def resolve_test_dir(data_dir: Path, config: dict[str, Any]) -> Path:
     )
 
 
-def resolve_sample_submission(data_dir: Path, test_dir: Path, config: dict[str, Any]) -> Path | None:
+def resolve_sample_submission(
+    data_dir: Path, test_dir: Path, config: dict[str, Any]
+) -> Path | None:
     configured = path_or_none(config["data"].get("sample_submission"))
     candidates = [
         configured,

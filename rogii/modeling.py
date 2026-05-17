@@ -9,9 +9,12 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 from .runlog import RunLogger
 
+
 def make_model(config: dict[str, Any], seed: int) -> HistGradientBoostingRegressor:
     if config["model"].get("name") != "hist_gradient_boosting":
-        raise ValueError("Only model.name=hist_gradient_boosting is currently supported.")
+        raise ValueError(
+            "Only model.name=hist_gradient_boosting is currently supported."
+        )
     params = dict(config["model"].get("params", {}))
     params["random_state"] = seed
     return HistGradientBoostingRegressor(**params)
@@ -21,7 +24,9 @@ def rmse(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     return float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
 
 
-def shuffled_group_folds(groups: np.ndarray, n_splits: int, seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
+def shuffled_group_folds(
+    groups: np.ndarray, n_splits: int, seed: int
+) -> list[tuple[np.ndarray, np.ndarray]]:
     unique_groups = np.array(sorted(set(groups)))
     rng = np.random.default_rng(seed)
     rng.shuffle(unique_groups)
@@ -65,7 +70,13 @@ def tune_residual_weight(
         pred = apply_postprocess(flat, residual_pred, config, residual_weight=weight)
         return weight, [{"weight": weight, "rmse": rmse(pred, y_true)}]
 
-    grid = config["postprocess"].get("residual_weight_grid") or [0.0, 0.25, 0.5, 0.75, 1.0]
+    grid = config["postprocess"].get("residual_weight_grid") or [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+    ]
     scores: list[dict[str, float]] = []
     for weight in grid:
         weight = float(weight)
@@ -113,7 +124,9 @@ def run_cv(
     fold_metrics: list[dict[str, Any]] = []
 
     if logger is not None:
-        logger.info("Prepared CV", rows=len(X_cv), wells=len(unique_cv_groups), folds=len(folds))
+        logger.info(
+            "Prepared CV", rows=len(X_cv), wells=len(unique_cv_groups), folds=len(folds)
+        )
 
     for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
         if logger is not None:
@@ -132,9 +145,16 @@ def run_cv(
         fold_ids[valid_idx] = fold_id
 
     if logger is not None:
-        logger.info("Tuning residual blend", candidates=len(config["postprocess"].get("residual_weight_grid") or []))
-    best_weight, weight_scores = tune_residual_weight(flat_cv, oof_residual, y_true_cv, config)
-    oof_pred = apply_postprocess(flat_cv, oof_residual, config, residual_weight=best_weight)
+        logger.info(
+            "Tuning residual blend",
+            candidates=len(config["postprocess"].get("residual_weight_grid") or []),
+        )
+    best_weight, weight_scores = tune_residual_weight(
+        flat_cv, oof_residual, y_true_cv, config
+    )
+    oof_pred = apply_postprocess(
+        flat_cv, oof_residual, config, residual_weight=best_weight
+    )
     for fold_id in range(1, len(folds) + 1):
         valid_idx = fold_ids == fold_id
         fold_rmse = rmse(oof_pred[valid_idx], y_true_cv[valid_idx])
@@ -147,12 +167,19 @@ def run_cv(
             }
         )
         if logger is not None:
-            logger.metric("CV fold RMSE", fold=fold_id, weight=f"{best_weight:g}", rmse=fold_rmse)
+            logger.metric(
+                "CV fold RMSE", fold=fold_id, weight=f"{best_weight:g}", rmse=fold_rmse
+            )
 
     overall_rmse = rmse(oof_pred, y_true_cv)
     flat_rmse = rmse(flat_cv, y_true_cv)
     if logger is not None:
-        logger.metric("CV summary", rmse=overall_rmse, flat_rmse=flat_rmse, best_residual_weight=f"{best_weight:g}")
+        logger.metric(
+            "CV summary",
+            rmse=overall_rmse,
+            flat_rmse=flat_rmse,
+            best_residual_weight=f"{best_weight:g}",
+        )
     return {
         "enabled": True,
         "rmse": overall_rmse,
@@ -163,4 +190,3 @@ def run_cv(
         "wells": int(len(unique_cv_groups)),
         "folds": fold_metrics,
     }
-

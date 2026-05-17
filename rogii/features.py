@@ -9,10 +9,18 @@ import pandas as pd
 
 from .constants import FORMATION_ORDER
 from .io import typewell_path, well_name
-from .numeric import as_float_array, centered_rolling, flat_tvt_prediction, safe_gradient, tail_slope, tail_stat
+from .numeric import (
+    as_float_array,
+    centered_rolling,
+    flat_tvt_prediction,
+    safe_gradient,
+    tail_slope,
+    tail_stat,
+)
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
+
 
 @dataclass(frozen=True)
 class WellFeatures:
@@ -22,7 +30,10 @@ class WellFeatures:
     target: np.ndarray | None
     target_mask: np.ndarray
 
-def read_typewell_features(path: Path | None, horizontal_gr: np.ndarray, flat_pred: np.ndarray) -> dict[str, np.ndarray | float]:
+
+def read_typewell_features(
+    path: Path | None, horizontal_gr: np.ndarray, flat_pred: np.ndarray
+) -> dict[str, np.ndarray | float]:
     n = len(horizontal_gr)
     if path is None:
         return {
@@ -50,7 +61,9 @@ def read_typewell_features(path: Path | None, horizontal_gr: np.ndarray, flat_pr
     if geology is None:
         geology_codes = np.full(len(typewell), -1.0, dtype=float)
     else:
-        geology_codes = geology.astype(str).map(FORMATION_ORDER).fillna(-1).to_numpy(dtype=float)
+        geology_codes = (
+            geology.astype(str).map(FORMATION_ORDER).fillna(-1).to_numpy(dtype=float)
+        )
     geology_valid = geology_codes[valid]
 
     order = np.argsort(gr_valid)
@@ -61,7 +74,9 @@ def read_typewell_features(path: Path | None, horizontal_gr: np.ndarray, flat_pr
     positions = np.searchsorted(gr_sorted, horizontal_gr, side="left")
     left = np.clip(positions - 1, 0, len(gr_sorted) - 1)
     right = np.clip(positions, 0, len(gr_sorted) - 1)
-    choose_right = np.abs(gr_sorted[right] - horizontal_gr) < np.abs(gr_sorted[left] - horizontal_gr)
+    choose_right = np.abs(gr_sorted[right] - horizontal_gr) < np.abs(
+        gr_sorted[left] - horizontal_gr
+    )
     nearest = np.where(choose_right, right, left)
     nearest_tvt = tvt_sorted[nearest]
     nearest_gr = gr_sorted[nearest]
@@ -81,7 +96,10 @@ def read_typewell_features(path: Path | None, horizontal_gr: np.ndarray, flat_pr
 
 
 def build_target_mask(df: pd.DataFrame, target_rows: str) -> np.ndarray:
-    has_target = "TVT" in df.columns and pd.to_numeric(df["TVT"], errors="coerce").notna().to_numpy()
+    has_target = (
+        "TVT" in df.columns
+        and pd.to_numeric(df["TVT"], errors="coerce").notna().to_numpy()
+    )
     if target_rows == "all":
         return has_target
     if target_rows != "hidden_only":
@@ -106,7 +124,9 @@ def build_well_features(
     y = as_float_array(df.get("Y", pd.Series(np.zeros(n))))
     z = as_float_array(df.get("Z", pd.Series(np.zeros(n))))
     gr = as_float_array(df.get("GR", pd.Series(np.zeros(n))), default=np.nan)
-    tvt_input = as_float_array(df.get("TVT_input", pd.Series(np.full(n, np.nan))), default=np.nan)
+    tvt_input = as_float_array(
+        df.get("TVT_input", pd.Series(np.full(n, np.nan))), default=np.nan
+    )
 
     tail_windows = [int(item) for item in config["features"]["tail_windows"]]
     rolling_windows = [int(item) for item in config["features"]["rolling_windows"]]
@@ -117,20 +137,34 @@ def build_well_features(
     if len(known_idx):
         first_known = int(known_idx[0])
         last_known = int(known_idx[-1])
-        anchor_idx = np.full(n, last_known, dtype=float)
-        anchor_tvt = np.full(n, float(np.nanmedian(tvt_input[known_idx[-max(tail_windows):]])), dtype=float)
+        anchor_tvt = np.full(
+            n,
+            float(np.nanmedian(tvt_input[known_idx[-max(tail_windows) :]])),
+            dtype=float,
+        )
         first_tvt = float(tvt_input[first_known])
         last_tvt = float(tvt_input[last_known])
     else:
         first_known = 0
         last_known = 0
-        anchor_idx = np.zeros(n, dtype=float)
         anchor_tvt = np.zeros(n, dtype=float)
         first_tvt = 0.0
         last_tvt = 0.0
 
-    prev_known_idx = pd.Series(np.where(known, idx, np.nan)).ffill().bfill().fillna(0.0).to_numpy(dtype=float)
-    prev_known_tvt = pd.Series(tvt_input).ffill().bfill().fillna(float(np.nanmedian(flat_pred))).to_numpy(dtype=float)
+    prev_known_idx = (
+        pd.Series(np.where(known, idx, np.nan))
+        .ffill()
+        .bfill()
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+    prev_known_tvt = (
+        pd.Series(tvt_input)
+        .ffill()
+        .bfill()
+        .fillna(float(np.nanmedian(flat_pred)))
+        .to_numpy(dtype=float)
+    )
     prev_known_md = np.interp(prev_known_idx, idx, md)
     prev_known_z = np.interp(prev_known_idx, idx, z)
 
@@ -158,7 +192,9 @@ def build_well_features(
         "z_from_last_known": z - z[last_known],
         "x_from_last_known": x - x[last_known],
         "y_from_last_known": y - y[last_known],
-        "xy_dist_from_last_known": np.sqrt((x - x[last_known]) ** 2 + (y - y[last_known]) ** 2),
+        "xy_dist_from_last_known": np.sqrt(
+            (x - x[last_known]) ** 2 + (y - y[last_known]) ** 2
+        ),
         "prev_known_tvt": prev_known_tvt,
         "idx_from_prev_known": idx - prev_known_idx,
         "md_from_prev_known": md - prev_known_md,
@@ -171,13 +207,25 @@ def build_well_features(
     }
 
     for window in tail_windows:
-        features[f"tail_tvt_median_{window}"] = tail_stat(tvt_input, known, window, "median")
-        features[f"tail_tvt_mean_{window}"] = tail_stat(tvt_input, known, window, "mean")
+        features[f"tail_tvt_median_{window}"] = tail_stat(
+            tvt_input, known, window, "median"
+        )
+        features[f"tail_tvt_mean_{window}"] = tail_stat(
+            tvt_input, known, window, "mean"
+        )
         features[f"tail_tvt_std_{window}"] = tail_stat(tvt_input, known, window, "std")
-        features[f"tail_tvt_slope_md_{window}"] = tail_slope(md, tvt_input, known, window)
-        features[f"tail_z_slope_md_{window}"] = tail_slope(md, z, np.isfinite(md) & np.isfinite(z), window)
-        features[f"tail_gr_mean_{window}"] = tail_stat(gr, np.isfinite(gr), window, "mean")
-        features[f"tail_gr_std_{window}"] = tail_stat(gr, np.isfinite(gr), window, "std")
+        features[f"tail_tvt_slope_md_{window}"] = tail_slope(
+            md, tvt_input, known, window
+        )
+        features[f"tail_z_slope_md_{window}"] = tail_slope(
+            md, z, np.isfinite(md) & np.isfinite(z), window
+        )
+        features[f"tail_gr_mean_{window}"] = tail_stat(
+            gr, np.isfinite(gr), window, "mean"
+        )
+        features[f"tail_gr_std_{window}"] = tail_stat(
+            gr, np.isfinite(gr), window, "std"
+        )
 
     for window in rolling_windows:
         gr_mean = centered_rolling(gr, window, "mean")
@@ -188,10 +236,14 @@ def build_well_features(
         features[f"gr_roll_max_{window}"] = centered_rolling(gr, window, "max")
         features[f"gr_minus_roll_mean_{window}"] = gr - gr_mean
         features[f"z_roll_mean_{window}"] = centered_rolling(z, window, "mean")
-        features[f"z_minus_roll_mean_{window}"] = z - centered_rolling(z, window, "mean")
+        features[f"z_minus_roll_mean_{window}"] = z - centered_rolling(
+            z, window, "mean"
+        )
 
     if config["features"].get("include_typewell", True):
-        features.update(read_typewell_features(typewell_path(horizontal_path), gr, flat_pred))
+        features.update(
+            read_typewell_features(typewell_path(horizontal_path), gr, flat_pred)
+        )
 
     if config["features"].get("include_kaggle_top_signals", False):
         features.update(
@@ -212,9 +264,23 @@ def build_well_features(
         )
 
     feature_frame = pd.DataFrame(features).replace([np.inf, -np.inf], np.nan)
-    target_mask = build_target_mask(df, config["data"].get("target_rows", "hidden_only")) if train else np.zeros(n, dtype=bool)
-    target = as_float_array(df["TVT"], default=np.nan) if train and "TVT" in df.columns else None
-    return WellFeatures(well=well, features=feature_frame, flat_prediction=flat_pred, target=target, target_mask=target_mask)
+    target_mask = (
+        build_target_mask(df, config["data"].get("target_rows", "hidden_only"))
+        if train
+        else np.zeros(n, dtype=bool)
+    )
+    target = (
+        as_float_array(df["TVT"], default=np.nan)
+        if train and "TVT" in df.columns
+        else None
+    )
+    return WellFeatures(
+        well=well,
+        features=feature_frame,
+        flat_prediction=flat_pred,
+        target=target,
+        target_mask=target_mask,
+    )
 
 
 def build_training_table(
@@ -245,10 +311,14 @@ def build_training_table(
         loaded_rows += int(mask.sum())
         if i % 100 == 0 or i == len(paths):
             if logger is not None:
-                logger.info("Loaded train wells", current=i, total=len(paths), rows=loaded_rows)
+                logger.info(
+                    "Loaded train wells", current=i, total=len(paths), rows=loaded_rows
+                )
 
     if not feature_parts:
-        raise ValueError("No training rows were built. Check data.target_rows and train files.")
+        raise ValueError(
+            "No training rows were built. Check data.target_rows and train files."
+        )
 
     X = pd.concat(feature_parts, axis=0, ignore_index=True)
     residual = np.concatenate(residual_parts)

@@ -3,7 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-def as_float_array(series: pd.Series | np.ndarray, default: float = np.nan) -> np.ndarray:
+
+def as_float_array(
+    series: pd.Series | np.ndarray, default: float = np.nan
+) -> np.ndarray:
     values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
     if default == default:
         values[~np.isfinite(values)] = default
@@ -37,7 +40,9 @@ def safe_gradient(y: np.ndarray, x: np.ndarray) -> np.ndarray:
     return grad
 
 
-def tail_stat(values: np.ndarray, known: np.ndarray, window: int, statistic: str) -> float:
+def tail_stat(
+    values: np.ndarray, known: np.ndarray, window: int, statistic: str
+) -> float:
     tail = values[known][-window:]
     if len(tail) == 0:
         return 0.0
@@ -76,7 +81,9 @@ def collapse_duplicate_x(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.n
     return unique_x, y_mean
 
 
-def flat_tvt_prediction(md: np.ndarray, tvt_input: np.ndarray, tail_window: int) -> np.ndarray:
+def flat_tvt_prediction(
+    md: np.ndarray, tvt_input: np.ndarray, tail_window: int
+) -> np.ndarray:
     known = np.isfinite(md) & np.isfinite(tvt_input)
     if known.sum() == 0:
         return np.zeros(len(md), dtype=float)
@@ -94,19 +101,27 @@ def flat_tvt_prediction(md: np.ndarray, tvt_input: np.ndarray, tail_window: int)
 
 def fill_numeric(values: np.ndarray, fallback: float) -> np.ndarray:
     series = pd.Series(values, dtype=float)
-    return series.interpolate(limit_direction="both").fillna(fallback).to_numpy(dtype=float)
+    return (
+        series.interpolate(limit_direction="both")
+        .fillna(fallback)
+        .to_numpy(dtype=float)
+    )
 
 
 def nearest_index(sorted_values: np.ndarray, value: float) -> int:
     pos = int(np.searchsorted(sorted_values, value, side="left"))
     if pos >= len(sorted_values):
         return len(sorted_values) - 1
-    if pos > 0 and abs(sorted_values[pos - 1] - value) <= abs(sorted_values[pos] - value):
+    if pos > 0 and abs(sorted_values[pos - 1] - value) <= abs(
+        sorted_values[pos] - value
+    ):
         return pos - 1
     return pos
 
 
-def smooth_for_alignment(values: np.ndarray, radius: int, fallback: float) -> np.ndarray:
+def smooth_for_alignment(
+    values: np.ndarray, radius: int, fallback: float
+) -> np.ndarray:
     filled = fill_numeric(values, fallback)
     if radius <= 0:
         return filled

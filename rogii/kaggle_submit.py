@@ -17,7 +17,6 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 
 from .kaggle_package import DEFAULT_INCLUDE, iter_package_files
 
-
 DEFAULT_COMPETITION = "rogii-wellbore-geology-prediction"
 DEFAULT_KERNEL = "rogii-hgb-submit"
 DEFAULT_TITLE = "ROGII HGB Submit"
@@ -349,7 +348,9 @@ def validate_submission(path: Path) -> None:
     frame = pd.read_csv(path)
     expected_columns = ["id", "tvt"]
     if list(frame.columns) != expected_columns:
-        raise ValueError(f"Expected columns {expected_columns}, got {list(frame.columns)}")
+        raise ValueError(
+            f"Expected columns {expected_columns}, got {list(frame.columns)}"
+        )
     if frame.empty:
         raise ValueError("submission.csv is empty")
     if frame["id"].isna().any():
@@ -403,20 +404,30 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--submission-file", default=DEFAULT_SUBMISSION)
-    parser.add_argument("--private", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--internet", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--private", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--internet", action=argparse.BooleanOptionalAction, default=False
+    )
     parser.add_argument("--gpu", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--tpu", action=argparse.BooleanOptionalAction, default=False)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare, run, and submit a Kaggle code competition kernel.")
+    parser = argparse.ArgumentParser(
+        description="Prepare, run, and submit a Kaggle code competition kernel."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    prepare = subparsers.add_parser("prepare", help="Build the self-contained Kaggle kernel workspace.")
+    prepare = subparsers.add_parser(
+        "prepare", help="Build the self-contained Kaggle kernel workspace."
+    )
     add_common_args(prepare)
 
-    run = subparsers.add_parser("run", help="Push kernel, wait for output, validate, and submit.")
+    run = subparsers.add_parser(
+        "run", help="Push kernel, wait for output, validate, and submit."
+    )
     add_common_args(run)
     run.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     run.add_argument("--kernel-timeout", type=int, default=9 * 60 * 60)

@@ -8,33 +8,8 @@ import pandas as pd
 
 from .constants import FORMATIONS
 from .io import typewell_path, well_name
-from .numeric import as_float_array, fill_numeric
+from .numeric import as_float_array, fill_numeric, nearest_index, smooth_for_alignment
 from .spatial import KaggleTopContext
-
-def fill_numeric(values: np.ndarray, fallback: float) -> np.ndarray:
-    series = pd.Series(values, dtype=float)
-    return series.interpolate(limit_direction="both").fillna(fallback).to_numpy(dtype=float)
-
-
-def nearest_index(sorted_values: np.ndarray, value: float) -> int:
-    pos = int(np.searchsorted(sorted_values, value, side="left"))
-    if pos >= len(sorted_values):
-        return len(sorted_values) - 1
-    if pos > 0 and abs(sorted_values[pos - 1] - value) <= abs(sorted_values[pos] - value):
-        return pos - 1
-    return pos
-
-
-def smooth_for_alignment(values: np.ndarray, radius: int, fallback: float) -> np.ndarray:
-    filled = fill_numeric(values, fallback)
-    if radius <= 0:
-        return filled
-    return (
-        pd.Series(filled)
-        .rolling(radius * 2 + 1, center=True, min_periods=1)
-        .mean()
-        .to_numpy(dtype=float)
-    )
 
 
 def greedy_beam_signal(
@@ -49,7 +24,9 @@ def greedy_beam_signal(
     """Fast deterministic proxy for the public top-solution beam-search signal."""
     if len(gr_query) == 0:
         return np.array([], dtype=float)
-    smoothed_gr = smooth_for_alignment(gr_query, smooth_radius, float(np.nanmean(tw_gr)))
+    smoothed_gr = smooth_for_alignment(
+        gr_query, smooth_radius, float(np.nanmean(tw_gr))
+    )
     idx = nearest_index(tw_tvt, start_tvt)
     path = np.empty(len(smoothed_gr), dtype=int)
     for i, gr_value in enumerate(smoothed_gr):
@@ -77,11 +54,17 @@ def multi_scale_ncc(
     for half_window in windows:
         win = 2 * int(half_window) + 1
         if len(known_filled) < win + 1:
-            result[f"ncc_{half_window}_tvt"] = np.full(len(query_filled), known_tvt[-1], dtype=float)
-            result[f"ncc_{half_window}_score"] = np.zeros(len(query_filled), dtype=float)
+            result[f"ncc_{half_window}_tvt"] = np.full(
+                len(query_filled), known_tvt[-1], dtype=float
+            )
+            result[f"ncc_{half_window}_score"] = np.zeros(
+                len(query_filled), dtype=float
+            )
             continue
 
-        starts = np.arange(0, len(known_filled) - win + 1, max(int(stride), 1), dtype=int)
+        starts = np.arange(
+            0, len(known_filled) - win + 1, max(int(stride), 1), dtype=int
+        )
         window_offsets = np.arange(win, dtype=int)
         known_windows = known_filled[starts[:, None] + window_offsets[None, :]]
         known_norm = (known_windows - known_windows.mean(axis=1, keepdims=True)) / (
@@ -89,7 +72,9 @@ def multi_scale_ncc(
         )
 
         padded_query = np.pad(query_filled, half_window, mode="edge")
-        query_windows = padded_query[np.arange(len(query_filled))[:, None] + window_offsets[None, :]]
+        query_windows = padded_query[
+            np.arange(len(query_filled))[:, None] + window_offsets[None, :]
+        ]
         query_norm = (query_windows - query_windows.mean(axis=1, keepdims=True)) / (
             query_windows.std(axis=1, keepdims=True) + 1e-6
         )
@@ -173,6 +158,7 @@ def lowres_dtw_signal(
             j -= 1
     coarse_tvt = tw_tvt[r_idx[j_for_i]]
     return np.interp(np.arange(len(full_gr)), q_idx, coarse_tvt).astype(float)
+
 
 def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
     keys = [
@@ -261,14 +247,18 @@ def build_kaggle_top_signal_features(
         )
         beam_signals.append(signal)
         features[f"kg_beam_{tag}_minus_flat"] = np.zeros(n, dtype=float)
-        features[f"kg_beam_{tag}_minus_flat"][hidden_idx] = signal - flat_pred[hidden_idx]
+        features[f"kg_beam_{tag}_minus_flat"][hidden_idx] = (
+            signal - flat_pred[hidden_idx]
+        )
         features[f"kg_beam_{tag}_minus_last"] = np.zeros(n, dtype=float)
         features[f"kg_beam_{tag}_minus_last"][hidden_idx] = signal - last_tvt
 
     if beam_signals:
         beam_matrix = np.vstack(beam_signals).T
         beam_mean = np.nanmean(beam_matrix, axis=1)
-        features["kg_beam_mean_minus_flat"][hidden_idx] = beam_mean - flat_pred[hidden_idx]
+        features["kg_beam_mean_minus_flat"][hidden_idx] = (
+            beam_mean - flat_pred[hidden_idx]
+        )
         features["kg_beam_std"][hidden_idx] = np.nanstd(beam_matrix, axis=1)
     else:
         beam_mean = flat_pred[hidden_idx]
@@ -294,9 +284,13 @@ def build_kaggle_top_signal_features(
             ncc_scores.append(value)
     if ncc_signals:
         ncc_matrix = np.vstack(ncc_signals).T
-        features["kg_ncc_mean_minus_flat"][hidden_idx] = np.nanmean(ncc_matrix, axis=1) - flat_pred[hidden_idx]
+        features["kg_ncc_mean_minus_flat"][hidden_idx] = (
+            np.nanmean(ncc_matrix, axis=1) - flat_pred[hidden_idx]
+        )
     if ncc_scores:
-        features["kg_ncc_score_mean"][hidden_idx] = np.nanmean(np.vstack(ncc_scores).T, axis=1)
+        features["kg_ncc_score_mean"][hidden_idx] = np.nanmean(
+            np.vstack(ncc_scores).T, axis=1
+        )
 
     if top_cfg.get("dtw_enabled", True):
         dtw_signal = lowres_dtw_signal(
@@ -307,7 +301,9 @@ def build_kaggle_top_signal_features(
             int(top_cfg.get("dtw_max_ref_points", 700)),
             int(top_cfg.get("dtw_radius", 35)),
         )
-        features["kg_dtw_minus_flat"][hidden_idx] = dtw_signal[hidden_idx] - flat_pred[hidden_idx]
+        features["kg_dtw_minus_flat"][hidden_idx] = (
+            dtw_signal[hidden_idx] - flat_pred[hidden_idx]
+        )
         features["kg_dtw_vs_beam"][hidden_idx] = dtw_signal[hidden_idx] - beam_mean
         signal_stack = [beam_mean, dtw_signal[hidden_idx]]
     else:
@@ -322,7 +318,11 @@ def build_kaggle_top_signal_features(
             form_signals = []
             for formation_idx, formation in enumerate(FORMATIONS):
                 residual_base = known_tvt + z[known_idx] - form_known[:, formation_idx]
-                b = float(np.nanmedian(residual_base)) if np.isfinite(residual_base).any() else 0.0
+                b = (
+                    float(np.nanmedian(residual_base))
+                    if np.isfinite(residual_base).any()
+                    else 0.0
+                )
                 signal = -z[hidden_idx] + form_hidden[:, formation_idx] + b
                 form_signals.append(signal)
                 col = f"kg_form_{formation}_minus_flat"
@@ -330,28 +330,44 @@ def build_kaggle_top_signal_features(
                 features[col][hidden_idx] = signal - flat_pred[hidden_idx]
             form_matrix = np.vstack(form_signals).T
             form_mean = np.nanmean(form_matrix, axis=1)
-            features["kg_form_ancc_minus_flat"][hidden_idx] = form_matrix[:, 0] - flat_pred[hidden_idx]
-            features["kg_form_mean_minus_flat"][hidden_idx] = form_mean - flat_pred[hidden_idx]
+            features["kg_form_ancc_minus_flat"][hidden_idx] = (
+                form_matrix[:, 0] - flat_pred[hidden_idx]
+            )
+            features["kg_form_mean_minus_flat"][hidden_idx] = (
+                form_mean - flat_pred[hidden_idx]
+            )
             features["kg_form_std"][hidden_idx] = np.nanstd(form_matrix, axis=1)
-            features["kg_form_range"][hidden_idx] = np.nanmax(form_matrix, axis=1) - np.nanmin(form_matrix, axis=1)
+            features["kg_form_range"][hidden_idx] = np.nanmax(
+                form_matrix, axis=1
+            ) - np.nanmin(form_matrix, axis=1)
             features["kg_form_knn_dist"][hidden_idx] = form_dist
             signal_stack.append(form_mean)
         else:
             form_mean = flat_pred[hidden_idx]
 
-        dense_ancc, dense_std, dense_dist = context.impute_dense_ancc(xy_hidden, self_well)
+        dense_ancc, dense_std, dense_dist = context.impute_dense_ancc(
+            xy_hidden, self_well
+        )
         dense_known, _, _ = context.impute_dense_ancc(xy_known, self_well)
         dense_residual = known_tvt + z[known_idx] - dense_known
-        dense_b = float(np.nanmedian(dense_residual)) if np.isfinite(dense_residual).any() else 0.0
+        dense_b = (
+            float(np.nanmedian(dense_residual))
+            if np.isfinite(dense_residual).any()
+            else 0.0
+        )
         dense_signal = -z[hidden_idx] + dense_ancc + dense_b
-        features["kg_dense_ancc_minus_flat"][hidden_idx] = dense_signal - flat_pred[hidden_idx]
+        features["kg_dense_ancc_minus_flat"][hidden_idx] = (
+            dense_signal - flat_pred[hidden_idx]
+        )
         features["kg_dense_ancc_std"][hidden_idx] = dense_std
         features["kg_dense_ancc_dist"][hidden_idx] = dense_dist
         features["kg_dense_vs_form"][hidden_idx] = dense_signal - form_mean
         signal_stack.append(dense_signal)
 
     signal_matrix = np.vstack(signal_stack).T
-    features["kg_signal_mean_minus_flat"][hidden_idx] = np.nanmean(signal_matrix, axis=1) - flat_pred[hidden_idx]
+    features["kg_signal_mean_minus_flat"][hidden_idx] = (
+        np.nanmean(signal_matrix, axis=1) - flat_pred[hidden_idx]
+    )
     features["kg_signal_std"][hidden_idx] = np.nanstd(signal_matrix, axis=1)
     features["kg_hidden_row"][hidden_idx] = 1.0
     return features

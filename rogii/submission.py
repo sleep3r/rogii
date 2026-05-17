@@ -16,6 +16,7 @@ from .modeling import apply_postprocess
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 
+
 def predict_test(
     model: HistGradientBoostingRegressor,
     test_paths: list[Path],
@@ -31,7 +32,9 @@ def predict_test(
         wf = build_well_features(path, config, train=False, top_context=top_context)
         test_features = wf.features.reindex(columns=feature_names).astype("float32")
         residual_pred = model.predict(test_features)
-        predictions_by_well[wf.well] = apply_postprocess(wf.flat_prediction, residual_pred, config)
+        predictions_by_well[wf.well] = apply_postprocess(
+            wf.flat_prediction, residual_pred, config
+        )
         if i % 50 == 0 or i == len(test_paths):
             if logger is not None:
                 logger.info("Predicted test wells", current=i, total=len(test_paths))
@@ -49,7 +52,9 @@ def predict_test(
                 continue
             rows.append((row_id, float(pred[row_index])))
         if missing:
-            raise FileNotFoundError(f"Missing test predictions for wells: {', '.join(sorted(missing))}")
+            raise FileNotFoundError(
+                f"Missing test predictions for wells: {', '.join(sorted(missing))}"
+            )
         return pd.DataFrame(rows, columns=["id", "tvt"])
 
     rows = []
@@ -58,7 +63,9 @@ def predict_test(
         df = pd.read_csv(path, usecols=["TVT_input"])
         target_mask = pd.to_numeric(df["TVT_input"], errors="coerce").isna().to_numpy()
         for row_index in np.flatnonzero(target_mask):
-            rows.append((f"{well}_{row_index}", float(predictions_by_well[well][row_index])))
+            rows.append(
+                (f"{well}_{row_index}", float(predictions_by_well[well][row_index]))
+            )
     return pd.DataFrame(rows, columns=["id", "tvt"])
 
 

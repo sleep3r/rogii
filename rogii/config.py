@@ -72,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+
 def deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = dict(base)
     for key, value in override.items():

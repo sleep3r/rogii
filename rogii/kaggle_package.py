@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-
 DEFAULT_INCLUDE = [
     Path("rogii"),
     Path("configs"),
@@ -27,7 +26,11 @@ def iter_package_files(paths: list[Path]) -> list[Path]:
     files: list[Path] = []
     for path in paths:
         if path.is_dir():
-            files.extend(item for item in path.rglob("*") if item.is_file() and should_include(item))
+            files.extend(
+                item
+                for item in path.rglob("*")
+                if item.is_file() and should_include(item)
+            )
         elif path.is_file() and should_include(path):
             files.append(path)
     return sorted(files)
@@ -44,8 +47,12 @@ def build_package(output: Path, paths: list[Path] | None = None) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Package ROGII source files for Kaggle notebooks.")
-    parser.add_argument("--output", type=Path, default=Path("artifacts/rogii_source.zip"))
+    parser = argparse.ArgumentParser(
+        description="Package ROGII source files for Kaggle notebooks."
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("artifacts/rogii_source.zip")
+    )
     return parser.parse_args()
 
 

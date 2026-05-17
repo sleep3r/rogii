@@ -10,6 +10,7 @@ from scipy.spatial import cKDTree
 from .constants import FORMATIONS
 from .io import well_name
 
+
 class KaggleTopContext:
     """Spatial priors inspired by the current public Kaggle top notebooks."""
 
@@ -67,7 +68,9 @@ class KaggleTopContext:
                 continue
             if df.empty:
                 continue
-            take = np.linspace(0, len(df) - 1, min(self.dense_samples_per_well, len(df)), dtype=int)
+            take = np.linspace(
+                0, len(df) - 1, min(self.dense_samples_per_well, len(df)), dtype=int
+            )
             sample = df.iloc[take]
             xy_parts.append(sample[["X", "Y"]].to_numpy(dtype=float))
             ancc_parts.append(sample["ANCC"].to_numpy(dtype=float))
@@ -87,7 +90,9 @@ class KaggleTopContext:
         self.dense_scale = np.where(scale < 1e-6, 1.0, scale)
         self.dense_tree = cKDTree(self.dense_xy / self.dense_scale)
 
-    def impute_formations(self, xy: np.ndarray, self_well: str | None) -> tuple[np.ndarray, np.ndarray]:
+    def impute_formations(
+        self, xy: np.ndarray, self_well: str | None
+    ) -> tuple[np.ndarray, np.ndarray]:
         if self.formation_tree is None or len(self.formation_values) == 0:
             return (
                 np.full((len(xy), len(FORMATIONS)), np.nan, dtype=float),
@@ -120,7 +125,9 @@ class KaggleTopContext:
             nearest_dist[row] = float(np.nanmin(dist[row, chosen]))
         return pred, nearest_dist
 
-    def impute_dense_ancc(self, xy: np.ndarray, self_well: str | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def impute_dense_ancc(
+        self, xy: np.ndarray, self_well: str | None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.dense_tree is None or len(self.dense_ancc) == 0:
             return (
                 np.full(len(xy), np.nan, dtype=float),

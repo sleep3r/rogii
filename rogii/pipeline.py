@@ -6,11 +6,18 @@ from typing import Any
 
 from .config import load_config
 from .features import build_training_table
-from .io import horizontal_files, resolve_data_dir, resolve_sample_submission, resolve_test_dir, resolve_train_dir
+from .io import (
+    horizontal_files,
+    resolve_data_dir,
+    resolve_sample_submission,
+    resolve_test_dir,
+    resolve_train_dir,
+)
 from .modeling import apply_postprocess, make_model, rmse, run_cv
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .submission import predict_test, save_outputs
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a ROGII TVT residual model.")
@@ -20,11 +27,23 @@ def parse_args() -> argparse.Namespace:
         default=Path("configs/hgb.yml"),
         help="YAML config path.",
     )
-    parser.add_argument("--data-dir", type=Path, default=None, help="Override data.data_dir.")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Override outputs.output_dir.")
-    parser.add_argument("--submission", type=Path, default=None, help="Override outputs.submission_path.")
-    parser.add_argument("--no-cv", action="store_true", help="Skip group CV and train final model only.")
+    parser.add_argument(
+        "--data-dir", type=Path, default=None, help="Override data.data_dir."
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Override outputs.output_dir."
+    )
+    parser.add_argument(
+        "--submission",
+        type=Path,
+        default=None,
+        help="Override outputs.submission_path.",
+    )
+    parser.add_argument(
+        "--no-cv", action="store_true", help="Skip group CV and train final model only."
+    )
     return parser.parse_args()
+
 
 def main() -> None:
     args = parse_args()
@@ -57,11 +76,15 @@ def main() -> None:
 
     train_paths = horizontal_files(train_dir, config["data"].get("max_train_wells"))
     test_paths = horizontal_files(test_dir, config["data"].get("max_test_wells"))
-    logger.info("Discovered wells", train_wells=len(train_paths), test_wells=len(test_paths))
+    logger.info(
+        "Discovered wells", train_wells=len(train_paths), test_wells=len(test_paths)
+    )
 
     top_context = None
     if config["features"].get("include_kaggle_top_signals", False):
-        with logger.step("Build Kaggle top-solution spatial context", train_wells=len(train_paths)):
+        with logger.step(
+            "Build Kaggle top-solution spatial context", train_wells=len(train_paths)
+        ):
             top_context = KaggleTopContext(train_paths, config)
         logger.info(
             "Spatial context ready",
@@ -70,15 +93,30 @@ def main() -> None:
         )
 
     with logger.step("Build training table", train_wells=len(train_paths)):
-        X, residual, groups, flat, y_true = build_training_table(train_paths, config, top_context, logger)
-    logger.metric("Training table", rows=len(X), features=len(X.columns), flat_train_rmse=rmse(flat, y_true))
+        X, residual, groups, flat, y_true = build_training_table(
+            train_paths, config, top_context, logger
+        )
+    logger.metric(
+        "Training table",
+        rows=len(X),
+        features=len(X.columns),
+        flat_train_rmse=rmse(flat, y_true),
+    )
 
     metrics: dict[str, Any] = {}
     if config["validation"].get("enabled", True):
-        with logger.step("Run grouped cross-validation", n_splits=config["validation"].get("n_splits", 5)):
-            metrics["cv"] = run_cv(X, residual, groups, flat, y_true, config, seed, logger)
+        with logger.step(
+            "Run grouped cross-validation",
+            n_splits=config["validation"].get("n_splits", 5),
+        ):
+            metrics["cv"] = run_cv(
+                X, residual, groups, flat, y_true, config, seed, logger
+            )
         best_weight = metrics["cv"].get("best_residual_weight")
-        if best_weight is not None and config["postprocess"].get("residual_weight") == "auto":
+        if (
+            best_weight is not None
+            and config["postprocess"].get("residual_weight") == "auto"
+        ):
             config["postprocess"]["residual_weight"] = best_weight
     else:
         logger.warn("Cross-validation disabled")
@@ -106,11 +144,21 @@ def main() -> None:
     else:
         metrics["train"]["rmse"] = None
         metrics["train"]["skipped_model_train_rmse"] = True
-        logger.info("Skipped final train RMSE", reason="reporting.compute_train_metrics=false")
+        logger.info(
+            "Skipped final train RMSE", reason="reporting.compute_train_metrics=false"
+        )
 
     feature_names = list(X.columns)
     with logger.step("Predict test", test_wells=len(test_paths)):
-        submission = predict_test(model, test_paths, sample_submission_path, config, feature_names, top_context, logger)
+        submission = predict_test(
+            model,
+            test_paths,
+            sample_submission_path,
+            config,
+            feature_names,
+            top_context,
+            logger,
+        )
     if submission["tvt"].isna().any():
         raise ValueError("Submission contains NaN predictions.")
     submission_path = Path(config["outputs"]["submission_path"])
