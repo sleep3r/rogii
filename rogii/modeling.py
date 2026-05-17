@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import product
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.linear_model import Ridge
+from scipy.signal import savgol_filter
 
 from .runlog import RunLogger
 
 
 class ResidualModel:
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "ResidualModel":
+    def fit(self, X: pd.DataFrame, y: np.ndarray, **_: Any) -> "ResidualModel":
         raise NotImplementedError
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -23,94 +23,212 @@ class ResidualModel:
 @dataclass
 class WrappedRegressor(ResidualModel):
     estimator: Any
+    fit_options: dict[str, Any] = field(default_factory=dict)
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "WrappedRegressor":
-        self.estimator.fit(X, y)
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        X_valid: pd.DataFrame | None = None,
+        y_valid: np.ndarray | None = None,
+        **_: Any,
+    ) -> "WrappedRegressor":
+        options = dict(self.fit_options)
+        kind = str(options.pop("kind", "")).lower()
+        early_stopping_rounds = options.pop("early_stopping_rounds", None)
+
+        if X_valid is None or y_valid is None:
+            self.estimator.fit(X, y)
+            return self
+
+        if kind == "lightgbm":
+            import lightgbm as lgb
+
+            callbacks = list(options.pop("callbacks", []))
+            if early_stopping_rounds not in (None, ""):
+                callbacks.append(
+                    lgb.early_stopping(int(early_stopping_rounds), verbose=False)
+                )
+            self.estimator.fit(
+                X,
+                y,
+                eval_set=[(X_valid, y_valid)],
+                callbacks=callbacks,
+                **options,
+            )
+        elif kind == "xgboost":
+            self.estimator.fit(
+                X,
+                y,
+                eval_set=[(X_valid, y_valid)],
+                verbose=False,
+                **options,
+            )
+        elif kind == "catboost":
+            self.estimator.fit(
+                X,
+                y,
+                eval_set=(X_valid, y_valid),
+                use_best_model=True,
+                **options,
+            )
+        else:
+            self.estimator.fit(X, y)
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return np.asarray(self.estimator.predict(X), dtype=float)
 
 
-class ResidualStackRegressor(ResidualModel):
+class EnsembleRegressor(ResidualModel):
+    """Grouped OOF ensemble used by both local training and Kaggle inference."""
+
     def __init__(self, config: dict[str, Any], seed: int) -> None:
         self.config = config
+        self.model_config = config["model"]
         self.seed = seed
-        self.base_models: list[ResidualModel] = []
         self.base_names: list[str] = []
+        self.fold_models: list[list[ResidualModel]] = []
         self.weights: np.ndarray | None = None
-        self.blender: Ridge | None = None
+        self.oof_residual_: np.ndarray | None = None
+        self.oof_stack_: np.ndarray | None = None
+        self.metrics_: dict[str, Any] = {}
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "ResidualStackRegressor":
-        base_specs = self.config.get("base_models") or []
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: np.ndarray | None = None,
+        logger: RunLogger | None = None,
+        **_: Any,
+    ) -> "EnsembleRegressor":
+        if groups is None:
+            raise ValueError("Grouped well ids are required for ensemble training.")
+
+        base_specs = self.model_config.get("base_models") or []
         if not base_specs:
-            raise ValueError("model.name=stack requires model.base_models.")
+            raise ValueError("model.base_models must contain at least one model.")
 
-        base_predictions = []
-        self.base_models = []
+        n_splits = int(self.config["validation"].get("n_splits", 5))
+        folds = shuffled_group_folds(groups, n_splits, self.seed)
+        y = np.asarray(y, dtype=float)
+        oof_stack = np.zeros((len(X), len(base_specs)), dtype=float)
+        base_metrics: list[dict[str, Any]] = []
+        self.fold_models = []
         self.base_names = []
-        for index, spec in enumerate(base_specs):
-            name = str(spec.get("name") or f"model_{index}")
-            model = make_single_model(spec, self.seed + index + 1)
-            model.fit(X, y)
-            pred = model.predict(X)
-            self.base_models.append(model)
-            self.base_names.append(name)
-            base_predictions.append(pred)
 
-        train_stack = np.vstack(base_predictions).T
-        blend_cfg = self.config.get("blend", {})
-        method = str(blend_cfg.get("method", "weighted")).lower()
-        if method == "ridge":
-            alpha = float(blend_cfg.get("alpha", 1.0))
-            self.blender = Ridge(alpha=alpha, fit_intercept=True)
-            self.blender.fit(train_stack, y)
-            self.weights = None
-        elif method in {"hill_climb", "hill-climb", "hillclimb"}:
-            self.weights = fit_hill_climb_weights(
-                train_stack,
-                y,
-                iterations=int(blend_cfg.get("iterations", 200)),
-                alpha_grid=blend_cfg.get("alpha_grid"),
-            )
-            self.blender = None
-        elif method == "weighted":
-            weights = blend_cfg.get("weights")
-            if weights is None:
-                weights_array = np.ones(len(self.base_models), dtype=float)
-            else:
-                weights_array = np.asarray(weights, dtype=float)
-            if len(weights_array) != len(self.base_models):
-                raise ValueError(
-                    "model.blend.weights length must match model.base_models length."
+        for model_idx, spec in enumerate(base_specs):
+            name = model_spec_name(spec, model_idx)
+            self.base_names.append(name)
+            fold_models: list[ResidualModel] = []
+            fold_scores = []
+            if logger is not None:
+                logger.info(
+                    "OOF base model",
+                    model=name,
+                    index=model_idx + 1,
+                    total=len(base_specs),
+                    folds=len(folds),
                 )
-            total = float(np.sum(weights_array))
-            if abs(total) <= 1e-12:
-                raise ValueError("model.blend.weights must not sum to zero.")
-            self.weights = weights_array / total
-            self.blender = None
-        else:
-            raise ValueError(
-                "model.blend.method must be 'weighted', 'ridge', or 'hill_climb'."
+
+            for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
+                model = make_single_model(
+                    spec,
+                    self.seed + 1000 * (model_idx + 1) + fold_id,
+                )
+                context = (
+                    logger.step(
+                        "OOF model fold",
+                        model=name,
+                        fold=fold_id,
+                        train_rows=int(train_idx.sum()),
+                        valid_rows=int(valid_idx.sum()),
+                    )
+                    if logger is not None
+                    else nullcontext()
+                )
+                with context:
+                    model.fit(
+                        X.loc[train_idx],
+                        y[train_idx],
+                        X_valid=X.loc[valid_idx],
+                        y_valid=y[valid_idx],
+                    )
+                    pred = model.predict(X.loc[valid_idx])
+                oof_stack[valid_idx, model_idx] = pred
+                fold_scores.append(rmse(pred, y[valid_idx]))
+                fold_models.append(model)
+
+            self.fold_models.append(fold_models)
+            model_oof_rmse = rmse(oof_stack[:, model_idx], y)
+            base_metrics.append(
+                {
+                    "name": name,
+                    "oof_rmse": model_oof_rmse,
+                    "fold_rmse": [float(score) for score in fold_scores],
+                }
+            )
+            if logger is not None:
+                logger.metric("OOF base RMSE", model=name, rmse=model_oof_rmse)
+
+        self.oof_stack_ = oof_stack
+        blend_cfg = self.model_config.get("blend") or {}
+        self.weights = fit_hill_climb_weights(
+            oof_stack,
+            y,
+            iterations=int(blend_cfg.get("iterations", 1000)),
+            alpha_grid=blend_cfg.get("alpha_grid"),
+        )
+        self.oof_residual_ = oof_stack @ self.weights
+
+        for item, weight in zip(base_metrics, self.weights, strict=True):
+            item["weight"] = float(weight)
+        self.metrics_ = {
+            "type": "ensemble",
+            "n_splits": len(folds),
+            "base_models": base_metrics,
+            "blend_method": "hill_climb",
+            "blend_weights": dict(
+                zip(self.base_names, [float(w) for w in self.weights], strict=True)
+            ),
+            "oof_rmse": rmse(self.oof_residual_, y),
+        }
+        if logger is not None:
+            logger.metric(
+                "OOF ensemble RMSE",
+                rmse=self.metrics_["oof_rmse"],
+                nonzero_weights=int(np.sum(self.weights > 1e-9)),
             )
         return self
 
+    def predict_base_stack(self, X: pd.DataFrame) -> np.ndarray:
+        if not self.fold_models:
+            raise RuntimeError("EnsembleRegressor is not fitted.")
+        columns = []
+        for fold_models in self.fold_models:
+            fold_pred = np.vstack([model.predict(X) for model in fold_models])
+            columns.append(np.mean(fold_pred, axis=0))
+        return np.vstack(columns).T
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        if not self.base_models:
-            raise RuntimeError("ResidualStackRegressor is not fitted.")
-        stack = np.vstack([model.predict(X) for model in self.base_models]).T
-        if self.blender is not None:
-            return np.asarray(self.blender.predict(stack), dtype=float)
         if self.weights is None:
-            raise RuntimeError("ResidualStackRegressor has no fitted blend weights.")
-        return stack @ self.weights
+            raise RuntimeError("EnsembleRegressor has no blend weights.")
+        return self.predict_base_stack(X) @ self.weights
+
+
+def model_spec_name(spec: dict[str, Any], index: int) -> str:
+    explicit = spec.get("id") or spec.get("label")
+    if explicit not in (None, ""):
+        return str(explicit)
+    name = str(spec.get("name", "model")).lower()
+    return f"{name}_{index + 1}"
 
 
 def fit_hill_climb_weights(
     stack: np.ndarray,
     y: np.ndarray,
-    iterations: int,
-    alpha_grid: list[float] | None,
+    iterations: int = 1000,
+    alpha_grid: list[float] | None = None,
 ) -> np.ndarray:
     if stack.ndim != 2 or stack.shape[1] == 0:
         raise ValueError("Hill-climb blend requires a non-empty prediction stack.")
@@ -121,34 +239,30 @@ def fit_hill_climb_weights(
     best_model = int(np.argmin(single_scores))
     weights = np.zeros(n_models, dtype=float)
     weights[best_model] = 1.0
-    best_pred = stack[:, best_model].copy()
     best_score = single_scores[best_model]
+    steps = alpha_grid or [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
+    steps = [float(step) for step in steps if float(step) > 0.0]
+    moves = 0
 
-    grid = alpha_grid or [0.02, 0.05, 0.1, 0.2, 0.35, 0.5]
-    grid = [float(alpha) for alpha in grid if 0.0 < float(alpha) < 1.0]
-    if not grid:
-        return weights
-
-    for _ in range(max(int(iterations), 0)):
-        candidate_score = best_score
-        candidate_pred = best_pred
-        candidate_weights = weights
-        for model_idx in range(n_models):
-            model_pred = stack[:, model_idx]
-            for alpha in grid:
-                pred = (1.0 - alpha) * best_pred + alpha * model_pred
-                score = rmse(pred, y)
+    for step in steps:
+        improved = True
+        while improved and moves < max(int(iterations), 1):
+            improved = False
+            candidate_score = best_score
+            candidate_weights = weights
+            for model_idx in range(n_models):
+                new_weights = weights.copy()
+                new_weights[model_idx] += step
+                new_weights /= float(new_weights.sum())
+                score = rmse(stack @ new_weights, y)
                 if score + 1e-12 < candidate_score:
-                    blended_weights = (1.0 - alpha) * weights.copy()
-                    blended_weights[model_idx] += alpha
                     candidate_score = score
-                    candidate_pred = pred
-                    candidate_weights = blended_weights
-        if candidate_score + 1e-12 >= best_score:
-            break
-        best_score = candidate_score
-        best_pred = candidate_pred
-        weights = candidate_weights
+                    candidate_weights = new_weights
+                    improved = True
+            if improved:
+                weights = candidate_weights
+                best_score = candidate_score
+                moves += 1
 
     total = float(weights.sum())
     if total <= 0:
@@ -159,6 +273,8 @@ def fit_hill_climb_weights(
 def make_lightgbm(params: dict[str, Any], seed: int) -> WrappedRegressor:
     from lightgbm import LGBMRegressor
 
+    params = dict(params)
+    early_stopping_rounds = params.pop("early_stopping_rounds", None)
     defaults = {
         "objective": "regression",
         "n_estimators": 700,
@@ -175,7 +291,10 @@ def make_lightgbm(params: dict[str, Any], seed: int) -> WrappedRegressor:
     }
     defaults.update(params)
     defaults["random_state"] = seed
-    return WrappedRegressor(LGBMRegressor(**defaults))
+    return WrappedRegressor(
+        LGBMRegressor(**defaults),
+        {"kind": "lightgbm", "early_stopping_rounds": early_stopping_rounds},
+    )
 
 
 def make_xgboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
@@ -197,12 +316,14 @@ def make_xgboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
     }
     defaults.update(params)
     defaults["random_state"] = seed
-    return WrappedRegressor(XGBRegressor(**defaults))
+    return WrappedRegressor(XGBRegressor(**defaults), {"kind": "xgboost"})
 
 
 def make_catboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
     from catboost import CatBoostRegressor
 
+    params = dict(params)
+    early_stopping_rounds = params.pop("early_stopping_rounds", None)
     defaults = {
         "loss_function": "RMSE",
         "iterations": 900,
@@ -215,15 +336,12 @@ def make_catboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
         "allow_writing_files": False,
         "verbose": False,
     }
+    if early_stopping_rounds not in (None, ""):
+        defaults["od_type"] = "Iter"
+        defaults["od_wait"] = int(early_stopping_rounds)
     defaults.update(params)
     defaults["random_seed"] = seed
-    return WrappedRegressor(CatBoostRegressor(**defaults))
-
-
-def make_hist_gradient_boosting(params: dict[str, Any], seed: int) -> WrappedRegressor:
-    params = dict(params)
-    params["random_state"] = seed
-    return WrappedRegressor(HistGradientBoostingRegressor(**params))
+    return WrappedRegressor(CatBoostRegressor(**defaults), {"kind": "catboost"})
 
 
 def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:
@@ -235,17 +353,7 @@ def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:
         return make_xgboost(params, seed)
     if name in {"catboost", "cat"}:
         return make_catboost(params, seed)
-    if name in {"hist_gradient_boosting", "hgb"}:
-        return make_hist_gradient_boosting(params, seed)
-    raise ValueError(f"Unsupported model.name={name!r}.")
-
-
-def make_model(config: dict[str, Any], seed: int) -> ResidualModel:
-    model_cfg = config["model"]
-    name = str(model_cfg.get("name", "lightgbm")).lower()
-    if name == "stack":
-        return ResidualStackRegressor(model_cfg, seed)
-    return make_single_model(model_cfg, seed)
+    raise ValueError(f"Unsupported base model: {name!r}.")
 
 
 def rmse(y_pred: np.ndarray, y_true: np.ndarray) -> float:
@@ -256,9 +364,11 @@ def shuffled_group_folds(
     groups: np.ndarray, n_splits: int, seed: int
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     unique_groups = np.array(sorted(set(groups)))
+    if len(unique_groups) < 2:
+        raise ValueError("Grouped OOF training needs at least two wells.")
     rng = np.random.default_rng(seed)
     rng.shuffle(unique_groups)
-    n_splits = max(2, min(n_splits, len(unique_groups)))
+    n_splits = min(max(2, n_splits), len(unique_groups))
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in range(n_splits):
         valid_groups = set(unique_groups[fold::n_splits])
@@ -274,19 +384,21 @@ def apply_postprocess(
     config: dict[str, Any],
     residual_weight: float | None = None,
     features: pd.DataFrame | None = None,
+    groups: np.ndarray | None = None,
     notebook_blend: dict[str, float] | None = None,
+    smoothing: dict[str, float] | None = None,
 ) -> np.ndarray:
     residual = np.asarray(residual, dtype=float)
     clip_value = config["postprocess"].get("residual_clip")
     if clip_value not in (None, ""):
         clip = float(clip_value)
         residual = np.clip(residual, -clip, clip)
+
     if residual_weight is None:
-        configured = config["postprocess"].get("residual_weight", 1.0)
-        residual_weight = 1.0 if configured == "auto" else float(configured)
-    weight = float(residual_weight)
-    pred = np.asarray(flat, dtype=float) + weight * residual
-    return apply_notebook_blend(pred, config, features, notebook_blend)
+        residual_weight = float(config["postprocess"].get("residual_weight", 1.0))
+    pred = np.asarray(flat, dtype=float) + float(residual_weight) * residual
+    pred = apply_notebook_blend(pred, config, features, notebook_blend)
+    return apply_smoothing(pred, groups, smoothing)
 
 
 def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] | None]:
@@ -296,8 +408,11 @@ def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] |
 
     candidates = blend_cfg.get("candidates") or []
     if candidates:
-        parsed = []
+        parsed: list[dict[str, float] | None] = []
         for candidate in candidates:
+            if candidate is None or candidate.get("enabled", True) is False:
+                parsed.append(None)
+                continue
             parsed.append(
                 {
                     "alpha": float(candidate.get("alpha", 1.0)),
@@ -307,13 +422,35 @@ def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] |
             )
         return parsed
 
+    alpha_grid = blend_cfg.get("alpha_grid") or [blend_cfg.get("alpha", 1.0)]
+    tau_grid = blend_cfg.get("tau_grid") or [blend_cfg.get("tau", 0.0)]
+    w_pf_grid = blend_cfg.get("w_pf_grid") or [blend_cfg.get("w_pf", 0.0)]
     return [
-        {
-            "alpha": float(blend_cfg.get("alpha", 1.0)),
-            "tau": float(blend_cfg.get("tau", 0.0)),
-            "w_pf": float(blend_cfg.get("w_pf", 0.0)),
-        }
+        {"alpha": float(alpha), "tau": float(tau), "w_pf": float(w_pf)}
+        for alpha, tau, w_pf in product(alpha_grid, tau_grid, w_pf_grid)
     ]
+
+
+def smoothing_candidates(config: dict[str, Any]) -> list[dict[str, float] | None]:
+    smoothing_cfg = config["postprocess"].get("smoothing") or {}
+    if not smoothing_cfg.get("enabled", False):
+        return [None]
+    candidates = smoothing_cfg.get("candidates") or [
+        {"enabled": False},
+        {"window": 17, "polyorder": 3},
+    ]
+    parsed: list[dict[str, float] | None] = []
+    for candidate in candidates:
+        if candidate is None or candidate.get("enabled", True) is False:
+            parsed.append(None)
+        else:
+            parsed.append(
+                {
+                    "window": int(candidate.get("window", 17)),
+                    "polyorder": int(candidate.get("polyorder", 3)),
+                }
+            )
+    return parsed
 
 
 def apply_notebook_blend(
@@ -358,179 +495,132 @@ def apply_notebook_blend(
     return blended
 
 
-def tune_residual_weight(
+def apply_smoothing(
+    pred: np.ndarray, groups: np.ndarray | None, params: dict[str, float] | None
+) -> np.ndarray:
+    if params is None or groups is None:
+        return pred
+    window = int(params.get("window", 17))
+    polyorder = int(params.get("polyorder", 3))
+    smoothed = np.asarray(pred, dtype=float).copy()
+    group_array = np.asarray(groups)
+    for group in pd.unique(group_array):
+        idx = np.flatnonzero(group_array == group)
+        width = min(window, len(idx))
+        if width % 2 == 0:
+            width -= 1
+        if width >= polyorder + 2:
+            smoothed[idx] = savgol_filter(smoothed[idx], width, polyorder)
+    return smoothed
+
+
+def tune_postprocess(
     flat: np.ndarray,
     residual_pred: np.ndarray,
     y_true: np.ndarray,
     config: dict[str, Any],
-    features: pd.DataFrame | None = None,
-) -> tuple[float, list[dict[str, float]], dict[str, float] | None]:
-    configured = config["postprocess"].get("residual_weight", 1.0)
-    blend_candidates = notebook_blend_candidates(config)
-    if configured != "auto":
-        weight = float(configured)
-        scores = []
-        for blend in blend_candidates:
-            pred = apply_postprocess(
-                flat,
-                residual_pred,
-                config,
-                residual_weight=weight,
-                features=features,
-                notebook_blend=blend,
-            )
-            score = {"weight": weight, "rmse": rmse(pred, y_true)}
-            if blend is not None:
-                score.update(blend)
-            scores.append(score)
-        best = min(scores, key=lambda item: item["rmse"])
-        best_blend = {key: best[key] for key in ("alpha", "tau", "w_pf") if key in best}
-        return weight, scores, best_blend or None
-
-    grid = config["postprocess"].get("residual_weight_grid") or [
-        0.0,
-        0.25,
-        0.5,
-        0.75,
-        1.0,
+    features: pd.DataFrame,
+    groups: np.ndarray,
+) -> tuple[
+    float, list[dict[str, float]], dict[str, float] | None, dict[str, float] | None
+]:
+    residual_grid = config["postprocess"].get("residual_weight_grid") or [
+        config["postprocess"].get("residual_weight", 1.0)
     ]
     scores: list[dict[str, float]] = []
-    for weight in grid:
+    for weight, blend, smoothing in product(
+        residual_grid,
+        notebook_blend_candidates(config),
+        smoothing_candidates(config),
+    ):
         weight = float(weight)
-        for blend in blend_candidates:
-            pred = apply_postprocess(
-                flat,
-                residual_pred,
-                config,
-                residual_weight=weight,
-                features=features,
-                notebook_blend=blend,
+        pred = apply_postprocess(
+            flat,
+            residual_pred,
+            config,
+            residual_weight=weight,
+            features=features,
+            groups=groups,
+            notebook_blend=blend,
+            smoothing=smoothing,
+        )
+        score = {"weight": weight, "rmse": rmse(pred, y_true)}
+        if blend is not None:
+            score.update({f"blend_{key}": float(value) for key, value in blend.items()})
+        if smoothing is not None:
+            score.update(
+                {f"smooth_{key}": float(value) for key, value in smoothing.items()}
             )
-            score = {"weight": weight, "rmse": rmse(pred, y_true)}
-            if blend is not None:
-                score.update(blend)
-            scores.append(score)
+        scores.append(score)
+
     best = min(scores, key=lambda item: item["rmse"])
-    best_blend = {key: best[key] for key in ("alpha", "tau", "w_pf") if key in best}
-    return float(best["weight"]), scores, best_blend or None
+    best_blend = {
+        key.replace("blend_", ""): best[key]
+        for key in ("blend_alpha", "blend_tau", "blend_w_pf")
+        if key in best
+    }
+    best_smoothing = {
+        key.replace("smooth_", ""): best[key]
+        for key in ("smooth_window", "smooth_polyorder")
+        if key in best
+    }
+    return float(best["weight"]), scores, best_blend or None, best_smoothing or None
 
 
-def run_cv(
+def evaluate_oof_predictions(
+    residual_pred: np.ndarray,
     X: pd.DataFrame,
-    residual: np.ndarray,
     groups: np.ndarray,
     flat: np.ndarray,
     y_true: np.ndarray,
     config: dict[str, Any],
-    seed: int,
     logger: RunLogger | None = None,
 ) -> dict[str, Any]:
-    validation = config["validation"]
-    unique_wells = np.array(sorted(set(groups)))
-    max_wells = validation.get("max_wells")
-    if max_wells not in (None, "") and len(unique_wells) > int(max_wells):
-        rng = np.random.default_rng(seed)
-        selected = set(rng.choice(unique_wells, size=int(max_wells), replace=False))
-        cv_mask = np.array([group in selected for group in groups])
-    else:
-        cv_mask = np.ones(len(groups), dtype=bool)
-
-    X_cv = X.loc[cv_mask].reset_index(drop=True)
-    residual_cv = residual[cv_mask]
-    groups_cv = groups[cv_mask]
-    flat_cv = flat[cv_mask]
-    y_true_cv = y_true[cv_mask]
-
-    unique_cv_groups = sorted(set(groups_cv))
-    if len(unique_cv_groups) < 2:
-        if logger is not None:
-            logger.warn("Skipping CV", reason="need at least two wells")
-        return {"enabled": False, "reason": "not enough groups"}
-
-    folds = shuffled_group_folds(groups_cv, int(validation.get("n_splits", 5)), seed)
-    oof_residual = np.zeros(len(X_cv), dtype=float)
-    fold_ids = np.zeros(len(X_cv), dtype=int)
-    fold_metrics: list[dict[str, Any]] = []
-
+    candidate_count = (
+        max(len(config["postprocess"].get("residual_weight_grid") or []), 1)
+        * max(len(notebook_blend_candidates(config)), 1)
+        * max(len(smoothing_candidates(config)), 1)
+    )
     if logger is not None:
-        logger.info(
-            "Prepared CV", rows=len(X_cv), wells=len(unique_cv_groups), folds=len(folds)
-        )
-
-    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
-        if logger is not None:
-            fold_context = logger.step(
-                f"CV fold {fold_id}/{len(folds)}",
-                train_rows=int(train_idx.sum()),
-                valid_rows=int(valid_idx.sum()),
-            )
-        else:
-            fold_context = nullcontext()
-        with fold_context:
-            model = make_model(config, seed + fold_id)
-            model.fit(X_cv.loc[train_idx], residual_cv[train_idx])
-            residual_pred = model.predict(X_cv.loc[valid_idx])
-        oof_residual[valid_idx] = residual_pred
-        fold_ids[valid_idx] = fold_id
-
-    if logger is not None:
-        residual_candidates = len(
-            config["postprocess"].get("residual_weight_grid") or []
-        )
-        blend_candidates = len(notebook_blend_candidates(config))
-        logger.info(
-            "Tuning residual blend",
-            candidates=max(residual_candidates, 1) * max(blend_candidates, 1),
-        )
-    best_weight, weight_scores, best_notebook_blend = tune_residual_weight(
-        flat_cv, oof_residual, y_true_cv, config, X_cv
+        logger.info("Tuning postprocess", candidates=candidate_count)
+    best_weight, weight_scores, best_notebook_blend, best_smoothing = tune_postprocess(
+        flat,
+        residual_pred,
+        y_true,
+        config,
+        X,
+        groups,
     )
     oof_pred = apply_postprocess(
-        flat_cv,
-        oof_residual,
+        flat,
+        residual_pred,
         config,
         residual_weight=best_weight,
-        features=X_cv,
+        features=X,
+        groups=groups,
         notebook_blend=best_notebook_blend,
+        smoothing=best_smoothing,
     )
-    for fold_id in range(1, len(folds) + 1):
-        valid_idx = fold_ids == fold_id
-        fold_rmse = rmse(oof_pred[valid_idx], y_true_cv[valid_idx])
-        fold_metrics.append(
-            {
-                "fold": fold_id,
-                "rmse": fold_rmse,
-                "valid_rows": int(valid_idx.sum()),
-                "valid_wells": int(len(set(groups_cv[valid_idx]))),
-            }
-        )
-        if logger is not None:
-            logger.metric(
-                "CV fold RMSE", fold=fold_id, weight=f"{best_weight:g}", rmse=fold_rmse
-            )
-
-    overall_rmse = rmse(oof_pred, y_true_cv)
-    baseline_rmse = rmse(flat_cv, y_true_cv)
-    baseline_name = config["features"].get("prediction_baseline", "flat_tvt")
+    baseline_rmse = rmse(flat, y_true)
+    overall_rmse = rmse(oof_pred, y_true)
     if logger is not None:
         logger.metric(
-            "CV summary",
+            "OOF postprocessed RMSE",
             rmse=overall_rmse,
-            baseline=baseline_name,
             baseline_rmse=baseline_rmse,
             best_residual_weight=f"{best_weight:g}",
             best_notebook_blend=best_notebook_blend,
+            best_smoothing=best_smoothing,
         )
     return {
         "enabled": True,
         "rmse": overall_rmse,
-        "baseline": baseline_name,
+        "baseline": config["features"].get("prediction_baseline", "last_known_tvt"),
         "baseline_rmse": baseline_rmse,
-        "flat_rmse": baseline_rmse,
         "best_residual_weight": best_weight,
         "best_notebook_blend": best_notebook_blend,
-        "residual_weight_scores": weight_scores,
-        "rows": int(len(X_cv)),
-        "wells": int(len(unique_cv_groups)),
-        "folds": fold_metrics,
+        "best_smoothing": best_smoothing,
+        "postprocess_scores": weight_scores,
+        "rows": int(len(X)),
+        "wells": int(len(set(groups))),
     }

@@ -16,6 +16,330 @@ try:
 except Exception:  # pragma: no cover - Kaggle images may vary.
     pywt = None
 
+try:
+    from numba import njit
+except Exception:  # pragma: no cover - optional unless notebook mode is requested.
+    njit = None
+
+NUMBA_AVAILABLE = njit is not None
+PF_GR_SIG_MIN = 10.0
+PF_GR_SIG_MAX = 60.0
+PF_GR_SIG_DEF = 30.0
+PF_RESAMP = 0.5
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(cache=True)
+    def _interp1(grid, value, vmin, step):
+        i = int((value - vmin) / step)
+        if i < 0:
+            return grid[0]
+        n = len(grid) - 1
+        if i >= n:
+            return grid[n]
+        t = (value - vmin) / step - i
+        return grid[i] * (1.0 - t) + grid[i + 1] * t
+
+    @njit(cache=True)
+    def _resample_particles(pos, aux, weights, n_particles, rough_pos, rough_aux):
+        cumulative = np.zeros(n_particles + 1)
+        for j in range(n_particles):
+            cumulative[j + 1] = cumulative[j] + weights[j]
+        u0 = np.random.uniform(0.0, 1.0 / n_particles)
+        new_pos = np.empty(n_particles)
+        new_aux = np.empty(n_particles)
+        cursor = 0
+        for j in range(n_particles):
+            u = u0 + j / n_particles
+            while cursor < n_particles - 1 and cumulative[cursor + 1] < u:
+                cursor += 1
+            new_pos[j] = pos[cursor] + rough_pos * np.random.randn()
+            new_aux[j] = aux[cursor] + rough_aux * np.random.randn()
+        return new_pos, new_aux
+
+    @njit(cache=True)
+    def _beam_jit(smoothed_gr, tw_gr, start_index, beam_width, move_cost, emit_scale):
+        n_steps = len(smoothed_gr)
+        n_ref = len(tw_gr)
+        max_candidates = beam_width * 6
+        beam_idx = np.zeros(beam_width, np.int64)
+        beam_cost = np.full(beam_width, 1e30)
+        beam_idx[0] = start_index
+        beam_cost[0] = 0.0
+        beam_count = np.int64(1)
+        history_idx = np.zeros((n_steps, beam_width), np.int64)
+        history_parent = np.zeros((n_steps, beam_width), np.int64)
+        cand_idx = np.zeros(max_candidates, np.int64)
+        cand_cost = np.full(max_candidates, 1e30)
+        cand_parent = np.zeros(max_candidates, np.int64)
+
+        for step in range(n_steps):
+            gr_value = smoothed_gr[step]
+            cand_count = np.int64(0)
+            for beam_i in range(beam_count):
+                idx = beam_idx[beam_i]
+                cost = beam_cost[beam_i]
+                for delta in range(-2, 3):
+                    next_idx = idx + delta
+                    if next_idx < 0 or next_idx >= n_ref:
+                        continue
+                    total = (
+                        cost
+                        + (gr_value - tw_gr[next_idx]) ** 2 / emit_scale
+                        + move_cost * (delta if delta >= 0 else -delta)
+                    )
+                    found = np.int64(-1)
+                    for cand_i in range(cand_count):
+                        if cand_idx[cand_i] == next_idx:
+                            found = cand_i
+                            break
+                    if found >= 0:
+                        if total < cand_cost[found]:
+                            cand_cost[found] = total
+                            cand_parent[found] = beam_i
+                    elif cand_count < max_candidates:
+                        cand_idx[cand_count] = next_idx
+                        cand_cost[cand_count] = total
+                        cand_parent[cand_count] = beam_i
+                        cand_count += 1
+
+            kept = min(beam_width, cand_count)
+            for i in range(kept):
+                best = i
+                for j in range(i + 1, cand_count):
+                    if cand_cost[j] < cand_cost[best]:
+                        best = j
+                if best != i:
+                    cand_idx[i], cand_idx[best] = cand_idx[best], cand_idx[i]
+                    cand_cost[i], cand_cost[best] = cand_cost[best], cand_cost[i]
+                    cand_parent[i], cand_parent[best] = (
+                        cand_parent[best],
+                        cand_parent[i],
+                    )
+            history_idx[step, :kept] = cand_idx[:kept]
+            history_parent[step, :kept] = cand_parent[:kept]
+            beam_idx[:kept] = cand_idx[:kept]
+            beam_cost[:kept] = cand_cost[:kept]
+            beam_count = kept
+
+        best = np.int64(0)
+        for beam_i in range(1, beam_count):
+            if beam_cost[beam_i] < beam_cost[best]:
+                best = beam_i
+        path = np.zeros(n_steps, np.int64)
+        beam_i = best
+        for step in range(n_steps - 1, -1, -1):
+            path[step] = history_idx[step, beam_i]
+            beam_i = history_parent[step, beam_i]
+        return path
+
+    @njit(cache=True)
+    def _pf_ancc_jit(
+        md_v,
+        z_v,
+        gr_v,
+        grid_gr,
+        vmin,
+        step,
+        gr_sigma,
+        last_pos,
+        init_rate,
+        n_particles,
+        seed,
+        alpha,
+        rate_noise,
+        process_noise,
+        init_spread,
+        rough_pos,
+        rough_rate,
+        resample_threshold,
+    ):
+        np.random.seed(seed)
+        pos = np.empty(n_particles)
+        rate = np.empty(n_particles)
+        weights = np.ones(n_particles) / n_particles
+        for j in range(n_particles):
+            pos[j] = last_pos + init_spread * np.random.randn()
+            rate[j] = init_rate + 0.01 * np.random.randn()
+        points = np.empty(len(md_v))
+        std = np.empty(len(md_v))
+        prev_md = md_v[0] - 1.0
+        for i in range(len(md_v)):
+            delta_md = md_v[i] - prev_md
+            if delta_md < 1.0:
+                delta_md = 1.0
+            for j in range(n_particles):
+                rate[j] = alpha * rate[j] + rate_noise * np.random.randn()
+                pos[j] += rate[j] * delta_md + process_noise * np.random.randn()
+                tvt_j = pos[j] - z_v[i]
+                lo = vmin - 50.0
+                hi = vmin + len(grid_gr) * step + 50.0
+                if tvt_j < lo:
+                    tvt_j = lo
+                if tvt_j > hi:
+                    tvt_j = hi
+                pos[j] = tvt_j + z_v[i]
+            if not np.isnan(gr_v[i]):
+                weight_sum = 0.0
+                for j in range(n_particles):
+                    expected = _interp1(grid_gr, pos[j] - z_v[i], vmin, step)
+                    diff = (gr_v[i] - expected) / gr_sigma
+                    likelihood = (
+                        np.exp(-0.5 * diff * diff) if diff * diff < 600.0 else 0.0
+                    )
+                    weights[j] *= max(likelihood, 1e-300)
+                    weight_sum += weights[j]
+                if weight_sum > 0.0:
+                    for j in range(n_particles):
+                        weights[j] /= weight_sum
+                else:
+                    for j in range(n_particles):
+                        weights[j] = 1.0 / n_particles
+            eff_denom = 0.0
+            for j in range(n_particles):
+                eff_denom += weights[j] * weights[j]
+            if 1.0 / eff_denom < resample_threshold * n_particles:
+                pos, rate = _resample_particles(
+                    pos, rate, weights, n_particles, rough_pos, rough_rate
+                )
+                for j in range(n_particles):
+                    weights[j] = 1.0 / n_particles
+            tvt_mean = 0.0
+            for j in range(n_particles):
+                tvt_mean += weights[j] * (pos[j] - z_v[i])
+            points[i] = tvt_mean
+            variance = 0.0
+            for j in range(n_particles):
+                centered = pos[j] - z_v[i] - tvt_mean
+                variance += weights[j] * centered * centered
+            std[i] = variance**0.5
+            prev_md = md_v[i]
+        return points, std
+
+    @njit(cache=True)
+    def _pf_z_jit(
+        md_v,
+        z_v,
+        gr_v,
+        gr_smooth_v,
+        grid_gr,
+        grid_smooth,
+        vmin,
+        step,
+        gr_sigma,
+        init_pos,
+        init_velocity,
+        beta,
+        intercept,
+        z_sigma,
+        n_particles,
+        seed,
+        momentum,
+        velocity_noise,
+        process_noise,
+        gr_weight,
+        rough_pos,
+        rough_velocity,
+        resample_threshold,
+    ):
+        np.random.seed(seed)
+        pos = np.empty(n_particles)
+        velocity = np.empty(n_particles)
+        weights = np.ones(n_particles) / n_particles
+        for j in range(n_particles):
+            pos[j] = init_pos + 0.5 * np.random.randn()
+            velocity[j] = init_velocity + 0.02 * np.random.randn()
+        points = np.empty(len(md_v))
+        std = np.empty(len(md_v))
+        prev_md = md_v[0] - 1.0
+        prev_z = z_v[0] - 1.0
+        for i in range(len(md_v)):
+            delta_md = md_v[i] - prev_md
+            if delta_md < 1.0:
+                delta_md = 1.0
+            dzdmd = (z_v[i] - prev_z) / delta_md
+            expected_velocity = beta * dzdmd + intercept
+            for j in range(n_particles):
+                velocity[j] = (
+                    momentum * velocity[j] + velocity_noise * np.random.randn()
+                )
+                pos[j] += velocity[j] * delta_md + process_noise * np.random.randn()
+                lo = vmin - 50.0
+                hi = vmin + len(grid_gr) * step + 50.0
+                if pos[j] < lo:
+                    pos[j] = lo
+                if pos[j] > hi:
+                    pos[j] = hi
+            if not np.isnan(gr_v[i]):
+                weight_sum = 0.0
+                for j in range(n_particles):
+                    expected = _interp1(grid_gr, pos[j], vmin, step)
+                    diff = (gr_v[i] - expected) / gr_sigma
+                    likelihood = (
+                        np.exp(-0.5 * diff * diff) if diff * diff < 600.0 else 0.0
+                    )
+                    if not np.isnan(gr_smooth_v[i]):
+                        smooth_expected = _interp1(grid_smooth, pos[j], vmin, step)
+                        smooth_diff = (gr_smooth_v[i] - smooth_expected) / (
+                            gr_sigma * 1.5
+                        )
+                        smooth_like = (
+                            np.exp(-0.5 * smooth_diff * smooth_diff)
+                            if smooth_diff * smooth_diff < 600.0
+                            else 0.0
+                        )
+                        likelihood = (
+                            1.0 - gr_weight
+                        ) * likelihood + gr_weight * smooth_like
+                    weights[j] *= max(likelihood, 1e-300)
+                    weight_sum += weights[j]
+                if weight_sum > 0.0:
+                    for j in range(n_particles):
+                        weights[j] /= weight_sum
+                else:
+                    for j in range(n_particles):
+                        weights[j] = 1.0 / n_particles
+            velocity_weight_sum = 0.0
+            for j in range(n_particles):
+                diff_velocity = (velocity[j] - expected_velocity) / max(
+                    z_sigma * 2.0, 0.005
+                )
+                likelihood = (
+                    np.exp(-0.5 * diff_velocity * diff_velocity)
+                    if diff_velocity * diff_velocity < 600.0
+                    else 0.0
+                )
+                weights[j] *= max(likelihood, 1e-300)
+                velocity_weight_sum += weights[j]
+            if velocity_weight_sum > 0.0:
+                for j in range(n_particles):
+                    weights[j] /= velocity_weight_sum
+            else:
+                for j in range(n_particles):
+                    weights[j] = 1.0 / n_particles
+            eff_denom = 0.0
+            for j in range(n_particles):
+                eff_denom += weights[j] * weights[j]
+            if 1.0 / eff_denom < resample_threshold * n_particles:
+                pos, velocity = _resample_particles(
+                    pos, velocity, weights, n_particles, rough_pos, rough_velocity
+                )
+                for j in range(n_particles):
+                    weights[j] = 1.0 / n_particles
+            weighted_mean = 0.0
+            for j in range(n_particles):
+                weighted_mean += weights[j] * pos[j]
+            points[i] = weighted_mean
+            variance = 0.0
+            for j in range(n_particles):
+                centered = pos[j] - weighted_mean
+                variance += weights[j] * centered * centered
+            std[i] = variance**0.5
+            prev_md = md_v[i]
+            prev_z = z_v[i]
+        return points, std
+
 
 def greedy_beam_signal(
     gr_query: np.ndarray,
@@ -41,6 +365,227 @@ def greedy_beam_signal(
         idx = int(candidates[int(np.argmin(costs))])
         path[i] = idx
     return tw_tvt[path].astype(float)
+
+
+def require_numba_for_notebook_mode(top_cfg: dict[str, Any]) -> None:
+    if str(top_cfg.get("mode", "")).lower() == "notebook" and not NUMBA_AVAILABLE:
+        raise ImportError("features.kaggle_top.mode=notebook requires numba.")
+
+
+def parse_beam_config(
+    item: list[Any] | tuple[Any, ...],
+) -> tuple[int, float, float, int, str]:
+    if len(item) == 5:
+        beam_width, move_cost, emit_scale, smooth_radius, tag = item
+        return (
+            int(beam_width),
+            float(move_cost),
+            float(emit_scale),
+            int(smooth_radius),
+            str(tag),
+        )
+    if len(item) == 4:
+        move_cost, emit_scale, smooth_radius, tag = item
+        return 10, float(move_cost), float(emit_scale), int(smooth_radius), str(tag)
+    raise ValueError("kaggle_top.beam_configs entries must have 4 or 5 values.")
+
+
+def beam_search_signal(
+    gr_query: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    start_tvt: float,
+    beam_width: int,
+    move_cost: float,
+    emit_scale: float,
+    smooth_radius: int,
+    require_numba: bool,
+) -> np.ndarray:
+    if len(gr_query) == 0:
+        return np.array([], dtype=float)
+    if NUMBA_AVAILABLE:
+        smoothed_gr = smooth_for_alignment(
+            gr_query, smooth_radius, float(np.nanmean(tw_gr))
+        ).astype(np.float64)
+        start_index = nearest_index(tw_tvt, start_tvt)
+        path = _beam_jit(
+            smoothed_gr,
+            tw_gr.astype(np.float64),
+            int(start_index),
+            max(int(beam_width), 1),
+            float(move_cost),
+            max(float(emit_scale), 1e-6),
+        )
+        return tw_tvt[path].astype(float)
+    if require_numba:
+        raise ImportError("Notebook beam search requires numba.")
+    return greedy_beam_signal(
+        gr_query, tw_tvt, tw_gr, start_tvt, move_cost, emit_scale, smooth_radius
+    )
+
+
+def gr_sigma_from_known(
+    gr: np.ndarray, tvt_input: np.ndarray, tw_tvt: np.ndarray, tw_gr: np.ndarray
+) -> float:
+    valid = np.isfinite(gr) & np.isfinite(tvt_input)
+    if valid.sum() < 20:
+        return PF_GR_SIG_DEF
+    diff = gr[valid] - np.interp(tvt_input[valid], tw_tvt, tw_gr)
+    return float(np.clip(np.nanstd(diff), PF_GR_SIG_MIN, PF_GR_SIG_MAX))
+
+
+def typewell_grid(
+    tw_tvt: np.ndarray, tw_gr: np.ndarray, step: float = 0.2
+) -> tuple[np.ndarray, float, float]:
+    tvt_min = float(np.nanmin(tw_tvt))
+    tvt_max = float(np.nanmax(tw_tvt))
+    tvt_grid = np.arange(tvt_min, tvt_max + step, step)
+    return np.interp(tvt_grid, tw_tvt, tw_gr).astype(np.float64), tvt_min, float(step)
+
+
+def run_pf_ancc_signal(
+    md: np.ndarray,
+    z: np.ndarray,
+    gr: np.ndarray,
+    tvt_input: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    hidden_idx: np.ndarray,
+    known_idx: np.ndarray,
+    seed: int,
+    n_particles: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(hidden_idx) == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    if not NUMBA_AVAILABLE:
+        raise ImportError("PF_ANCC requires numba.")
+
+    gr_sigma = gr_sigma_from_known(gr, tvt_input, tw_tvt, tw_gr)
+    last_known_idx = int(known_idx[-1])
+    last_pos = float(tvt_input[last_known_idx] + z[last_known_idx])
+    tail_idx = known_idx[-30:]
+    delta_tvt = np.diff(tvt_input[tail_idx])
+    delta_z = np.diff(z[tail_idx])
+    delta_md = np.diff(md[tail_idx])
+    valid_delta = delta_md > 0
+    init_rate = (
+        float(
+            np.nanmedian(
+                (delta_tvt[valid_delta] + delta_z[valid_delta]) / delta_md[valid_delta]
+            )
+        )
+        if valid_delta.sum() >= 3
+        else 0.0
+    )
+    grid_gr, grid_min, grid_step = typewell_grid(tw_tvt, tw_gr)
+    points, std = _pf_ancc_jit(
+        md[hidden_idx].astype(np.float64),
+        z[hidden_idx].astype(np.float64),
+        gr[hidden_idx].astype(np.float64),
+        grid_gr,
+        grid_min,
+        grid_step,
+        gr_sigma,
+        last_pos,
+        init_rate,
+        max(int(n_particles), 32),
+        int(seed % (2**31 - 1)),
+        0.998,
+        0.002,
+        0.005,
+        0.3,
+        0.1,
+        0.001,
+        PF_RESAMP,
+    )
+    return points.astype(float), std.astype(float)
+
+
+def run_pf_z_signal(
+    md: np.ndarray,
+    z: np.ndarray,
+    gr: np.ndarray,
+    tvt_input: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    hidden_idx: np.ndarray,
+    known_idx: np.ndarray,
+    seed: int,
+    n_particles: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(hidden_idx) == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    if not NUMBA_AVAILABLE:
+        raise ImportError("PF_Z requires numba.")
+
+    gr_sigma = gr_sigma_from_known(gr, tvt_input, tw_tvt, tw_gr)
+    known = known_idx
+    delta_z = np.diff(z[known])
+    delta_tvt = np.diff(tvt_input[known])
+    delta_md = np.diff(md[known])
+    valid_delta = delta_md > 0
+    if valid_delta.sum() >= 10:
+        z_velocity = delta_z[valid_delta] / delta_md[valid_delta]
+        tvt_velocity = delta_tvt[valid_delta] / delta_md[valid_delta]
+        design = np.column_stack([z_velocity, np.ones_like(z_velocity)])
+        coef, _, _, _ = np.linalg.lstsq(design, tvt_velocity, rcond=None)
+        beta = float(coef[0])
+        intercept = float(coef[1])
+        z_sigma = max(float(np.nanstd(tvt_velocity - (design @ coef))), 0.001)
+    else:
+        beta = -1.0
+        intercept = 0.0
+        z_sigma = 0.1
+
+    tail_idx = known[-20:]
+    tail_delta_tvt = np.diff(tvt_input[tail_idx])
+    tail_delta_md = np.diff(md[tail_idx])
+    valid_tail = tail_delta_md > 0
+    init_velocity = (
+        float(np.nanmedian(tail_delta_tvt[valid_tail] / tail_delta_md[valid_tail]))
+        if valid_tail.sum() >= 3
+        else 0.0
+    )
+    smoothed_tw_gr = (
+        pd.Series(tw_gr)
+        .rolling(5, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
+    smoothed_gr = (
+        pd.Series(gr)
+        .rolling(5, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
+    grid_gr, grid_min, grid_step = typewell_grid(tw_tvt, tw_gr)
+    grid_smooth, _, _ = typewell_grid(tw_tvt, smoothed_tw_gr)
+    points, std = _pf_z_jit(
+        md[hidden_idx].astype(np.float64),
+        z[hidden_idx].astype(np.float64),
+        gr[hidden_idx].astype(np.float64),
+        smoothed_gr[hidden_idx].astype(np.float64),
+        grid_gr,
+        grid_smooth,
+        grid_min,
+        grid_step,
+        gr_sigma,
+        float(tvt_input[known[-1]]),
+        init_velocity,
+        beta,
+        intercept,
+        z_sigma,
+        max(int(n_particles), 32),
+        int(seed % (2**31 - 1)),
+        0.993,
+        0.005,
+        0.01,
+        0.3,
+        0.2,
+        0.003,
+        PF_RESAMP,
+    )
+    return points.astype(float), std.astype(float)
 
 
 def multi_scale_ncc(
@@ -264,38 +809,50 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_hidden_row",
         "kg_beam_mean_tvt",
         "kg_beam_mean_minus_flat",
+        "kg_beam_mean_minus_last",
         "kg_beam_std",
         "kg_ncc_mean_tvt",
         "kg_ncc_mean_minus_flat",
+        "kg_ncc_mean_minus_last",
         "kg_ncc_score_mean",
         "kg_dtw_tvt",
         "kg_dtw_minus_flat",
+        "kg_dtw_minus_last",
+        "kg_dtw_std",
         "kg_dtw_vs_beam",
         "kg_dwt_tvt",
         "kg_dwt_minus_flat",
+        "kg_dwt_minus_last",
+        "kg_dwt_std",
         "kg_dwt_vs_dtw",
         "kg_dwt_vs_beam",
         "kg_signal_mean_tvt",
         "kg_signal_mean_minus_flat",
+        "kg_signal_mean_minus_last",
         "kg_signal_std",
         "kg_form_ancc_tvt",
         "kg_form_ancc_minus_flat",
+        "kg_form_ancc_minus_last",
         "kg_form_mean_tvt",
         "kg_form_mean_minus_flat",
+        "kg_form_mean_minus_last",
         "kg_form_std",
         "kg_form_range",
         "kg_form_knn_dist",
         "kg_dense_ancc_tvt",
         "kg_dense_ancc_minus_flat",
+        "kg_dense_ancc_minus_last",
         "kg_dense_ancc_std",
         "kg_dense_ancc_dist",
         "kg_dense_vs_form",
         "kg_pf_z_tvt",
         "kg_pf_z_minus_flat",
+        "kg_pf_z_minus_last",
         "kg_pf_z_std",
         "kg_pf_z_velocity",
         "kg_pf_ancc_tvt",
         "kg_pf_ancc_minus_flat",
+        "kg_pf_ancc_minus_last",
         "kg_pf_ancc_std",
         "kg_pf_ancc_vs_dense",
     ]
@@ -319,6 +876,8 @@ def build_kaggle_top_signal_features(
     n = len(df)
     features = empty_top_signal_features(n)
     top_cfg = config["features"].get("kaggle_top", {})
+    require_numba_for_notebook_mode(top_cfg)
+    notebook_mode = str(top_cfg.get("mode", "")).lower() == "notebook"
     known = np.isfinite(tvt_input)
     hidden = ~known
     hidden_idx = np.flatnonzero(hidden)
@@ -356,15 +915,20 @@ def build_kaggle_top_signal_features(
     form_ancc_signal = None
 
     beam_signals: list[np.ndarray] = []
-    for move_cost, emit_scale, smooth_radius, tag in top_cfg.get("beam_configs", []):
-        signal = greedy_beam_signal(
+    for beam_cfg in top_cfg.get("beam_configs", []):
+        beam_width, move_cost, emit_scale, smooth_radius, tag = parse_beam_config(
+            beam_cfg
+        )
+        signal = beam_search_signal(
             hidden_gr,
             tw_tvt,
             tw_gr,
             last_tvt,
+            beam_width,
             float(move_cost),
             float(emit_scale),
             int(smooth_radius),
+            notebook_mode,
         )
         beam_signals.append(signal)
         features[f"kg_beam_{tag}_tvt"] = np.zeros(n, dtype=float)
@@ -383,6 +947,7 @@ def build_kaggle_top_signal_features(
         features["kg_beam_mean_minus_flat"][hidden_idx] = (
             beam_mean - flat_pred[hidden_idx]
         )
+        features["kg_beam_mean_minus_last"][hidden_idx] = beam_mean - last_tvt
         features["kg_beam_std"][hidden_idx] = np.nanstd(beam_matrix, axis=1)
     else:
         beam_mean = flat_pred[hidden_idx]
@@ -416,24 +981,47 @@ def build_kaggle_top_signal_features(
         features["kg_ncc_mean_minus_flat"][hidden_idx] = (
             np.nanmean(ncc_matrix, axis=1) - flat_pred[hidden_idx]
         )
+        features["kg_ncc_mean_minus_last"][hidden_idx] = (
+            np.nanmean(ncc_matrix, axis=1) - last_tvt
+        )
     if ncc_scores:
         features["kg_ncc_score_mean"][hidden_idx] = np.nanmean(
             np.vstack(ncc_scores).T, axis=1
         )
 
     if top_cfg.get("dtw_enabled", True):
-        dtw_signal = lowres_dtw_signal(
-            gr_full,
-            tw_tvt,
-            tw_gr,
-            int(top_cfg.get("dtw_max_query_points", 700)),
-            int(top_cfg.get("dtw_max_ref_points", 700)),
-            int(top_cfg.get("dtw_radius", 35)),
-        )
+        dtw_hidden_signals = []
+        dtw_radii = top_cfg.get("dtw_radii") or [top_cfg.get("dtw_radius", 35)]
+        for radius in [int(item) for item in dtw_radii]:
+            signal = lowres_dtw_signal(
+                gr_full,
+                tw_tvt,
+                tw_gr,
+                int(top_cfg.get("dtw_max_query_points", 700)),
+                int(top_cfg.get("dtw_max_ref_points", 700)),
+                radius,
+            )
+            dtw_hidden_signals.append(signal[hidden_idx])
+            features[f"kg_dtw_r{radius}_tvt"] = np.zeros(n, dtype=float)
+            features[f"kg_dtw_r{radius}_tvt"][hidden_idx] = signal[hidden_idx]
+            features[f"kg_dtw_r{radius}_minus_flat"] = np.zeros(n, dtype=float)
+            features[f"kg_dtw_r{radius}_minus_flat"][hidden_idx] = (
+                signal[hidden_idx] - flat_pred[hidden_idx]
+            )
+            features[f"kg_dtw_r{radius}_minus_last"] = np.zeros(n, dtype=float)
+            features[f"kg_dtw_r{radius}_minus_last"][hidden_idx] = (
+                signal[hidden_idx] - last_tvt
+            )
+        dtw_matrix = np.vstack(dtw_hidden_signals).T
+        dtw_hidden = np.nanmean(dtw_matrix, axis=1)
+        dtw_signal = np.full(n, np.nan, dtype=float)
+        dtw_signal[hidden_idx] = dtw_hidden
         features["kg_dtw_tvt"][hidden_idx] = dtw_signal[hidden_idx]
         features["kg_dtw_minus_flat"][hidden_idx] = (
             dtw_signal[hidden_idx] - flat_pred[hidden_idx]
         )
+        features["kg_dtw_minus_last"][hidden_idx] = dtw_signal[hidden_idx] - last_tvt
+        features["kg_dtw_std"][hidden_idx] = np.nanstd(dtw_matrix, axis=1)
         features["kg_dtw_vs_beam"][hidden_idx] = dtw_signal[hidden_idx] - beam_mean
         signal_stack = [beam_mean, dtw_signal[hidden_idx]]
     else:
@@ -453,26 +1041,49 @@ def build_kaggle_top_signal_features(
             int(top_cfg.get("dwt_level", 3)),
             float(np.nanmean(tw_gr)),
         )
-        dwt_signal = lowres_dtw_signal(
-            dwt_full,
-            tw_tvt,
-            dwt_tw,
-            int(
-                top_cfg.get(
-                    "dwt_max_query_points", top_cfg.get("dtw_max_query_points", 700)
-                )
-            ),
-            int(
-                top_cfg.get(
-                    "dwt_max_ref_points", top_cfg.get("dtw_max_ref_points", 700)
-                )
-            ),
-            int(top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))),
-        )
+        dwt_hidden_signals = []
+        dwt_radii = top_cfg.get("dwt_radii") or [
+            top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))
+        ]
+        for radius in [int(item) for item in dwt_radii]:
+            signal = lowres_dtw_signal(
+                dwt_full,
+                tw_tvt,
+                dwt_tw,
+                int(
+                    top_cfg.get(
+                        "dwt_max_query_points",
+                        top_cfg.get("dtw_max_query_points", 700),
+                    )
+                ),
+                int(
+                    top_cfg.get(
+                        "dwt_max_ref_points", top_cfg.get("dtw_max_ref_points", 700)
+                    )
+                ),
+                radius,
+            )
+            dwt_hidden_signals.append(signal[hidden_idx])
+            features[f"kg_dwt_r{radius}_tvt"] = np.zeros(n, dtype=float)
+            features[f"kg_dwt_r{radius}_tvt"][hidden_idx] = signal[hidden_idx]
+            features[f"kg_dwt_r{radius}_minus_flat"] = np.zeros(n, dtype=float)
+            features[f"kg_dwt_r{radius}_minus_flat"][hidden_idx] = (
+                signal[hidden_idx] - flat_pred[hidden_idx]
+            )
+            features[f"kg_dwt_r{radius}_minus_last"] = np.zeros(n, dtype=float)
+            features[f"kg_dwt_r{radius}_minus_last"][hidden_idx] = (
+                signal[hidden_idx] - last_tvt
+            )
+        dwt_matrix = np.vstack(dwt_hidden_signals).T
+        dwt_hidden = np.nanmean(dwt_matrix, axis=1)
+        dwt_signal = np.full(n, np.nan, dtype=float)
+        dwt_signal[hidden_idx] = dwt_hidden
         features["kg_dwt_tvt"][hidden_idx] = dwt_signal[hidden_idx]
         features["kg_dwt_minus_flat"][hidden_idx] = (
             dwt_signal[hidden_idx] - flat_pred[hidden_idx]
         )
+        features["kg_dwt_minus_last"][hidden_idx] = dwt_signal[hidden_idx] - last_tvt
+        features["kg_dwt_std"][hidden_idx] = np.nanstd(dwt_matrix, axis=1)
         if dtw_signal is not None:
             features["kg_dwt_vs_dtw"][hidden_idx] = (
                 dwt_signal[hidden_idx] - dtw_signal[hidden_idx]
@@ -509,10 +1120,14 @@ def build_kaggle_top_signal_features(
             features["kg_form_ancc_minus_flat"][hidden_idx] = (
                 form_ancc_signal - flat_pred[hidden_idx]
             )
+            features["kg_form_ancc_minus_last"][hidden_idx] = (
+                form_ancc_signal - last_tvt
+            )
             features["kg_form_mean_tvt"][hidden_idx] = form_mean
             features["kg_form_mean_minus_flat"][hidden_idx] = (
                 form_mean - flat_pred[hidden_idx]
             )
+            features["kg_form_mean_minus_last"][hidden_idx] = form_mean - last_tvt
             features["kg_form_std"][hidden_idx] = np.nanstd(form_matrix, axis=1)
             features["kg_form_range"][hidden_idx] = np.nanmax(
                 form_matrix, axis=1
@@ -537,43 +1152,76 @@ def build_kaggle_top_signal_features(
         features["kg_dense_ancc_minus_flat"][hidden_idx] = (
             dense_signal - flat_pred[hidden_idx]
         )
+        features["kg_dense_ancc_minus_last"][hidden_idx] = dense_signal - last_tvt
         features["kg_dense_ancc_std"][hidden_idx] = dense_std
         features["kg_dense_ancc_dist"][hidden_idx] = dense_dist
         features["kg_dense_vs_form"][hidden_idx] = dense_signal - form_mean
         signal_stack.append(dense_signal)
 
     if top_cfg.get("particle_enabled", False):
-        base_candidates = [flat_pred[hidden_idx], *signal_stack]
-        pf_z, pf_z_std = particle_filter_signal(
-            np.vstack(base_candidates).T,
-            deterministic_seed(f"{well}:pf_z"),
-            int(top_cfg.get("particle_count", 192)),
-            float(top_cfg.get("particle_process_noise", 4.0)),
-            float(top_cfg.get("particle_observation_scale", 18.0)),
-        )
+        if notebook_mode:
+            pf_z, pf_z_std = run_pf_z_signal(
+                md,
+                z,
+                gr,
+                tvt_input,
+                tw_tvt,
+                tw_gr,
+                hidden_idx,
+                known_idx,
+                deterministic_seed(f"{well}:pf_z"),
+                int(top_cfg.get("particle_count", 600)),
+            )
+            pf_ancc, pf_ancc_std = run_pf_ancc_signal(
+                md,
+                z,
+                gr,
+                tvt_input,
+                tw_tvt,
+                tw_gr,
+                hidden_idx,
+                known_idx,
+                deterministic_seed(f"{well}:pf_ancc"),
+                int(
+                    top_cfg.get(
+                        "ancc_particle_count", top_cfg.get("particle_count", 600)
+                    )
+                ),
+            )
+        else:
+            base_candidates = [flat_pred[hidden_idx], *signal_stack]
+            pf_z, pf_z_std = particle_filter_signal(
+                np.vstack(base_candidates).T,
+                deterministic_seed(f"{well}:pf_z"),
+                int(top_cfg.get("particle_count", 192)),
+                float(top_cfg.get("particle_process_noise", 4.0)),
+                float(top_cfg.get("particle_observation_scale", 18.0)),
+            )
+
+            ancc_candidates = [flat_pred[hidden_idx], beam_mean]
+            if dtw_signal is not None:
+                ancc_candidates.append(dtw_signal[hidden_idx])
+            if dwt_signal is not None:
+                ancc_candidates.append(dwt_signal[hidden_idx])
+            if form_ancc_signal is not None:
+                ancc_candidates.append(form_ancc_signal)
+            if dense_signal is not None:
+                ancc_candidates.append(dense_signal)
+            pf_ancc, pf_ancc_std = particle_filter_signal(
+                np.vstack(ancc_candidates).T,
+                deterministic_seed(f"{well}:pf_ancc"),
+                int(top_cfg.get("particle_count", 192)),
+                float(top_cfg.get("particle_process_noise", 4.0)),
+                float(top_cfg.get("particle_observation_scale", 18.0)),
+            )
         features["kg_pf_z_tvt"][hidden_idx] = pf_z
         features["kg_pf_z_minus_flat"][hidden_idx] = pf_z - flat_pred[hidden_idx]
+        features["kg_pf_z_minus_last"][hidden_idx] = pf_z - last_tvt
         features["kg_pf_z_std"][hidden_idx] = pf_z_std
         features["kg_pf_z_velocity"][hidden_idx] = np.gradient(pf_z)
-
-        ancc_candidates = [flat_pred[hidden_idx], beam_mean]
-        if dtw_signal is not None:
-            ancc_candidates.append(dtw_signal[hidden_idx])
-        if dwt_signal is not None:
-            ancc_candidates.append(dwt_signal[hidden_idx])
-        if form_ancc_signal is not None:
-            ancc_candidates.append(form_ancc_signal)
-        if dense_signal is not None:
-            ancc_candidates.append(dense_signal)
-        pf_ancc, pf_ancc_std = particle_filter_signal(
-            np.vstack(ancc_candidates).T,
-            deterministic_seed(f"{well}:pf_ancc"),
-            int(top_cfg.get("particle_count", 192)),
-            float(top_cfg.get("particle_process_noise", 4.0)),
-            float(top_cfg.get("particle_observation_scale", 18.0)),
-        )
         features["kg_pf_ancc_tvt"][hidden_idx] = pf_ancc
         features["kg_pf_ancc_minus_flat"][hidden_idx] = pf_ancc - flat_pred[hidden_idx]
+        features["kg_pf_ancc_minus_last"][hidden_idx] = pf_ancc - last_tvt
         features["kg_pf_ancc_std"][hidden_idx] = pf_ancc_std
         if dense_signal is not None:
             features["kg_pf_ancc_vs_dense"][hidden_idx] = pf_ancc - dense_signal
@@ -582,6 +1230,9 @@ def build_kaggle_top_signal_features(
     features["kg_signal_mean_tvt"][hidden_idx] = np.nanmean(signal_matrix, axis=1)
     features["kg_signal_mean_minus_flat"][hidden_idx] = (
         np.nanmean(signal_matrix, axis=1) - flat_pred[hidden_idx]
+    )
+    features["kg_signal_mean_minus_last"][hidden_idx] = (
+        np.nanmean(signal_matrix, axis=1) - last_tvt
     )
     features["kg_signal_std"][hidden_idx] = np.nanstd(signal_matrix, axis=1)
     features["kg_hidden_row"][hidden_idx] = 1.0

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +47,39 @@ def choose_prediction_baseline(
     raise ValueError(
         "features.prediction_baseline must be 'flat_tvt' or 'last_known_tvt'."
     )
+
+
+def feature_cache_path(
+    horizontal_path: Path,
+    config: dict[str, Any],
+    train: bool,
+) -> Path | None:
+    cache_cfg = config["features"].get("cache") or {}
+    if not cache_cfg.get("enabled", False):
+        return None
+
+    type_path = typewell_path(horizontal_path)
+    stats = {
+        "horizontal": {
+            "name": horizontal_path.name,
+            "size": horizontal_path.stat().st_size,
+            "mtime_ns": horizontal_path.stat().st_mtime_ns,
+        },
+        "typewell": None,
+        "train": bool(train),
+        "features": config.get("features", {}),
+        "target_rows": config.get("data", {}).get("target_rows", "hidden_only"),
+    }
+    if type_path is not None:
+        stats["typewell"] = {
+            "name": type_path.name,
+            "size": type_path.stat().st_size,
+            "mtime_ns": type_path.stat().st_mtime_ns,
+        }
+    payload = json.dumps(stats, sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.sha1(payload).hexdigest()[:16]
+    cache_dir = Path(cache_cfg.get("dir", "artifacts/feature_cache"))
+    return cache_dir / f"{well_name(horizontal_path)}_{digest}.pkl"
 
 
 def read_typewell_features(
@@ -129,6 +165,16 @@ def build_well_features(
     train: bool,
     top_context: KaggleTopContext | None = None,
 ) -> WellFeatures:
+    cache_path = feature_cache_path(horizontal_path, config, train)
+    if cache_path is not None and cache_path.is_file():
+        try:
+            with cache_path.open("rb") as file:
+                cached = pickle.load(file)
+            if isinstance(cached, WellFeatures):
+                return cached
+        except Exception:
+            pass
+
     df = pd.read_csv(horizontal_path)
     n = len(df)
     well = well_name(horizontal_path)
@@ -295,13 +341,18 @@ def build_well_features(
         if train and "TVT" in df.columns
         else None
     )
-    return WellFeatures(
+    well_features = WellFeatures(
         well=well,
         features=feature_frame,
         flat_prediction=base_pred,
         target=target,
         target_mask=target_mask,
     )
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as file:
+            pickle.dump(well_features, file)
+    return well_features
 
 
 def build_training_table(

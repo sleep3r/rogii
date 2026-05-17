@@ -13,7 +13,12 @@ from .io import (
     resolve_test_dir,
     resolve_train_dir,
 )
-from .modeling import apply_postprocess, make_model, rmse, run_cv
+from .modeling import (
+    EnsembleRegressor,
+    apply_postprocess,
+    evaluate_oof_predictions,
+    rmse,
+)
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .submission import predict_test, save_outputs
@@ -39,9 +44,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override outputs.submission_path.",
     )
-    parser.add_argument(
-        "--no-cv", action="store_true", help="Skip group CV and train final model only."
-    )
     return parser.parse_args()
 
 
@@ -57,9 +59,6 @@ def main() -> None:
         config["outputs"]["output_dir"] = str(args.output_dir)
     if args.submission is not None:
         config["outputs"]["submission_path"] = str(args.submission)
-    if args.no_cv:
-        config["validation"]["enabled"] = False
-
     seed = int(config.get("seed", 42))
     data_dir = resolve_data_dir(config)
     train_dir = resolve_train_dir(data_dir, config)
@@ -105,33 +104,33 @@ def main() -> None:
         baseline_train_rmse=rmse(flat, y_true),
     )
 
-    metrics: dict[str, Any] = {}
-    if config["validation"].get("enabled", True):
-        with logger.step(
-            "Run grouped cross-validation",
-            n_splits=config["validation"].get("n_splits", 5),
-        ):
-            metrics["cv"] = run_cv(
-                X, residual, groups, flat, y_true, config, seed, logger
-            )
-        best_weight = metrics["cv"].get("best_residual_weight")
-        if (
-            best_weight is not None
-            and config["postprocess"].get("residual_weight") == "auto"
-        ):
+    def apply_cv_selection(cv_metrics: dict[str, Any]) -> None:
+        best_weight = cv_metrics.get("best_residual_weight")
+        if best_weight is not None:
             config["postprocess"]["residual_weight"] = best_weight
-        best_notebook_blend = metrics["cv"].get("best_notebook_blend")
+        best_notebook_blend = cv_metrics.get("best_notebook_blend")
         notebook_blend_cfg = config["postprocess"].get("notebook_blend") or {}
         if best_notebook_blend and notebook_blend_cfg.get("enabled", False):
             notebook_blend_cfg.update(best_notebook_blend)
             config["postprocess"]["notebook_blend"] = notebook_blend_cfg
-    else:
-        logger.warn("Cross-validation disabled")
-        metrics["cv"] = {"enabled": False}
+        best_smoothing = cv_metrics.get("best_smoothing")
+        smoothing_cfg = config["postprocess"].get("smoothing") or {}
+        if best_smoothing and smoothing_cfg.get("enabled", False):
+            smoothing_cfg.update(best_smoothing)
+            config["postprocess"]["smoothing"] = smoothing_cfg
 
-    with logger.step("Train final model", rows=len(X), features=len(X.columns)):
-        model = make_model(config, seed)
-        model.fit(X, residual)
+    metrics: dict[str, Any] = {}
+    model = EnsembleRegressor(config, seed)
+    with logger.step("Train OOF ensemble", rows=len(X), features=len(X.columns)):
+        model.fit(X, residual, groups=groups, logger=logger)
+    metrics["model"] = model.metrics_
+    if model.oof_residual_ is None:
+        raise RuntimeError("Ensemble did not produce OOF residual predictions.")
+    with logger.step("Tune OOF postprocess", rows=len(X)):
+        metrics["cv"] = evaluate_oof_predictions(
+            model.oof_residual_, X, groups, flat, y_true, config, logger
+        )
+    apply_cv_selection(metrics["cv"])
 
     metrics["train"] = {
         "rows": int(len(X)),
@@ -141,8 +140,14 @@ def main() -> None:
         "flat_rmse": rmse(flat, y_true),
     }
     if config.get("reporting", {}).get("compute_train_metrics", True):
-        with logger.step("Evaluate final model on train", rows=len(X)):
-            train_pred = apply_postprocess(flat, model.predict(X), config, features=X)
+        with logger.step("Evaluate OOF train prediction", rows=len(X)):
+            train_pred = apply_postprocess(
+                flat,
+                model.oof_residual_,
+                config,
+                features=X,
+                groups=groups,
+            )
         metrics["train"]["rmse"] = rmse(train_pred, y_true)
         logger.metric(
             "Final train summary",

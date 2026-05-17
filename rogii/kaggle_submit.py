@@ -19,13 +19,13 @@ from requests import HTTPError
 from .kaggle_package import DEFAULT_INCLUDE, iter_package_files
 
 DEFAULT_COMPETITION = "rogii-wellbore-geology-prediction"
-DEFAULT_KERNEL = "rogii-gbm-stack-submit"
-DEFAULT_TITLE = "ROGII GBM Stack Submit"
-DEFAULT_CONFIG = Path("configs/best.yml")
+DEFAULT_KERNEL = "rogii-baseline-infer"
+DEFAULT_TITLE = "ROGII Baseline Infer"
+DEFAULT_CONFIG = Path("configs/stack.yml")
 DEFAULT_KERNEL_DIR = Path("artifacts/kaggle_kernel")
 DEFAULT_OUTPUT_DIR = Path("artifacts/kaggle_output")
 DEFAULT_DATA_DIR = Path("/kaggle/input/rogii-wellbore-geology-prediction")
-DEFAULT_ARTIFACT_DIR = Path("artifacts/submit_stack")
+DEFAULT_ARTIFACT_DIR = Path("artifacts/stack")
 DEFAULT_MODEL_DIR = Path("artifacts/stack")
 DEFAULT_MODEL_DATASET_DIR = Path("artifacts/kaggle_model_dataset")
 DEFAULT_SUBMISSION = "submission.csv"
@@ -238,17 +238,17 @@ def main() -> None:
 
     resolved_data_dir = resolve_competition_data_dir(Path("{data_dir.as_posix()}"), work_dir)
 
-    sys.argv = [
-        "run.py",
-        "--config",
-        str(source_dir / "{config_rel}"),
+    sys.argv = ["run.py"]
+    if "{mode}" != "infer":
+        sys.argv.extend(["--config", str(source_dir / "{config_rel}")])
+    sys.argv.extend([
         "--data-dir",
         str(resolved_data_dir),
         "--submission",
         str(work_dir / "{submission_file}"),
         "--output-dir",
         str(work_dir / "{artifact_dir.as_posix()}"),
-    ]
+    ])
     if "{mode}" == "infer" and "{model_dataset}":
         sys.argv.extend(["--model-dir", "{model_arg}"])
     elif "{mode}" == "infer":
@@ -321,7 +321,7 @@ def prepare_model_dataset(args: argparse.Namespace) -> Path:
             shutil.copyfile(path, dataset_dir / path.name)
 
     metadata = {
-        "title": "ROGII Stack Artifacts",
+        "title": "ROGII Baseline Artifacts",
         "id": args.model_dataset,
         "licenses": [{"name": "CC0-1.0"}],
         "subtitle": "Trained ROGII model artifacts for inference-only Kaggle runs",

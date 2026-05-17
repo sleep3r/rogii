@@ -58,7 +58,7 @@ def choose_config_path(model_dir: Path, requested: Path | None) -> Path:
     artifact_config = model_dir / "config.yml"
     if artifact_config.is_file():
         return artifact_config
-    return Path("configs/best.yml")
+    return Path("configs/stack.yml")
 
 
 def load_artifact_config(path: Path) -> dict[str, Any]:
@@ -73,18 +73,6 @@ def load_artifact_config(path: Path) -> dict[str, Any]:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
-
-
-def apply_artifact_postprocess(config: dict[str, Any], model_dir: Path) -> None:
-    if config["postprocess"].get("residual_weight") != "auto":
-        return
-    metrics_path = model_dir / "metrics.json"
-    if not metrics_path.is_file():
-        return
-    metrics = load_json(metrics_path)
-    best_weight = metrics.get("cv", {}).get("best_residual_weight")
-    if best_weight is not None:
-        config["postprocess"]["residual_weight"] = float(best_weight)
 
 
 def load_model_bundle(model_dir: Path) -> tuple[Any, list[str], dict[str, Any]]:
@@ -112,7 +100,6 @@ def main() -> None:
     model_dir = args.model_dir
     config_path = choose_config_path(model_dir, args.config)
     config = load_artifact_config(config_path)
-    apply_artifact_postprocess(config, model_dir)
 
     if args.data_dir is not None:
         config["data"]["data_dir"] = str(args.data_dir)
