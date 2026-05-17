@@ -11,6 +11,11 @@ from .io import typewell_path, well_name
 from .numeric import as_float_array, fill_numeric, nearest_index, smooth_for_alignment
 from .spatial import KaggleTopContext
 
+try:
+    import pywt
+except Exception:  # pragma: no cover - Kaggle images may vary.
+    pywt = None
+
 
 def greedy_beam_signal(
     gr_query: np.ndarray,
@@ -160,6 +165,100 @@ def lowres_dtw_signal(
     return np.interp(np.arange(len(full_gr)), q_idx, coarse_tvt).astype(float)
 
 
+def wavelet_lowpass(
+    values: np.ndarray,
+    wavelet: str,
+    level: int,
+    fallback: float,
+) -> np.ndarray:
+    filled = fill_numeric(values, fallback)
+    if pywt is None or len(filled) < 8 or level <= 0:
+        return smooth_for_alignment(filled, 3, fallback)
+    try:
+        max_level = pywt.dwt_max_level(len(filled), pywt.Wavelet(wavelet).dec_len)
+        effective_level = max(1, min(int(level), int(max_level)))
+        coeffs = pywt.wavedec(filled, wavelet, mode="symmetric", level=effective_level)
+        coeffs[1:] = [np.zeros_like(coeff) for coeff in coeffs[1:]]
+        reconstructed = pywt.waverec(coeffs, wavelet, mode="symmetric")
+    except Exception:
+        return smooth_for_alignment(filled, 3, fallback)
+    return np.asarray(reconstructed[: len(filled)], dtype=float)
+
+
+def deterministic_seed(text: str) -> int:
+    seed = 2166136261
+    for char in text:
+        seed ^= ord(char)
+        seed *= 16777619
+        seed &= 0xFFFFFFFF
+    return int(seed)
+
+
+def particle_filter_signal(
+    candidate_matrix: np.ndarray,
+    seed: int,
+    n_particles: int,
+    process_noise: float,
+    observation_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    candidates = np.asarray(candidate_matrix, dtype=float)
+    if candidates.ndim != 2 or candidates.shape[0] == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    row_median = np.nanmedian(candidates, axis=1)
+    global_median = (
+        float(np.nanmedian(row_median)) if np.isfinite(row_median).any() else 0.0
+    )
+    row_median = np.where(np.isfinite(row_median), row_median, global_median)
+    candidates = np.where(np.isfinite(candidates), candidates, row_median[:, None])
+
+    n_steps = candidates.shape[0]
+    n_particles = max(32, int(n_particles))
+    process_noise = max(float(process_noise), 1e-3)
+    observation_scale = max(float(observation_scale), 1e-3)
+    rng = np.random.default_rng(seed)
+
+    first_candidates = candidates[0]
+    base = rng.choice(first_candidates, size=n_particles, replace=True)
+    particles = base + rng.normal(0.0, process_noise, size=n_particles)
+    weights = np.full(n_particles, 1.0 / n_particles, dtype=float)
+    means = np.empty(n_steps, dtype=float)
+    stds = np.empty(n_steps, dtype=float)
+
+    for step in range(n_steps):
+        if step > 0:
+            delta = float(np.nanmedian(candidates[step] - candidates[step - 1]))
+            particles = (
+                particles + delta + rng.normal(0.0, process_noise, size=n_particles)
+            )
+
+        residual = particles[:, None] - candidates[step][None, :]
+        likelihood = np.exp(
+            -0.5 * np.nanmin((residual / observation_scale) ** 2, axis=1)
+        )
+        weights *= likelihood + 1e-12
+        weight_sum = float(weights.sum())
+        if not np.isfinite(weight_sum) or weight_sum <= 0:
+            weights.fill(1.0 / n_particles)
+        else:
+            weights /= weight_sum
+
+        mean = float(weights @ particles)
+        variance = float(weights @ ((particles - mean) ** 2))
+        means[step] = mean
+        stds[step] = np.sqrt(max(variance, 0.0))
+
+        effective_size = 1.0 / float(np.sum(weights**2))
+        if effective_size < n_particles * 0.5:
+            positions = (rng.random() + np.arange(n_particles)) / n_particles
+            cumulative = np.cumsum(weights)
+            indexes = np.searchsorted(cumulative, positions, side="left")
+            particles = particles[np.clip(indexes, 0, n_particles - 1)]
+            weights.fill(1.0 / n_particles)
+
+    return means, stds
+
+
 def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
     keys = [
         "kg_hidden_row",
@@ -169,6 +268,9 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_ncc_score_mean",
         "kg_dtw_minus_flat",
         "kg_dtw_vs_beam",
+        "kg_dwt_minus_flat",
+        "kg_dwt_vs_dtw",
+        "kg_dwt_vs_beam",
         "kg_signal_mean_minus_flat",
         "kg_signal_std",
         "kg_form_ancc_minus_flat",
@@ -180,6 +282,12 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_dense_ancc_std",
         "kg_dense_ancc_dist",
         "kg_dense_vs_form",
+        "kg_pf_z_minus_flat",
+        "kg_pf_z_std",
+        "kg_pf_z_velocity",
+        "kg_pf_ancc_minus_flat",
+        "kg_pf_ancc_std",
+        "kg_pf_ancc_vs_dense",
     ]
     return {key: np.zeros(n, dtype=float) for key in keys}
 
@@ -233,6 +341,9 @@ def build_kaggle_top_signal_features(
     hidden_gr = gr_full[hidden_idx]
     known_gr = gr_full[known_idx]
     known_tvt = tvt_input[known_idx]
+    dwt_signal = None
+    dense_signal = None
+    form_ancc_signal = None
 
     beam_signals: list[np.ndarray] = []
     for move_cost, emit_scale, smooth_radius, tag in top_cfg.get("beam_configs", []):
@@ -307,7 +418,47 @@ def build_kaggle_top_signal_features(
         features["kg_dtw_vs_beam"][hidden_idx] = dtw_signal[hidden_idx] - beam_mean
         signal_stack = [beam_mean, dtw_signal[hidden_idx]]
     else:
+        dtw_signal = None
         signal_stack = [beam_mean]
+
+    if top_cfg.get("dwt_enabled", False):
+        dwt_full = wavelet_lowpass(
+            gr_full,
+            str(top_cfg.get("dwt_wavelet", "db4")),
+            int(top_cfg.get("dwt_level", 3)),
+            float(np.nanmean(tw_gr)),
+        )
+        dwt_tw = wavelet_lowpass(
+            tw_gr,
+            str(top_cfg.get("dwt_wavelet", "db4")),
+            int(top_cfg.get("dwt_level", 3)),
+            float(np.nanmean(tw_gr)),
+        )
+        dwt_signal = lowres_dtw_signal(
+            dwt_full,
+            tw_tvt,
+            dwt_tw,
+            int(
+                top_cfg.get(
+                    "dwt_max_query_points", top_cfg.get("dtw_max_query_points", 700)
+                )
+            ),
+            int(
+                top_cfg.get(
+                    "dwt_max_ref_points", top_cfg.get("dtw_max_ref_points", 700)
+                )
+            ),
+            int(top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))),
+        )
+        features["kg_dwt_minus_flat"][hidden_idx] = (
+            dwt_signal[hidden_idx] - flat_pred[hidden_idx]
+        )
+        if dtw_signal is not None:
+            features["kg_dwt_vs_dtw"][hidden_idx] = (
+                dwt_signal[hidden_idx] - dtw_signal[hidden_idx]
+            )
+        features["kg_dwt_vs_beam"][hidden_idx] = dwt_signal[hidden_idx] - beam_mean
+        signal_stack.append(dwt_signal[hidden_idx])
 
     if context is not None:
         xy_hidden = np.column_stack([x[hidden_idx], y[hidden_idx]])
@@ -330,8 +481,9 @@ def build_kaggle_top_signal_features(
                 features[col][hidden_idx] = signal - flat_pred[hidden_idx]
             form_matrix = np.vstack(form_signals).T
             form_mean = np.nanmean(form_matrix, axis=1)
+            form_ancc_signal = form_matrix[:, 0]
             features["kg_form_ancc_minus_flat"][hidden_idx] = (
-                form_matrix[:, 0] - flat_pred[hidden_idx]
+                form_ancc_signal - flat_pred[hidden_idx]
             )
             features["kg_form_mean_minus_flat"][hidden_idx] = (
                 form_mean - flat_pred[hidden_idx]
@@ -363,6 +515,40 @@ def build_kaggle_top_signal_features(
         features["kg_dense_ancc_dist"][hidden_idx] = dense_dist
         features["kg_dense_vs_form"][hidden_idx] = dense_signal - form_mean
         signal_stack.append(dense_signal)
+
+    if top_cfg.get("particle_enabled", False):
+        base_candidates = [flat_pred[hidden_idx], *signal_stack]
+        pf_z, pf_z_std = particle_filter_signal(
+            np.vstack(base_candidates).T,
+            deterministic_seed(f"{well}:pf_z"),
+            int(top_cfg.get("particle_count", 192)),
+            float(top_cfg.get("particle_process_noise", 4.0)),
+            float(top_cfg.get("particle_observation_scale", 18.0)),
+        )
+        features["kg_pf_z_minus_flat"][hidden_idx] = pf_z - flat_pred[hidden_idx]
+        features["kg_pf_z_std"][hidden_idx] = pf_z_std
+        features["kg_pf_z_velocity"][hidden_idx] = np.gradient(pf_z)
+
+        ancc_candidates = [flat_pred[hidden_idx], beam_mean]
+        if dtw_signal is not None:
+            ancc_candidates.append(dtw_signal[hidden_idx])
+        if dwt_signal is not None:
+            ancc_candidates.append(dwt_signal[hidden_idx])
+        if form_ancc_signal is not None:
+            ancc_candidates.append(form_ancc_signal)
+        if dense_signal is not None:
+            ancc_candidates.append(dense_signal)
+        pf_ancc, pf_ancc_std = particle_filter_signal(
+            np.vstack(ancc_candidates).T,
+            deterministic_seed(f"{well}:pf_ancc"),
+            int(top_cfg.get("particle_count", 192)),
+            float(top_cfg.get("particle_process_noise", 4.0)),
+            float(top_cfg.get("particle_observation_scale", 18.0)),
+        )
+        features["kg_pf_ancc_minus_flat"][hidden_idx] = pf_ancc - flat_pred[hidden_idx]
+        features["kg_pf_ancc_std"][hidden_idx] = pf_ancc_std
+        if dense_signal is not None:
+            features["kg_pf_ancc_vs_dense"][hidden_idx] = pf_ancc - dense_signal
 
     signal_matrix = np.vstack(signal_stack).T
     features["kg_signal_mean_minus_flat"][hidden_idx] = (

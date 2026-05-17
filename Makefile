@@ -4,23 +4,32 @@ UV ?= uv
 PYTHON ?= $(UV) run python
 KAGGLE ?= $(UV) run kaggle
 DATA_DIR ?= data
-CONFIG ?= configs/hgb.yml
+CONFIG ?= configs/stack.yml
 SUBMIT_CONFIG ?= configs/submit.yml
 BEST_CONFIG ?= configs/best.yml
 SUBMISSION ?= submission.csv
 KAGGLE_PACKAGE ?= artifacts/rogii_source.zip
-KERNEL ?= rogii-hgb-submit
-KERNEL_TITLE ?= ROGII HGB Submit
+KERNEL ?= rogii-gbm-stack-submit
+KERNEL_TITLE ?= ROGII GBM Stack Submit
 KERNEL_DIR ?= artifacts/kaggle_kernel
 KERNEL_OUTPUT_DIR ?= artifacts/kaggle_output
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
-KAGGLE_ARTIFACT_DIR ?= artifacts/submit
-KAGGLE_TRAIN_CONFIG ?= configs/hgb.yml
-KAGGLE_TRAIN_KERNEL ?= rogii-hgb-train
-KAGGLE_TRAIN_TITLE ?= ROGII HGB Train
+KAGGLE_ARTIFACT_DIR ?= artifacts/submit_stack
+KAGGLE_TRAIN_CONFIG ?= configs/stack.yml
+KAGGLE_TRAIN_KERNEL ?= rogii-gbm-stack-train
+KAGGLE_TRAIN_TITLE ?= ROGII GBM Stack Train
 KAGGLE_TRAIN_KERNEL_DIR ?= artifacts/kaggle_train_kernel
 KAGGLE_TRAIN_OUTPUT_DIR ?= artifacts/kaggle_train_output
 KAGGLE_TRAIN_ARTIFACT_DIR ?= artifacts/kaggle_train
+INFER_CONFIG ?= configs/best.yml
+INFER_MODEL_DIR ?= artifacts/stack
+INFER_ARTIFACT_DIR ?= artifacts/infer
+INFER_KERNEL ?= rogii-gbm-stack-submit
+INFER_KERNEL_TITLE ?= ROGII GBM Stack Submit
+INFER_KERNEL_DIR ?= artifacts/kaggle_infer_kernel
+INFER_OUTPUT_DIR ?= artifacts/kaggle_infer_output
+MODEL_DATASET ?= $(KAGGLE_USER)/rogii-stack-artifacts
+MODEL_DATASET_DIR ?= artifacts/kaggle_model_dataset
 KERNEL_TIMEOUT ?= 32400
 KERNEL_WAIT_TIMEOUT ?= 36000
 KERNEL_POLL_INTERVAL ?= 60
@@ -40,7 +49,7 @@ DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit train-kaggle train-kaggle-dry status-kaggle-train logs-kaggle-train mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry status-submit logs-submit submit-version format check
+.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit infer train-kaggle train-kaggle-dry status-kaggle-train logs-kaggle-train mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel prepare-kaggle-infer submit submit-kaggle submit-kaggle-dry submit-infer submit-infer-dry status-submit logs-submit status-infer logs-infer submit-version format check
 
 install-deps:
 	$(UV) sync
@@ -65,6 +74,9 @@ quick-train:
 
 train-submit: ensure-data
 	$(UV) run python -m rogii --config $(SUBMIT_CONFIG)
+
+infer: ensure-data
+	$(PYTHON) -m rogii.inference --config $(INFER_CONFIG) --model-dir $(INFER_MODEL_DIR) --output-dir $(INFER_ARTIFACT_DIR) --submission $(SUBMISSION)
 
 train-kaggle:
 	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KAGGLE_TRAIN_KERNEL) --title "$(KAGGLE_TRAIN_TITLE)" --config $(KAGGLE_TRAIN_CONFIG) --kernel-dir $(KAGGLE_TRAIN_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_TRAIN_ARTIFACT_DIR) --output-dir $(KAGGLE_TRAIN_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output
@@ -95,6 +107,9 @@ package-kaggle:
 prepare-kaggle-kernel:
 	$(PYTHON) -m rogii.kaggle_submit prepare --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KERNEL) --title "$(KERNEL_TITLE)" --config $(BEST_CONFIG) --kernel-dir $(KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_ARTIFACT_DIR) --submission-file $(SUBMISSION)
 
+prepare-kaggle-infer:
+	$(PYTHON) -m rogii.kaggle_submit prepare --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(INFER_KERNEL) --title "$(INFER_KERNEL_TITLE)" --config $(INFER_CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --kernel-dir $(INFER_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(INFER_ARTIFACT_DIR) --submission-file $(SUBMISSION)
+
 submit: submit-kaggle
 
 submit-kaggle:
@@ -103,11 +118,23 @@ submit-kaggle:
 submit-kaggle-dry:
 	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(KERNEL) --title "$(KERNEL_TITLE)" --config $(BEST_CONFIG) --kernel-dir $(KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(KAGGLE_ARTIFACT_DIR) --output-dir $(KERNEL_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --dry-run
 
+submit-infer:
+	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(INFER_KERNEL) --title "$(INFER_KERNEL_TITLE)" --config $(INFER_CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --publish-model-dataset --kernel-dir $(INFER_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(INFER_ARTIFACT_DIR) --output-dir $(INFER_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)"
+
+submit-infer-dry:
+	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(INFER_KERNEL) --title "$(INFER_KERNEL_TITLE)" --config $(INFER_CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --kernel-dir $(INFER_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(INFER_ARTIFACT_DIR) --output-dir $(INFER_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --dry-run
+
 status-submit:
 	$(KAGGLE) kernels status $(KAGGLE_USER)/$(KERNEL)
 
 logs-submit:
 	$(KAGGLE) kernels logs $(KAGGLE_USER)/$(KERNEL)
+
+status-infer:
+	$(KAGGLE) kernels status $(KAGGLE_USER)/$(INFER_KERNEL)
+
+logs-infer:
+	$(KAGGLE) kernels logs $(KAGGLE_USER)/$(INFER_KERNEL)
 
 submit-version:
 	@test -n "$(NOTEBOOK)" || (echo "Usage: make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)

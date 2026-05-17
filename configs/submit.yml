@@ -1,4 +1,4 @@
-inherits: hgb.yml
+inherits: stack.yml
 
 validation:
   enabled: false
@@ -7,5 +7,5 @@ reporting:
   compute_train_metrics: false
 
 outputs:
-  output_dir: artifacts/submit
+  output_dir: artifacts/submit_stack
   submission_path: submission.csv

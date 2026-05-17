@@ -8,17 +8,17 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingRegressor
+import yaml
 
 from .features import build_well_features
 from .io import well_name
-from .modeling import apply_postprocess
+from .modeling import ResidualModel, apply_postprocess
 from .runlog import RunLogger
 from .spatial import KaggleTopContext
 
 
 def predict_test(
-    model: HistGradientBoostingRegressor,
+    model: ResidualModel,
     test_paths: list[Path],
     sample_submission_path: Path | None,
     config: dict[str, Any],
@@ -70,7 +70,7 @@ def predict_test(
 
 
 def save_outputs(
-    model: HistGradientBoostingRegressor,
+    model: ResidualModel,
     feature_names: list[str],
     config: dict[str, Any],
     metrics: dict[str, Any],
@@ -85,5 +85,7 @@ def save_outputs(
         json.dump(feature_names, file, indent=2)
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
+    with (output_dir / "config.yml").open("w", encoding="utf-8") as file:
+        yaml.safe_dump(config, file, sort_keys=False)
     if config_path.exists():
-        shutil.copyfile(config_path, output_dir / "config.yml")
+        shutil.copyfile(config_path, output_dir / "source_config.yml")

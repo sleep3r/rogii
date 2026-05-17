@@ -1,23 +1,251 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.linear_model import Ridge
 
 from .runlog import RunLogger
 
 
-def make_model(config: dict[str, Any], seed: int) -> HistGradientBoostingRegressor:
-    if config["model"].get("name") != "hist_gradient_boosting":
-        raise ValueError(
-            "Only model.name=hist_gradient_boosting is currently supported."
-        )
-    params = dict(config["model"].get("params", {}))
+class ResidualModel:
+    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "ResidualModel":
+        raise NotImplementedError
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        raise NotImplementedError
+
+
+@dataclass
+class WrappedRegressor(ResidualModel):
+    estimator: Any
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "WrappedRegressor":
+        self.estimator.fit(X, y)
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return np.asarray(self.estimator.predict(X), dtype=float)
+
+
+class ResidualStackRegressor(ResidualModel):
+    def __init__(self, config: dict[str, Any], seed: int) -> None:
+        self.config = config
+        self.seed = seed
+        self.base_models: list[ResidualModel] = []
+        self.base_names: list[str] = []
+        self.weights: np.ndarray | None = None
+        self.blender: Ridge | None = None
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "ResidualStackRegressor":
+        base_specs = self.config.get("base_models") or []
+        if not base_specs:
+            raise ValueError("model.name=stack requires model.base_models.")
+
+        base_predictions = []
+        self.base_models = []
+        self.base_names = []
+        for index, spec in enumerate(base_specs):
+            name = str(spec.get("name") or f"model_{index}")
+            model = make_single_model(spec, self.seed + index + 1)
+            model.fit(X, y)
+            pred = model.predict(X)
+            self.base_models.append(model)
+            self.base_names.append(name)
+            base_predictions.append(pred)
+
+        train_stack = np.vstack(base_predictions).T
+        blend_cfg = self.config.get("blend", {})
+        method = str(blend_cfg.get("method", "weighted")).lower()
+        if method == "ridge":
+            alpha = float(blend_cfg.get("alpha", 1.0))
+            self.blender = Ridge(alpha=alpha, fit_intercept=True)
+            self.blender.fit(train_stack, y)
+            self.weights = None
+        elif method in {"hill_climb", "hill-climb", "hillclimb"}:
+            self.weights = fit_hill_climb_weights(
+                train_stack,
+                y,
+                iterations=int(blend_cfg.get("iterations", 200)),
+                alpha_grid=blend_cfg.get("alpha_grid"),
+            )
+            self.blender = None
+        elif method == "weighted":
+            weights = blend_cfg.get("weights")
+            if weights is None:
+                weights_array = np.ones(len(self.base_models), dtype=float)
+            else:
+                weights_array = np.asarray(weights, dtype=float)
+            if len(weights_array) != len(self.base_models):
+                raise ValueError(
+                    "model.blend.weights length must match model.base_models length."
+                )
+            total = float(np.sum(weights_array))
+            if abs(total) <= 1e-12:
+                raise ValueError("model.blend.weights must not sum to zero.")
+            self.weights = weights_array / total
+            self.blender = None
+        else:
+            raise ValueError(
+                "model.blend.method must be 'weighted', 'ridge', or 'hill_climb'."
+            )
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        if not self.base_models:
+            raise RuntimeError("ResidualStackRegressor is not fitted.")
+        stack = np.vstack([model.predict(X) for model in self.base_models]).T
+        if self.blender is not None:
+            return np.asarray(self.blender.predict(stack), dtype=float)
+        if self.weights is None:
+            raise RuntimeError("ResidualStackRegressor has no fitted blend weights.")
+        return stack @ self.weights
+
+
+def fit_hill_climb_weights(
+    stack: np.ndarray,
+    y: np.ndarray,
+    iterations: int,
+    alpha_grid: list[float] | None,
+) -> np.ndarray:
+    if stack.ndim != 2 or stack.shape[1] == 0:
+        raise ValueError("Hill-climb blend requires a non-empty prediction stack.")
+
+    y = np.asarray(y, dtype=float)
+    n_models = stack.shape[1]
+    single_scores = [rmse(stack[:, idx], y) for idx in range(n_models)]
+    best_model = int(np.argmin(single_scores))
+    weights = np.zeros(n_models, dtype=float)
+    weights[best_model] = 1.0
+    best_pred = stack[:, best_model].copy()
+    best_score = single_scores[best_model]
+
+    grid = alpha_grid or [0.02, 0.05, 0.1, 0.2, 0.35, 0.5]
+    grid = [float(alpha) for alpha in grid if 0.0 < float(alpha) < 1.0]
+    if not grid:
+        return weights
+
+    for _ in range(max(int(iterations), 0)):
+        candidate_score = best_score
+        candidate_pred = best_pred
+        candidate_weights = weights
+        for model_idx in range(n_models):
+            model_pred = stack[:, model_idx]
+            for alpha in grid:
+                pred = (1.0 - alpha) * best_pred + alpha * model_pred
+                score = rmse(pred, y)
+                if score + 1e-12 < candidate_score:
+                    blended_weights = (1.0 - alpha) * weights.copy()
+                    blended_weights[model_idx] += alpha
+                    candidate_score = score
+                    candidate_pred = pred
+                    candidate_weights = blended_weights
+        if candidate_score + 1e-12 >= best_score:
+            break
+        best_score = candidate_score
+        best_pred = candidate_pred
+        weights = candidate_weights
+
+    total = float(weights.sum())
+    if total <= 0:
+        raise ValueError("Hill-climb blend produced invalid weights.")
+    return weights / total
+
+
+def make_lightgbm(params: dict[str, Any], seed: int) -> WrappedRegressor:
+    from lightgbm import LGBMRegressor
+
+    defaults = {
+        "objective": "regression",
+        "n_estimators": 700,
+        "learning_rate": 0.035,
+        "num_leaves": 96,
+        "max_depth": -1,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.0,
+        "min_child_samples": 50,
+        "n_jobs": -1,
+        "verbosity": -1,
+    }
+    defaults.update(params)
+    defaults["random_state"] = seed
+    return WrappedRegressor(LGBMRegressor(**defaults))
+
+
+def make_xgboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
+    from xgboost import XGBRegressor
+
+    defaults = {
+        "objective": "reg:squarederror",
+        "n_estimators": 650,
+        "learning_rate": 0.035,
+        "max_depth": 6,
+        "min_child_weight": 8,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.0,
+        "tree_method": "hist",
+        "n_jobs": -1,
+        "verbosity": 0,
+    }
+    defaults.update(params)
+    defaults["random_state"] = seed
+    return WrappedRegressor(XGBRegressor(**defaults))
+
+
+def make_catboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
+    from catboost import CatBoostRegressor
+
+    defaults = {
+        "loss_function": "RMSE",
+        "iterations": 900,
+        "learning_rate": 0.035,
+        "depth": 7,
+        "l2_leaf_reg": 6.0,
+        "random_strength": 0.5,
+        "bootstrap_type": "Bernoulli",
+        "subsample": 0.9,
+        "allow_writing_files": False,
+        "verbose": False,
+    }
+    defaults.update(params)
+    defaults["random_seed"] = seed
+    return WrappedRegressor(CatBoostRegressor(**defaults))
+
+
+def make_hist_gradient_boosting(params: dict[str, Any], seed: int) -> WrappedRegressor:
+    params = dict(params)
     params["random_state"] = seed
-    return HistGradientBoostingRegressor(**params)
+    return WrappedRegressor(HistGradientBoostingRegressor(**params))
+
+
+def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:
+    name = str(config.get("name", "lightgbm")).lower()
+    params = dict(config.get("params") or {})
+    if name in {"lightgbm", "lgbm", "lgb"}:
+        return make_lightgbm(params, seed)
+    if name in {"xgboost", "xgb"}:
+        return make_xgboost(params, seed)
+    if name in {"catboost", "cat"}:
+        return make_catboost(params, seed)
+    if name in {"hist_gradient_boosting", "hgb"}:
+        return make_hist_gradient_boosting(params, seed)
+    raise ValueError(f"Unsupported model.name={name!r}.")
+
+
+def make_model(config: dict[str, Any], seed: int) -> ResidualModel:
+    model_cfg = config["model"]
+    name = str(model_cfg.get("name", "lightgbm")).lower()
+    if name == "stack":
+        return ResidualStackRegressor(model_cfg, seed)
+    return make_single_model(model_cfg, seed)
 
 
 def rmse(y_pred: np.ndarray, y_true: np.ndarray) -> float:

@@ -11,6 +11,10 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.10",
     "scikit-learn>=1.5",
+    "lightgbm>=4.6.0",
+    "xgboost>=3.2.0",
+    "catboost>=1.2.10",
+    "pywavelets>=1.9.0",
 ]
 
 [tool.uv]

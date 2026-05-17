@@ -81,7 +81,7 @@ make train
 Equivalent command:
 
 ```bash
-uv run python -m rogii --config configs/hgb.yml
+uv run python -m rogii --config configs/stack.yml
 ```
 
 For a fast smoke-test on the small public sample:
@@ -102,16 +102,29 @@ Equivalent command:
 uv run python -m rogii --config configs/submit.yml
 ```
 
+To run inference from an already trained local artifact:
+
+```bash
+make infer
+```
+
+Default model artifact:
+
+```text
+artifacts/stack/model.pkl
+```
+
 To run training remotely on Kaggle without submitting to the competition:
 
 ```bash
-make train-kaggle MESSAGE="remote hgb train"
+make train-kaggle MESSAGE="remote gbm stack train"
 ```
 
-This pushes a separate private Kaggle script, `sleep3r/rogii-hgb-train`, waits
-for it to finish, downloads all outputs into `artifacts/kaggle_train_output`,
-and stops before the competition submit step. By default it uses
-`configs/hgb.yml`, so it is meant for experiment-quality remote validation.
+This pushes a separate private Kaggle script, `sleep3r/rogii-gbm-stack-train`,
+waits for it to finish, downloads all outputs into
+`artifacts/kaggle_train_output`, and stops before the competition submit step.
+By default it uses `configs/stack.yml`, so it is meant for experiment-quality
+remote validation.
 
 Monitor the remote training kernel:
 
@@ -125,7 +138,7 @@ Training pipeline:
 - builds row-level features from trajectory, GR, `TVT_input`, and typewell logs;
 - uses a flat TVT baseline as the physical anchor;
 - adds public Kaggle top-solution alignment signals;
-- trains `HistGradientBoostingRegressor` on residuals;
+- trains a LightGBM/XGBoost/CatBoost residual stack;
 - validates with grouped CV by well;
 - tunes residual blend weight from OOF predictions;
 - writes `submission.csv`;
@@ -148,15 +161,17 @@ implements a portable version of that idea:
 - beam-style matching of hidden horizontal-well GR against the typewell GR;
 - multi-scale normalized cross-correlation anchors;
 - low-resolution constrained DTW alignment;
+- DWT/wavelet-smoothed alignment against the typewell;
+- PF-style sequential consensus tracks over ANCC/Z candidate signals;
 - spatial KNN priors from train formation surfaces (`ANCC`, `ASTNU`, `ASTNL`,
   `EGFDU`, `EGFDL`, `BUDA`);
 - dense ANCC spatial prior sampled from train rows;
 - consensus features measuring disagreement between alignment signals.
 
-The exact public top notebooks use heavier stacks such as LightGBM, CatBoost,
-XGBoost, GPU code, hill climbing, and notebook-specific artifacts. This repo
-keeps the implementation local and Kaggle-notebook friendly by feeding the
-alignment signals into the existing scikit-learn residual model.
+The current default model is a residual stack over LightGBM, XGBoost, and
+CatBoost with Ridge blending; the stack also supports convex hill-climb
+blending via `model.blend.method: hill_climb`. `configs/hgb.yml` is kept as a
+legacy baseline for comparison.
 
 The feature block is controlled by:
 
@@ -171,33 +186,53 @@ features:
       - [25.0, 180.0, 2, stiff]
     ncc_windows: [8, 15, 25]
     dtw_enabled: true
+    dwt_enabled: true
+    particle_enabled: true
 ```
 
 Latest smoke-test on the public sample:
 
 ```text
 Flat RMSE: 11.40534
-CV RMSE:   10.11490
-Best residual_weight: 0.75
-Kaggle top-signal features: 34
+Legacy HGB CV RMSE: 10.11490
+GBM stack CV RMSE:  9.63946
+Best stack residual_weight: 1.0
+Kaggle top-signal features: 43
 ```
 
-Latest full local train run on visible train wells:
+Latest full local validations on visible train wells:
 
 ```text
-Train rows: 3,783,989
-Features:   122
-CV RMSE:    16.63554
-Flat CV:    19.06126
-Best residual_weight: 0.75
-Kaggle top-signal features: 38
+Legacy HGB, 150-well CV:
+  Features: 122
+  CV RMSE:  16.63554
+  Flat CV:  19.06126
+
+GBM stack, all-well CV:
+  Rows:     3,783,989
+  Wells:    773
+  Features: 131
+  CV RMSE:  13.50285
+  Flat CV:  17.50671
+  Best residual_weight: 0.75
+  Fold RMSE range: 11.50514-15.36182
 ```
+
+Public LB anchors:
+
+```text
+Legacy HGB submit: 12.803
+GBM stack submit:  13.033
+```
+
+The stack improved local CV but worsened public LB, so current validation is
+not reliable enough for model ranking.
 
 ## Runtime Notes
 
 The 9 hour number is the Kaggle code-competition notebook limit, not the
-expected inference time. Locally, the full visible train run with CV took about
-6.5 minutes:
+expected inference time. Locally, the legacy full visible HGB run with CV took
+about 6.5 minutes, while the all-well GBM stack CV took about 38 minutes.
 
 ```text
 Spatial context:       0:04
@@ -213,25 +248,50 @@ hidden inference step will therefore be longer than local `test_wells=3`, but
 the training feature build is still the main cost in the current pipeline.
 
 Use `configs/submit.yml` or `make train-submit` for submission notebooks. It
-inherits `configs/hgb.yml`, disables CV, and skips final train RMSE prediction,
-so the rerun spends time on fitting and hidden-test prediction instead of local
-diagnostics.
+inherits `configs/stack.yml`, disables CV, and skips final train RMSE
+prediction, so the rerun spends time on fitting and hidden-test prediction
+instead of local diagnostics. The stack is expected to be heavier than HGB
+because it trains LightGBM, XGBoost, and CatBoost.
+
+For faster reruns after a local full train, use inference-only submit:
+
+```bash
+make submit-infer MESSAGE="gbm stack inference"
+```
+
+This publishes `artifacts/stack/model.pkl`, `features.json`, and `metrics.json`
+to a private Kaggle Dataset, attaches that dataset to the inference kernel, and
+runs `python -m rogii.inference` on Kaggle. It still builds the train-derived
+spatial context and hidden-test features, but skips the full train feature
+table and model fitting. On the local public sample, inference-only reproduced
+the full train `submission.csv` byte-for-byte.
+
+Default model dataset:
+
+```text
+sleep3r/rogii-stack-artifacts
+```
+
+By default inference-only submit pushes a new version of the existing
+`sleep3r/rogii-gbm-stack-submit` Kaggle kernel. This avoids Kaggle API failures
+when creating a brand-new kernel slug with the current access token.
 
 Latest local submission-mode run:
 
 ```text
 make train-submit
-Total duration: 05:03
+Total duration: not remeasured after stack switch
 CV: disabled
 Final train RMSE: skipped
-Output artifacts: artifacts/submit
+Output artifacts: artifacts/submit_stack
 ```
 
 Configs:
 
-- `configs/hgb.yml` - main training run;
-- `configs/quick.yml` - small sample smoke-test;
-- `configs/submit.yml` - no-CV submission rerun config;
+- `configs/stack.yml` - main GBM stack training run;
+- `configs/hgb.yml` - legacy sklearn HGB baseline;
+- `configs/quick.yml` - small public-sample smoke-test;
+- `configs/submit.yml` - no-CV stack submission rerun config;
 - `configs/best.yml` - the current best experiment pointer used by
   `make submit`.
 
@@ -297,14 +357,14 @@ This is a Kaggle code competition, so the real submission must reference a
 Kaggle kernel version. The end-to-end path is:
 
 ```bash
-make submit MESSAGE="hgb top-signal model"
+make submit MESSAGE="gbm stack top-signal model"
 ```
 
 That command:
 
 - builds a self-contained Kaggle `run.py` under `artifacts/kaggle_kernel`;
 - embeds the current `rogii/` package and `configs/` into that script;
-- pushes `sleep3r/rogii-hgb-submit` as a private Kaggle script;
+- pushes `sleep3r/rogii-gbm-stack-submit` as a private Kaggle script;
 - waits for the Kaggle run to finish;
 - downloads and validates `submission.csv`;
 - submits that kernel version to the competition.
@@ -337,6 +397,25 @@ Monitor the submit kernel:
 ```bash
 make status-submit
 make logs-submit
+```
+
+The faster inference-only path is:
+
+```bash
+make submit-infer MESSAGE="gbm stack inference"
+```
+
+Dry-run inference packaging:
+
+```bash
+make submit-infer-dry
+```
+
+Monitor the inference kernel:
+
+```bash
+make status-infer
+make logs-infer
 ```
 
 Prepare only the Kaggle kernel workspace:
@@ -375,7 +454,7 @@ make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE="Message"
 Example:
 
 ```bash
-make submit-version NOTEBOOK=rogii-hgb VERSION=3 MESSAGE="hgb top-signal model"
+make submit-version NOTEBOOK=rogii-gbm-stack-submit VERSION=3 MESSAGE="gbm stack top-signal model"
 ```
 
 Expands to:
@@ -384,9 +463,9 @@ Expands to:
 uv run kaggle competitions submit \
   -c rogii-wellbore-geology-prediction \
   -f submission.csv \
-  -k sleep3r/rogii-hgb \
+  -k sleep3r/rogii-gbm-stack-submit \
   -v 3 \
-  -m "hgb top-signal model"
+  -m "gbm stack top-signal model"
 ```
 
 ## Ignored Outputs
@@ -412,6 +491,7 @@ The following are intentionally ignored:
 ├── configs/
 │   ├── hgb.yml
 │   ├── quick.yml
+│   ├── stack.yml
 │   ├── best.yml
 │   └── submit.yml
 ├── rogii/
@@ -421,6 +501,7 @@ The following are intentionally ignored:
 │   ├── config.py       # config defaults and YAML loading
 │   ├── constants.py    # formation names and Kaggle paths
 │   ├── features.py     # well-level tabular feature assembly
+│   ├── inference.py    # inference-only runner for saved model artifacts
 │   ├── io.py           # data path discovery and well file helpers
 │   ├── modeling.py     # model factory, CV, residual postprocess
 │   ├── numeric.py      # numeric helpers and flat TVT baseline
@@ -428,6 +509,6 @@ The following are intentionally ignored:
 │   ├── runlog.py       # status/timing logger
 │   ├── spatial.py      # spatial KNN/ANCC priors
 │   ├── submission.py   # test prediction and artifact writing
-│   └── top_signals.py  # beam/NCC/DTW public-solution signals
+│   └── top_signals.py  # beam/NCC/DTW/DWT/PF public-solution signals
 └── data/                 # ignored
 ```

@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/hgb.yml"),
+        default=Path("configs/stack.yml"),
         help="YAML config path.",
     )
     parser.add_argument(

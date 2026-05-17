@@ -1,0 +1,92 @@
+seed: 42
+
+data:
+  data_dir: data
+  train_dir:
+  test_dir:
+  sample_submission:
+  max_train_wells:
+  max_test_wells:
+  target_rows: hidden_only
+
+features:
+  tail_windows: [25, 100, 250]
+  rolling_windows: [5, 25, 101]
+  include_typewell: true
+  include_kaggle_top_signals: true
+  kaggle_top:
+    beam_configs:
+      - [20.0, 144.0, 2, cons]
+      - [8.0, 64.0, 2, loose]
+      - [14.0, 90.0, 5, sm5]
+      - [25.0, 180.0, 2, stiff]
+    ncc_windows: [8, 15, 25]
+    ncc_stride: 3
+    dtw_enabled: true
+    dtw_max_query_points: 700
+    dtw_max_ref_points: 700
+    dtw_radius: 35
+    dwt_enabled: true
+    dwt_wavelet: db4
+    dwt_level: 3
+    dwt_max_query_points: 700
+    dwt_max_ref_points: 700
+    dwt_radius: 35
+    particle_enabled: true
+    particle_count: 192
+    particle_process_noise: 4.0
+    particle_observation_scale: 18.0
+    spatial_k: 10
+    dense_k: 20
+    dense_samples_per_well: 60
+
+model:
+  name: stack
+  base_models:
+    - name: lightgbm
+      params:
+        n_estimators: 700
+        learning_rate: 0.035
+        num_leaves: 96
+        min_child_samples: 45
+        subsample: 0.9
+        colsample_bytree: 0.9
+        reg_alpha: 0.05
+        reg_lambda: 1.0
+    - name: xgboost
+      params:
+        n_estimators: 550
+        learning_rate: 0.035
+        max_depth: 6
+        min_child_weight: 8
+        subsample: 0.9
+        colsample_bytree: 0.9
+        reg_alpha: 0.05
+        reg_lambda: 1.0
+        tree_method: hist
+    - name: catboost
+      params:
+        iterations: 700
+        learning_rate: 0.035
+        depth: 7
+        l2_leaf_reg: 6.0
+        random_strength: 0.5
+        bootstrap_type: Bernoulli
+        subsample: 0.9
+  blend:
+    method: ridge
+    alpha: 1.0
+
+validation:
+  enabled: true
+  n_splits: 5
+  max_wells:
+
+postprocess:
+  residual_weight: auto
+  residual_weight_grid: [0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0]
+  residual_clip: 250.0
+
+outputs:
+  output_dir: artifacts/stack
+  submission_path: submission.csv

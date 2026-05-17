@@ -14,17 +14,20 @@ from textwrap import wrap
 import numpy as np
 import pandas as pd
 from kaggle.api.kaggle_api_extended import KaggleApi
+from requests import HTTPError
 
 from .kaggle_package import DEFAULT_INCLUDE, iter_package_files
 
 DEFAULT_COMPETITION = "rogii-wellbore-geology-prediction"
-DEFAULT_KERNEL = "rogii-hgb-submit"
-DEFAULT_TITLE = "ROGII HGB Submit"
+DEFAULT_KERNEL = "rogii-gbm-stack-submit"
+DEFAULT_TITLE = "ROGII GBM Stack Submit"
 DEFAULT_CONFIG = Path("configs/best.yml")
 DEFAULT_KERNEL_DIR = Path("artifacts/kaggle_kernel")
 DEFAULT_OUTPUT_DIR = Path("artifacts/kaggle_output")
 DEFAULT_DATA_DIR = Path("/kaggle/input/rogii-wellbore-geology-prediction")
-DEFAULT_ARTIFACT_DIR = Path("artifacts/submit")
+DEFAULT_ARTIFACT_DIR = Path("artifacts/submit_stack")
+DEFAULT_MODEL_DIR = Path("artifacts/stack")
+DEFAULT_MODEL_DATASET_DIR = Path("artifacts/kaggle_model_dataset")
 DEFAULT_SUBMISSION = "submission.csv"
 TERMINAL_ERROR_STATUSES = {
     "ERROR",
@@ -47,12 +50,41 @@ def relpath(path: Path) -> Path:
     return path.resolve().relative_to(Path.cwd().resolve())
 
 
-def source_zip_bytes(extra_paths: list[Path] | None = None) -> bytes:
-    include = list(DEFAULT_INCLUDE)
-    if extra_paths:
-        include.extend(extra_paths)
+def dataset_input_dir(dataset: str) -> str:
+    parts = dataset.split("/")
+    if len(parts) < 2:
+        raise ValueError("Dataset source must be in owner/dataset-slug format.")
+    return f"/kaggle/input/{parts[1]}"
 
-    files = iter_package_files(include)
+
+def http_error_details(error: HTTPError) -> str:
+    response = error.response
+    if response is None:
+        return str(error)
+    body = response.text.strip()
+    if len(body) > 2000:
+        body = body[:2000] + "... truncated ..."
+    return f"{error} | response={body}"
+
+
+def iter_extra_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files.extend(
+                item
+                for item in path.rglob("*")
+                if item.is_file() and item.suffix not in {".pyc", ".pyo"}
+            )
+        elif path.is_file() and path.suffix not in {".pyc", ".pyo"}:
+            files.append(path)
+    return sorted(files)
+
+
+def source_zip_bytes(extra_paths: list[Path] | None = None) -> bytes:
+    files = iter_package_files(list(DEFAULT_INCLUDE))
+    if extra_paths:
+        files.extend(iter_extra_files(extra_paths))
     seen: set[Path] = set()
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -65,8 +97,17 @@ def source_zip_bytes(extra_paths: list[Path] | None = None) -> bytes:
     return buffer.getvalue()
 
 
-def encoded_source_zip(config: Path) -> str:
+def encoded_source_zip(
+    config: Path,
+    mode: str,
+    model_dir: Path | None = None,
+    bundle_model: bool = False,
+) -> str:
     extra_paths = [] if config.parent == Path("configs") else [config]
+    if mode == "infer" and bundle_model:
+        if model_dir is None:
+            raise ValueError("Inference mode requires model_dir.")
+        extra_paths.append(model_dir)
     data = source_zip_bytes(extra_paths)
     return "\n".join(wrap(base64.b64encode(data).decode("ascii"), 88))
 
@@ -76,10 +117,22 @@ def runner_script(
     config: Path,
     data_dir: Path,
     artifact_dir: Path,
+    model_dir: Path | None,
+    model_dataset: str,
+    mode: str,
     submission_file: str,
 ) -> str:
     config_rel = relpath(config).as_posix()
-    encoded = encoded_source_zip(config)
+    bundle_model = mode == "infer" and not model_dataset
+    model_rel = (
+        relpath(model_dir).as_posix() if bundle_model and model_dir is not None else ""
+    )
+    model_arg = ""
+    if mode == "infer" and model_dataset:
+        model_arg = dataset_input_dir(model_dataset)
+    encoded = encoded_source_zip(
+        config, mode=mode, model_dir=model_dir, bundle_model=bundle_model
+    )
     return f'''from __future__ import annotations
 
 import base64
@@ -178,7 +231,10 @@ def main() -> None:
         archive.extractall(source_dir)
 
     sys.path.insert(0, str(source_dir))
-    from rogii.pipeline import main as run_pipeline
+    if "{mode}" == "infer":
+        from rogii.inference import main as run_job
+    else:
+        from rogii.pipeline import main as run_job
 
     resolved_data_dir = resolve_competition_data_dir(Path("{data_dir.as_posix()}"), work_dir)
 
@@ -193,7 +249,11 @@ def main() -> None:
         "--output-dir",
         str(work_dir / "{artifact_dir.as_posix()}"),
     ]
-    run_pipeline()
+    if "{mode}" == "infer" and "{model_dataset}":
+        sys.argv.extend(["--model-dir", "{model_arg}"])
+    elif "{mode}" == "infer":
+        sys.argv.extend(["--model-dir", str(source_dir / "{model_rel}")])
+    run_job()
 
 
 if __name__ == "__main__":
@@ -213,6 +273,7 @@ def write_metadata(
     internet: bool,
     gpu: bool,
     tpu: bool,
+    dataset_sources: list[str] | None = None,
 ) -> None:
     metadata = {
         "id": kernel_ref(user, kernel),
@@ -224,7 +285,7 @@ def write_metadata(
         "enable_gpu": str(gpu).lower(),
         "enable_tpu": str(tpu).lower(),
         "enable_internet": str(internet).lower(),
-        "dataset_sources": [],
+        "dataset_sources": dataset_sources or [],
         "competition_sources": [competition],
         "kernel_sources": [],
         "model_sources": [],
@@ -235,10 +296,153 @@ def write_metadata(
     )
 
 
+def prepare_model_dataset(args: argparse.Namespace) -> Path:
+    model_dir = Path(args.model_dir)
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Model dir not found: {model_dir}")
+    for name in ("model.pkl", "features.json", "metrics.json"):
+        if not (model_dir / name).is_file():
+            raise FileNotFoundError(f"Missing model artifact: {model_dir / name}")
+
+    dataset_dir = Path(args.model_dataset_dir)
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact_names = {
+        "model.pkl",
+        "features.json",
+        "metrics.json",
+        "config.yml",
+        "source_config.yml",
+    }
+    for path in sorted(model_dir.iterdir()):
+        if path.is_file() and path.name in artifact_names:
+            shutil.copyfile(path, dataset_dir / path.name)
+
+    metadata = {
+        "title": "ROGII Stack Artifacts",
+        "id": args.model_dataset,
+        "licenses": [{"name": "CC0-1.0"}],
+        "subtitle": "Trained ROGII model artifacts for inference-only Kaggle runs",
+        "description": (
+            "Private model artifact dataset generated from the local ROGII repository."
+        ),
+        "resources": [
+            {"path": path.name}
+            for path in sorted(dataset_dir.iterdir())
+            if path.is_file() and path.name != "dataset-metadata.json"
+        ],
+    }
+    (dataset_dir / "dataset-metadata.json").write_text(
+        json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return dataset_dir
+
+
+def is_already_exists_error(error: object) -> bool:
+    text = str(error or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "already in use",
+            "already exists",
+            "duplicate",
+            "title",
+        )
+    )
+
+
+def wait_for_dataset(api: KaggleApi, dataset: str, timeout: int = 600) -> None:
+    deadline = time.monotonic() + timeout
+    slug = dataset.split("/", 1)[1] if "/" in dataset else dataset
+    while True:
+        try:
+            status = str(api.dataset_status(dataset)).lower()
+            log(f"Dataset status: {status}")
+            if status in {"ready", "complete", "active"}:
+                return
+            if status in {"error", "failed"}:
+                raise RuntimeError(f"Dataset {dataset} ended with status={status}")
+        except HTTPError as error:
+            if getattr(error.response, "status_code", None) != 403:
+                raise
+            try:
+                rows = api.dataset_list(search=slug, mine=True) or []
+            except HTTPError:
+                rows = []
+            refs = {str(getattr(row, "ref", "")) for row in rows if row is not None}
+            if dataset in refs:
+                log(
+                    "Dataset status is not readable, but dataset is visible in mine list."
+                )
+                time.sleep(10)
+                return
+            log("Dataset status is not readable yet; waiting.")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting for dataset {dataset}.")
+        time.sleep(10)
+
+
+def publish_model_dataset(api: KaggleApi, args: argparse.Namespace) -> None:
+    if not args.model_dataset:
+        raise ValueError("--publish-model-dataset requires --model-dataset.")
+    dataset_dir = prepare_model_dataset(args)
+    log(f"Prepared model dataset workspace: {dataset_dir}")
+    log(f"Model dataset: {args.model_dataset}")
+    try:
+        log("Creating model dataset...")
+        response = api.dataset_create_new(
+            str(dataset_dir),
+            public=False,
+            quiet=False,
+            convert_to_csv=False,
+            dir_mode="skip",
+        )
+        error = getattr(response, "error", None)
+        if is_already_exists_error(error):
+            log("Model dataset already exists; creating a new version...")
+            response = api.dataset_create_version(
+                str(dataset_dir),
+                version_notes=args.message,
+                quiet=False,
+                convert_to_csv=False,
+                delete_old_versions=False,
+                dir_mode="skip",
+            )
+    except HTTPError as error:
+        if getattr(error.response, "status_code", None) == 403:
+            raise RuntimeError(
+                "Kaggle dataset publish failed because this access token does not "
+                "have dataset permissions. Create/refresh a Kaggle access token "
+                "with dataset read/write permissions, then rerun submit-infer. "
+                f"Details: {http_error_details(error)}"
+            ) from error
+        raise RuntimeError(
+            f"Kaggle dataset publish failed: {http_error_details(error)}"
+        ) from error
+
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(f"Kaggle dataset publish failed: {error}")
+    url = getattr(response, "url", None)
+    if url:
+        log(f"Dataset URL: {url}")
+    wait_for_dataset(api, args.model_dataset)
+
+
 def prepare_kernel(args: argparse.Namespace) -> Path:
     config = Path(args.config)
     if not config.is_file():
         raise FileNotFoundError(f"Config not found: {config}")
+    model_dir = Path(args.model_dir) if args.mode == "infer" else None
+    if args.mode == "infer" and not args.model_dataset:
+        if model_dir is None or not model_dir.is_dir():
+            raise FileNotFoundError(f"Model dir not found: {model_dir}")
+        for name in ("model.pkl", "features.json"):
+            if not (model_dir / name).is_file():
+                raise FileNotFoundError(f"Missing model artifact: {model_dir / name}")
 
     kernel_dir = Path(args.kernel_dir)
     if kernel_dir.exists():
@@ -249,6 +453,9 @@ def prepare_kernel(args: argparse.Namespace) -> Path:
         config=config,
         data_dir=Path(args.data_dir),
         artifact_dir=Path(args.artifact_dir),
+        model_dir=model_dir,
+        model_dataset=args.model_dataset,
+        mode=args.mode,
         submission_file=args.submission_file,
     )
     (kernel_dir / "run.py").write_text(run_py, encoding="utf-8")
@@ -264,10 +471,17 @@ def prepare_kernel(args: argparse.Namespace) -> Path:
         internet=args.internet,
         gpu=args.gpu,
         tpu=args.tpu,
+        dataset_sources=[args.model_dataset] if args.model_dataset else None,
     )
     log(f"Prepared Kaggle kernel workspace: {kernel_dir}")
     log(f"Kernel: {kernel_ref(args.user, args.kernel)}")
     log(f"Config: {config}")
+    if args.mode == "infer":
+        log("Mode: inference-only")
+        if args.model_dataset:
+            log(f"Model dataset source: {args.model_dataset}")
+        else:
+            log(f"Bundled model dir: {model_dir}")
     return kernel_dir
 
 
@@ -284,14 +498,60 @@ def status_name(status: object) -> str:
     return str(status).split(".")[-1].upper()
 
 
+def api_push_kernel(api: KaggleApi, args: argparse.Namespace) -> object:
+    accelerator = args.accelerator or None
+    try:
+        return api.kernels_push(
+            str(args.kernel_dir),
+            timeout=str(args.kernel_timeout),
+            acc=accelerator,
+        )
+    except HTTPError as error:
+        raise RuntimeError(
+            f"Kaggle kernel push failed: {http_error_details(error)}"
+        ) from error
+
+
+def bootstrap_missing_kernel(api: KaggleApi, args: argparse.Namespace) -> None:
+    kernel_dir = Path(args.kernel_dir)
+    metadata_path = kernel_dir / "kernel-metadata.json"
+    run_path = kernel_dir / "run.py"
+    original_metadata = metadata_path.read_text(encoding="utf-8")
+    original_run = run_path.read_text(encoding="utf-8")
+
+    metadata = json.loads(original_metadata)
+    metadata["dataset_sources"] = []
+    metadata["competition_sources"] = []
+    metadata["kernel_sources"] = []
+    metadata["model_sources"] = []
+
+    try:
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        )
+        run_path.write_text(
+            "print('ROGII inference kernel bootstrap')\n", encoding="utf-8"
+        )
+        log("Creating empty Kaggle kernel shell before attaching private sources...")
+        response = api_push_kernel(api, args)
+        if response.error:
+            raise RuntimeError(f"Kaggle bootstrap kernel push failed: {response.error}")
+        version = getattr(response, "version_number", None)
+        if version:
+            log(f"Bootstrap kernel version: {version}")
+    finally:
+        metadata_path.write_text(original_metadata, encoding="utf-8")
+        run_path.write_text(original_run, encoding="utf-8")
+
+
 def push_kernel(api: KaggleApi, args: argparse.Namespace) -> int:
     log("Pushing Kaggle kernel...")
-    accelerator = args.accelerator or None
-    response = api.kernels_push(
-        str(args.kernel_dir),
-        timeout=str(args.kernel_timeout),
-        acc=accelerator,
-    )
+    response = api_push_kernel(api, args)
+    if response.error and "notebook not found" in str(response.error).lower():
+        log("Kaggle returned 'Notebook not found'; bootstrapping kernel slug.")
+        bootstrap_missing_kernel(api, args)
+        log("Retrying Kaggle kernel push...")
+        response = api_push_kernel(api, args)
     if response.error:
         raise RuntimeError(response.error)
     version = int(response.version_number)
@@ -378,12 +638,18 @@ def submit_code(api: KaggleApi, args: argparse.Namespace, version: int) -> None:
 
 
 def run_end_to_end(args: argparse.Namespace) -> None:
+    api = None
+    if args.mode == "infer" and args.publish_model_dataset and not args.dry_run:
+        api = make_api()
+        publish_model_dataset(api, args)
+
     prepare_kernel(args)
     if args.dry_run:
         log("Dry run complete. No Kaggle push or competition submit was executed.")
         return
 
-    api = make_api()
+    if api is None:
+        api = make_api()
     version = push_kernel(api, args)
     wait_for_kernel(api, args)
     submission_path = download_output(api, args)
@@ -403,6 +669,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--kernel-dir", type=Path, default=DEFAULT_KERNEL_DIR)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
+    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
+    parser.add_argument("--model-dataset", default="")
+    parser.add_argument(
+        "--model-dataset-dir", type=Path, default=DEFAULT_MODEL_DATASET_DIR
+    )
+    parser.add_argument("--publish-model-dataset", action="store_true")
+    parser.add_argument("--mode", choices=["train", "infer"], default="train")
     parser.add_argument("--submission-file", default=DEFAULT_SUBMISSION)
     parser.add_argument(
         "--private", action=argparse.BooleanOptionalAction, default=True

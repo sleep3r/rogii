@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import argparse
+import json
+import pickle
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .config import load_config
+from .io import (
+    horizontal_files,
+    resolve_data_dir,
+    resolve_sample_submission,
+    resolve_test_dir,
+    resolve_train_dir,
+)
+from .runlog import RunLogger
+from .spatial import KaggleTopContext
+from .submission import predict_test
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run ROGII inference from a trained model artifact."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="YAML config path. Defaults to <model-dir>/config.yml if present.",
+    )
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path("artifacts/stack"),
+        help="Directory containing model.pkl, features.json, and metrics.json.",
+    )
+    parser.add_argument(
+        "--data-dir", type=Path, default=None, help="Override data.data_dir."
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Override outputs.output_dir."
+    )
+    parser.add_argument(
+        "--submission",
+        type=Path,
+        default=None,
+        help="Override outputs.submission_path.",
+    )
+    return parser.parse_args()
+
+
+def choose_config_path(model_dir: Path, requested: Path | None) -> Path:
+    if requested is not None:
+        return requested
+    artifact_config = model_dir / "config.yml"
+    if artifact_config.is_file():
+        return artifact_config
+    return Path("configs/best.yml")
+
+
+def load_artifact_config(path: Path) -> dict[str, Any]:
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        loaded = yaml.safe_load(text) or {}
+        if "inherits" not in loaded:
+            return loaded
+    return load_config(path)
+
+
+def load_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def apply_artifact_postprocess(config: dict[str, Any], model_dir: Path) -> None:
+    if config["postprocess"].get("residual_weight") != "auto":
+        return
+    metrics_path = model_dir / "metrics.json"
+    if not metrics_path.is_file():
+        return
+    metrics = load_json(metrics_path)
+    best_weight = metrics.get("cv", {}).get("best_residual_weight")
+    if best_weight is not None:
+        config["postprocess"]["residual_weight"] = float(best_weight)
+
+
+def load_model_bundle(model_dir: Path) -> tuple[Any, list[str], dict[str, Any]]:
+    model_path = model_dir / "model.pkl"
+    features_path = model_dir / "features.json"
+    metrics_path = model_dir / "metrics.json"
+
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Model artifact not found: {model_path}")
+    if not features_path.is_file():
+        raise FileNotFoundError(f"Feature list not found: {features_path}")
+
+    with model_path.open("rb") as file:
+        model = pickle.load(file)
+    feature_names = [str(item) for item in load_json(features_path)]
+    metrics = load_json(metrics_path) if metrics_path.is_file() else {}
+    return model, feature_names, metrics
+
+
+def main() -> None:
+    args = parse_args()
+    logger = RunLogger()
+    logger.log("RUN", "ROGII inference started", model_dir=args.model_dir)
+
+    model_dir = args.model_dir
+    config_path = choose_config_path(model_dir, args.config)
+    config = load_artifact_config(config_path)
+    apply_artifact_postprocess(config, model_dir)
+
+    if args.data_dir is not None:
+        config["data"]["data_dir"] = str(args.data_dir)
+    if args.output_dir is not None:
+        config["outputs"]["output_dir"] = str(args.output_dir)
+    if args.submission is not None:
+        config["outputs"]["submission_path"] = str(args.submission)
+
+    with logger.step("Load model artifact", path=model_dir):
+        model, feature_names, metrics = load_model_bundle(model_dir)
+    logger.info(
+        "Model artifact ready",
+        features=len(feature_names),
+        trained_rows=metrics.get("train", {}).get("rows"),
+        cv_rmse=metrics.get("cv", {}).get("rmse"),
+        residual_weight=config["postprocess"].get("residual_weight"),
+    )
+
+    data_dir = resolve_data_dir(config)
+    train_dir = resolve_train_dir(data_dir, config)
+    test_dir = resolve_test_dir(data_dir, config)
+    sample_submission_path = resolve_sample_submission(data_dir, test_dir, config)
+    logger.info(
+        "Resolved paths",
+        data_dir=data_dir,
+        train_dir=train_dir,
+        test_dir=test_dir,
+        sample_submission=sample_submission_path,
+    )
+
+    train_paths = horizontal_files(train_dir, config["data"].get("max_train_wells"))
+    test_paths = horizontal_files(test_dir, config["data"].get("max_test_wells"))
+    logger.info(
+        "Discovered wells", train_wells=len(train_paths), test_wells=len(test_paths)
+    )
+
+    top_context = None
+    if config["features"].get("include_kaggle_top_signals", False):
+        with logger.step(
+            "Build Kaggle top-solution spatial context", train_wells=len(train_paths)
+        ):
+            top_context = KaggleTopContext(train_paths, config)
+        logger.info(
+            "Spatial context ready",
+            formation_wells=len(getattr(top_context, "formation_values", [])),
+            dense_ancc_points=len(getattr(top_context, "dense_ancc", [])),
+        )
+
+    with logger.step("Predict test", test_wells=len(test_paths)):
+        submission = predict_test(
+            model,
+            test_paths,
+            sample_submission_path,
+            config,
+            feature_names,
+            top_context,
+            logger,
+        )
+    if submission["tvt"].isna().any():
+        raise ValueError("Submission contains NaN predictions.")
+
+    submission_path = Path(config["outputs"]["submission_path"])
+    with logger.step("Write submission", path=submission_path, rows=len(submission)):
+        submission_path.parent.mkdir(parents=True, exist_ok=True)
+        submission.to_csv(submission_path, index=False)
+
+    output_dir = Path(config["outputs"]["output_dir"])
+    with logger.step("Save inference metadata", output_dir=output_dir):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (output_dir / "inference.json").open("w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "model_dir": str(model_dir),
+                    "config": str(config_path),
+                    "features": len(feature_names),
+                    "submission_rows": int(len(submission)),
+                    "source_cv_rmse": metrics.get("cv", {}).get("rmse"),
+                    "residual_weight": config["postprocess"].get("residual_weight"),
+                },
+                file,
+                indent=2,
+            )
+    logger.log("DONE", "Inference run complete", total_duration=logger.elapsed())
+
+
+if __name__ == "__main__":
+    main()

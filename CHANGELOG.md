@@ -32,7 +32,8 @@ Use `Kaggle result: pending` until the submission is scored.
   `rogii/` and `python -m rogii`.
 - Added structured config files:
   - `configs/quick.yml` for tiny public-sample checks;
-  - `configs/hgb.yml` for full local training;
+  - `configs/stack.yml` for the main GBM stack training path;
+  - `configs/hgb.yml` for the legacy sklearn HGB baseline;
   - `configs/submit.yml` for Kaggle notebook runs without local CV;
   - `configs/best.yml` as the selected default submit config.
 - Added timed run logging, artifact saving, feature snapshots, metrics JSON,
@@ -125,7 +126,7 @@ ensembles on residuals, and careful validation by wells.
   - fold 3: 15.07502;
   - fold 4: 13.13872;
   - fold 5: 14.80105.
-- Kaggle result: pending.
+- Kaggle result: public LB 12.803 via submit ref `52748619`.
 - What changed: full HGB with rolling/tail features, typewell features,
   spatial priors, beam/NCC/DTW signals, and residual blending.
 - Takeaway: materially better than flat baseline, but fold spread is large.
@@ -144,7 +145,7 @@ ensembles on residuals, and careful validation by wells.
   - CV: disabled;
   - train metric computation: skipped;
   - flat train RMSE stored for reference: 17.50671.
-- Kaggle result: pending.
+- Kaggle result: public LB 12.803 via submit ref `52748619`.
 - What changed: inherited `hgb.yml`, disabled CV and expensive reporting for
   the 9-hour Kaggle notebook budget.
 - Takeaway: this is a production/submission profile, not an experiment-quality
@@ -178,9 +179,16 @@ ensembles on residuals, and careful validation by wells.
   - final model training started after 3,783,989 rows and 122 features;
   - Kaggle kernel completed in 19:08;
   - output `submission.csv` had 14,151 prediction rows.
-- Kaggle result: submitted to competition, ref `52748619`, status pending.
+- Kaggle result:
+  - public LB score: 12.803;
+  - rank when observed: 682;
+  - submit ref: `52748619`;
+  - scored from the first successful competition submission.
 - Takeaway: the data discovery fix worked; Kaggle CPU is much slower than the
-  local machine for the row-building phase.
+  local machine for the row-building phase. The public score is substantially
+  better than the noisy 150-well local HGB CV estimate of 16.63554, so the old
+  CV split was pessimistic/noisy; still, 12.803 is behind the public notebook
+  direction around 9-10 and validates moving to stack + stronger alignment.
 
 ### Remote Kaggle Training Split
 
@@ -191,8 +199,8 @@ ensembles on residuals, and careful validation by wells.
   the remote training kernel.
 - Added `make status-submit` and `make logs-submit` for monitoring the submit
   kernel.
-- Default remote training kernel: `sleep3r/rogii-hgb-train`.
-- Default remote training config: `configs/hgb.yml`.
+- Default remote training kernel: `sleep3r/rogii-gbm-stack-train`.
+- Default remote training config: `configs/stack.yml`.
 - Output directory downloaded locally: `artifacts/kaggle_train_output`.
 - Difference from `make submit`:
   - `make train-kaggle` is for remote experiment/validation artifacts;
@@ -210,16 +218,165 @@ ensembles on residuals, and careful validation by wells.
   - reused shared numeric alignment helpers in `rogii/top_signals.py` instead
     of redefining `fill_numeric`.
 
+### EXP-20260517-4 - GBM Stack, DWT, and Particle Signals
+
+- Command/config: `make quick-train` / `configs/quick.yml`.
+- Data: public example split, 3 train wells and 3 public test wells.
+- Local result:
+  - rows: 14,151;
+  - features: 113;
+  - CV folds: 3;
+  - CV RMSE: 9.63946;
+  - flat baseline RMSE on same rows: 11.40534;
+  - final train RMSE: 0.26473;
+  - best residual blend weight: 1.0.
+- Kaggle result: not submitted.
+- What changed:
+  - added LightGBM, XGBoost, CatBoost, and PyWavelets dependencies;
+  - added `configs/stack.yml` and made it the default `make train` path;
+  - changed `configs/submit.yml` and `configs/best.yml` to point at the stack
+    submission profile;
+  - implemented residual stacking over LightGBM/XGBoost/CatBoost with Ridge or
+    hill-climb blending;
+  - kept sklearn `HistGradientBoostingRegressor` only as `configs/hgb.yml`
+    legacy baseline;
+  - added DWT/wavelet-smoothed typewell alignment features;
+  - added PF_Z and PF_ANCC-style sequential consensus features over flat,
+    beam, DTW, DWT, spatial-formation, and dense-ANCC candidate tracks.
+- Takeaway: on the tiny public smoke split, the stack improves CV from the
+  previous HGB quick result of 10.11490 to 9.63946. This is a useful direction
+  signal, not leaderboard evidence.
+- Next:
+  - run full grouped CV on all visible wells with `configs/stack.yml`;
+  - add proper OOF stack blending instead of fitting the stack blender on
+    in-sample base predictions;
+  - calibrate PF process/observation noise and add fold-level diagnostics for
+    wells that produce extreme errors.
+
+### EXP-20260517-5 - Full GBM Stack Local Validation
+
+- Command/config: `make train` / `configs/stack.yml`.
+- Data:
+  - train wells: 773;
+  - visible test wells locally: 3 public examples;
+  - training/CV rows: 3,783,989;
+  - features: 131;
+  - CV folds: 5 grouped by well;
+  - CV wells: 773.
+- Local result:
+  - CV RMSE: 13.50285;
+  - flat baseline CV RMSE: 17.50671;
+  - final train RMSE: 4.64289;
+  - full-train flat RMSE: 17.50671;
+  - best residual blend weight: 0.75;
+  - total runtime: 37:59.
+- Residual weight grid:
+  - 0.00: 17.50671;
+  - 0.10: 16.70812;
+  - 0.20: 15.97345;
+  - 0.35: 15.01163;
+  - 0.50: 14.24790;
+  - 0.75: 13.50285;
+  - 1.00: 13.50413.
+- Fold RMSE:
+  - fold 1: 14.89952;
+  - fold 2: 15.36182;
+  - fold 3: 11.50514;
+  - fold 4: 13.28090;
+  - fold 5: 12.00888.
+- Kaggle result: not submitted yet.
+- What changed: full all-well validation of the new LightGBM/XGBoost/CatBoost
+  stack with DWT and PF-style top-solution features.
+- Takeaway: this is a clear local improvement over the previous HGB CV
+  16.63554, with much healthier fold variance than the old 150-well HGB split.
+  It should be submitted next; if the old CV pessimism carries over, public LB
+  could move materially below the first HGB score of 12.803.
+- Next: run `make submit MESSAGE="gbm stack dwt pf cv 13.50"` and record the
+  public LB score.
+
+### Inference-Only Submit Path
+
+- Added `rogii.inference` for prediction from a saved model artifact.
+- Added Makefile targets:
+  - `make infer`;
+  - `make prepare-kaggle-infer`;
+  - `make submit-infer`;
+  - `make submit-infer-dry`;
+  - `make status-infer`;
+  - `make logs-infer`.
+- Default inference artifact: `artifacts/stack`.
+- Default inference kernel: `sleep3r/rogii-gbm-stack-submit`.
+- What changed:
+  - Kaggle submit packaging now supports `--mode infer`;
+  - inference mode publishes `model.pkl`, `features.json`, and `metrics.json`
+    to a private Kaggle Dataset and attaches it as a dataset source;
+  - default model dataset: `sleep3r/rogii-stack-artifacts`;
+  - inference restores `postprocess.residual_weight` from artifact CV metrics
+    when the config still says `auto`;
+  - `save_outputs` now writes the resolved/mutated config to `config.yml` and
+    keeps the original YAML as `source_config.yml`.
+- Local verification:
+  - command: `uv run python -m rogii.inference --config configs/best.yml
+    --model-dir artifacts/stack --data-dir data --output-dir artifacts/infer_test
+    --submission artifacts/infer_test/submission.csv`;
+  - runtime: 6.68s on the 3 public test wells;
+  - output matched the full train `submission.csv` byte-for-byte;
+  - restored residual weight: 0.75;
+  - `make submit-infer-dry` succeeded;
+  - first embedded-model inference `run.py` was about 5.3 MB and Kaggle
+    rejected it with HTTP 400 on `SaveKernel`;
+  - after moving the binary artifacts to a Kaggle Dataset, generated inference
+    `run.py` is about 56 KB.
+- Kaggle API note:
+  - creating a brand-new `rogii-gbm-stack-infer` kernel slug failed with
+    `Notebook not found`, even for a bootstrap script with no data sources;
+  - inference submit now updates the existing `rogii-gbm-stack-submit` kernel
+    instead, preserving previous versions and avoiding new-slug creation.
+- Takeaway: inference-only submit skips the expensive Kaggle train feature table
+  build and final model fitting. It still builds train-derived spatial context
+  and hidden-test features, so it is not free, but should be much faster than
+  train+infer for reruns of the same local model.
+
+### SUBMIT-20260517-3 - GBM Stack Inference-Only Submit
+
+- Command/config: `make submit-infer MESSAGE="gbm stack inference cv 13.50"` /
+  `configs/best.yml`.
+- Model dataset: `sleep3r/rogii-stack-artifacts`.
+- Kaggle kernel: `sleep3r/rogii-gbm-stack-submit`, version 2.
+- Submit ref: `52751801`.
+- Kaggle result: public LB 13.033, not an improvement over the previous 12.803.
+- Runtime:
+  - model artifact load: 8.56s;
+  - spatial context: 23.30s;
+  - public test prediction: 8.39s;
+  - total inference runtime inside Kaggle: 40.34s;
+  - output rows: 14,151.
+- What changed: used the local full-stack trained artifact instead of
+  rebuilding the 3.78M-row train feature table and refitting the stack on
+  Kaggle.
+- Takeaway: inference-only submission path is operational, but this stack is
+  not better on public LB. Local full CV improved from HGB 16.63554 to stack
+  13.50285, while public LB moved from HGB 12.803 to stack 13.033. That means
+  the current CV still does not rank submissions correctly. The only runtime
+  warning was a sklearn pickle version mismatch (`1.8.0` local vs `1.6.1`
+  Kaggle), so future artifacts should either be trained in a Kaggle-compatible
+  environment or verified against a Kaggle train+infer run.
+
 ### Current Direction
 
 - Do not over-index on train RMSE; the important local number is grouped CV by
   wells.
-- The biggest current weakness is likely alignment/geology, not basic tabular
-  capacity.
+- First public LB anchor: old HGB submit scored 12.803 at observed rank 682.
+- Latest full local CV anchor: GBM stack scored 13.50285 on all 773 wells, but
+  public LB was worse than HGB at 13.033.
+- The biggest current weakness is likely robust validation and alignment path
+  quality, not plain model capacity.
 - Next high-value experiments:
-  - improve DTW/DWT/NCC typewell alignment and expose the alignment path itself
-    as features;
+  - fix validation so it ranks HGB above the current stack, matching public LB;
+  - train a Kaggle-compatible stack artifact or run train+infer once to rule out
+    pickle-version drift;
+  - add OOF Ridge/hill-climb blending for the base models;
+  - improve DTW/DWT/NCC/PF typewell alignment and expose the alignment path
+    itself as features;
   - add stronger spatial/geological priors by formation and nearby wells;
-  - validate candidate solutions with multiple grouped splits;
-  - compare HGB against LightGBM/XGBoost/CatBoost once the feature set is more
-    competitive.
+  - validate candidate solutions with multiple grouped splits.
