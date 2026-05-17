@@ -21,6 +21,9 @@ The project uses `uv`, `.python-version`, `pyproject.toml`, and `uv.lock`.
 Python and Kaggle commands are run through `uv run` by default, which avoids
 stale global binaries.
 
+Experiment history, tried ideas, and measured results are tracked in
+`CHANGELOG.md`.
+
 ## Setup
 
 Install `uv` if needed:
@@ -225,7 +228,7 @@ make train CONFIG=configs/quick.yml
 Two local Codex skills were added for mining competition knowledge into SQLite:
 
 - `kaggle-code-miner` - scans Kaggle notebooks/kernels;
-- `kaggle-discussion-miner` - scans Kaggle topics/comments or CSV exports.
+- `kaggle-discussion-miner` - scans Kaggle topics/comments via the official MCP endpoint.
 
 Default database:
 
@@ -233,28 +236,35 @@ Default database:
 .kaggle_mining/ideas.sqlite
 ```
 
-Mine public notebooks:
+One-command refresh:
 
 ```bash
-uv run python /Users/alexander/.codex/skills/kaggle-code-miner/scripts/mine_kaggle_code.py \
-  --competition rogii-wellbore-geology-prediction \
-  --db .kaggle_mining/ideas.sqlite \
-  --work-dir .kaggle_mining/code \
-  --pull-limit 100 \
-  --kaggle-cmd "uv run kaggle"
+make research-db
 ```
 
-Mine discussions:
+That updates public notebooks, Kaggle discussions, and the Markdown brief.
+
+Mine public notebooks only:
 
 ```bash
-uv run python /Users/alexander/.codex/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py \
-  --competition rogii-wellbore-geology-prediction \
-  --db .kaggle_mining/ideas.sqlite \
-  --kaggle-cmd "uv run kaggle"
+make mine-code
 ```
 
-If Kaggle discussion API returns `403/404`, export topics/messages manually and
-use the miner's `--topics-csv` fallback.
+Mine discussions only:
+
+```bash
+make mine-discussions
+```
+
+Discussion mining uses Kaggle's official remote MCP endpoint
+`https://www.kaggle.com/mcp`, specifically `list_forum_topics` and
+`get_forum_topic`.
+
+Build the Markdown brief from the current DB:
+
+```bash
+make research-brief
+```
 
 Useful query:
 
@@ -306,7 +316,7 @@ Prepare only the Kaggle kernel workspace:
 make prepare-kaggle-kernel
 ```
 
-Manual fallback: package the current source tree for attaching to a hand-made
+Manual package path for attaching the current source tree to a hand-made
 Kaggle notebook/dataset:
 
 ```bash
@@ -365,6 +375,7 @@ The following are intentionally ignored:
 ```text
 .
 ├── .python-version
+├── CHANGELOG.md
 ├── Makefile
 ├── README.md
 ├── pyproject.toml

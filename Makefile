@@ -21,8 +21,20 @@ KERNEL_POLL_INTERVAL ?= 60
 NOTEBOOK ?=
 VERSION ?=
 MESSAGE ?= Submission
+CODEX_HOME ?= $(HOME)/.codex
+MINE_DB ?= .kaggle_mining/ideas.sqlite
+MINE_WORK_DIR ?= .kaggle_mining/code
+RESEARCH_BRIEF ?= .kaggle_mining/research_brief.md
+CODE_MINER ?= $(CODEX_HOME)/skills/kaggle-code-miner/scripts/mine_kaggle_code.py
+DISCUSSION_MINER ?= $(CODEX_HOME)/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py
+BRIEF_BUILDER ?= $(CODEX_HOME)/skills/kaggle-research-brief/scripts/build_research_brief.py
+CODE_PULL_LIMIT ?= 100
+DISCUSSION_PAGES ?= 6
+DISCUSSION_SORT ?= hot top new recent
+DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
+BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry submit-version
+.PHONY: install-deps download-data unzip-data ensure-data train quick-train train-submit mine-code mine-discussions research-brief research-db package-kaggle prepare-kaggle-kernel submit submit-kaggle submit-kaggle-dry submit-version
 
 install-deps:
 	$(UV) sync
@@ -47,6 +59,17 @@ quick-train:
 
 train-submit: ensure-data
 	$(UV) run python -m rogii --config $(SUBMIT_CONFIG)
+
+mine-code:
+	$(PYTHON) $(CODE_MINER) --competition $(COMPETITION) --db $(MINE_DB) --work-dir $(MINE_WORK_DIR) --pull-limit $(CODE_PULL_LIMIT) --kaggle-cmd "$(KAGGLE)"
+
+mine-discussions:
+	$(PYTHON) $(DISCUSSION_MINER) --competition $(COMPETITION) --db $(MINE_DB) --source mcp --pages $(DISCUSSION_PAGES) --sort-by $(DISCUSSION_SORT) --message-page-size $(DISCUSSION_MESSAGE_PAGE_SIZE)
+
+research-brief:
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --max-all-ideas $(BRIEF_MAX_IDEAS)
+
+research-db: mine-code mine-discussions research-brief
 
 package-kaggle:
 	$(PYTHON) -m rogii.kaggle_package --output $(KAGGLE_PACKAGE)
