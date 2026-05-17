@@ -4,13 +4,13 @@ UV ?= uv
 PYTHON ?= $(UV) run python
 KAGGLE ?= $(UV) run kaggle
 DATA_DIR ?= data
-CONFIG ?= configs/hgb.yml
+CONFIG ?= configs/quick.yml
 SUBMISSION ?= submission.csv
 NOTEBOOK ?=
 VERSION ?=
 MESSAGE ?= Submission
 
-.PHONY: install-deps download-data unzip-data ensure-data train quick-train submit
+.PHONY: install-deps download-data unzip-data ensure-data train submit
 
 install-deps:
 	$(UV) sync
@@ -28,10 +28,7 @@ ensure-data:
 	fi
 
 train: ensure-data
-	$(PYTHON) train.py --config $(CONFIG)
-
-quick-train:
-	$(PYTHON) train.py --config configs/quick.yml
+	$(UV) run python train.py --config $(CONFIG)
 
 submit:
 	@test -n "$(NOTEBOOK)" || (echo "Usage: make submit NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)
