@@ -49,7 +49,7 @@ features:
 
 model:
   base_models:
-    - id: lgb_025_s42
+    - id: lgb_lr025
       name: lightgbm
       params:
         n_estimators: 2500
@@ -62,7 +62,7 @@ model:
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
-    - id: lgb_020_s7
+    - id: lgb_lr020
       name: lightgbm
       params:
         n_estimators: 2500
@@ -75,7 +75,7 @@ model:
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
-    - id: lgb_030_s123
+    - id: lgb_lr030
       name: lightgbm
       params:
         n_estimators: 2500
@@ -88,7 +88,7 @@ model:
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
-    - id: cat_025_s42
+    - id: cat_lr025
       name: catboost
       params:
         iterations: 2500
@@ -101,7 +101,7 @@ model:
         random_strength: 0.2
         bootstrap_type: Bernoulli
         subsample: 0.8
-    - id: cat_020_s7
+    - id: cat_lr020
       name: catboost
       params:
         iterations: 2500
@@ -114,7 +114,7 @@ model:
         random_strength: 0.2
         bootstrap_type: Bernoulli
         subsample: 0.8
-    - id: cat_030_s123
+    - id: cat_lr030
       name: catboost
       params:
         iterations: 2500
@@ -127,7 +127,7 @@ model:
         random_strength: 0.2
         bootstrap_type: Bernoulli
         subsample: 0.8
-    - id: xgb_025_s42
+    - id: xgb_lr025
       name: xgboost
       params:
         n_estimators: 1800
@@ -140,7 +140,7 @@ model:
         reg_alpha: 0.05
         reg_lambda: 3.0
         tree_method: hist
-    - id: xgb_030_s123
+    - id: xgb_lr030
       name: xgboost
       params:
         n_estimators: 1800
@@ -163,7 +163,7 @@ validation:
 
 postprocess:
   residual_weight: 1.0
-  residual_weight_grid: [1.0]
+  residual_weight_grid: [0.7, 0.8, 0.9, 1.0, 1.1]
   residual_clip: 250.0
   notebook_blend:
     enabled: true

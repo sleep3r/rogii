@@ -29,8 +29,25 @@ def predict_test(
     predictions_by_well: dict[str, np.ndarray] = {}
 
     for i, path in enumerate(test_paths, start=1):
-        wf = build_well_features(path, config, train=False, top_context=top_context)
-        test_features = wf.features.reindex(columns=feature_names).astype("float32")
+        wf = build_well_features(
+            path,
+            config,
+            train=False,
+            top_context=top_context,
+            logger=logger,
+        )
+        missing_features = [name for name in feature_names if name not in wf.features]
+        test_features = wf.features.reindex(columns=feature_names)
+        if missing_features:
+            if logger is not None:
+                logger.warn(
+                    "Missing inference features filled with zero",
+                    well=wf.well,
+                    count=len(missing_features),
+                    first=missing_features[0],
+                )
+            test_features.loc[:, missing_features] = 0.0
+        test_features = test_features.astype("float32")
         residual_pred = model.predict(test_features)
         predictions_by_well[wf.well] = apply_postprocess(
             wf.flat_prediction,

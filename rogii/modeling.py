@@ -300,6 +300,8 @@ def make_lightgbm(params: dict[str, Any], seed: int) -> WrappedRegressor:
 def make_xgboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
     from xgboost import XGBRegressor
 
+    params = dict(params)
+    early_stopping_rounds = params.pop("early_stopping_rounds", None)
     defaults = {
         "objective": "reg:squarederror",
         "n_estimators": 650,
@@ -315,6 +317,8 @@ def make_xgboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
         "verbosity": 0,
     }
     defaults.update(params)
+    if early_stopping_rounds not in (None, ""):
+        defaults["early_stopping_rounds"] = int(early_stopping_rounds)
     defaults["random_state"] = seed
     return WrappedRegressor(XGBRegressor(**defaults), {"kind": "xgboost"})
 
@@ -470,14 +474,14 @@ def apply_notebook_blend(
         }
 
     pf_column = str(blend_cfg.get("pf_column", "kg_pf_ancc_tvt"))
-    required = {"last_known_tvt", "md_since", pf_column}
+    required = {"last_known_tvt", "md_from_last_known", pf_column}
     if not required.issubset(features.columns):
         return pred
 
     last = features["last_known_tvt"].to_numpy(dtype=float)
-    md_since = features["md_since"].to_numpy(dtype=float)
+    md_from_last_known = features["md_from_last_known"].to_numpy(dtype=float)
     pf_tvt = features[pf_column].to_numpy(dtype=float)
-    valid = np.isfinite(last) & np.isfinite(md_since) & np.isfinite(pf_tvt)
+    valid = np.isfinite(last) & np.isfinite(md_from_last_known) & np.isfinite(pf_tvt)
     if not valid.any():
         return pred
 
@@ -488,7 +492,7 @@ def apply_notebook_blend(
     pf_delta = pf_tvt - last
     delta = (1.0 - w_pf) * model_delta + w_pf * pf_delta
     if tau > 0:
-        delta = delta * (1.0 - np.exp(-np.maximum(md_since, 0.0) / tau))
+        delta = delta * (1.0 - np.exp(-np.maximum(md_from_last_known, 0.0) / tau))
 
     blended = pred.copy()
     blended[valid] = last[valid] + alpha * delta[valid]

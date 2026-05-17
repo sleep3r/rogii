@@ -24,6 +24,8 @@ from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
+FEATURE_CACHE_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class WellFeatures:
@@ -60,6 +62,7 @@ def feature_cache_path(
 
     type_path = typewell_path(horizontal_path)
     stats = {
+        "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
         "horizontal": {
             "name": horizontal_path.name,
             "size": horizontal_path.stat().st_size,
@@ -147,14 +150,17 @@ def read_typewell_features(
 
 
 def build_target_mask(df: pd.DataFrame, target_rows: str) -> np.ndarray:
-    has_target = (
-        "TVT" in df.columns
-        and pd.to_numeric(df["TVT"], errors="coerce").notna().to_numpy()
-    )
+    if target_rows not in {"all", "hidden_only"}:
+        raise ValueError("data.target_rows must be 'hidden_only' or 'all'")
+
+    if "TVT" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+
+    has_target = pd.to_numeric(df["TVT"], errors="coerce").notna().to_numpy()
     if target_rows == "all":
         return has_target
-    if target_rows != "hidden_only":
-        raise ValueError("data.target_rows must be 'hidden_only' or 'all'")
+    if "TVT_input" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
     hidden = pd.to_numeric(df["TVT_input"], errors="coerce").isna().to_numpy()
     return has_target & hidden
 
@@ -164,6 +170,7 @@ def build_well_features(
     config: dict[str, Any],
     train: bool,
     top_context: KaggleTopContext | None = None,
+    logger: RunLogger | None = None,
 ) -> WellFeatures:
     cache_path = feature_cache_path(horizontal_path, config, train)
     if cache_path is not None and cache_path.is_file():
@@ -172,8 +179,9 @@ def build_well_features(
                 cached = pickle.load(file)
             if isinstance(cached, WellFeatures):
                 return cached
-        except Exception:
-            pass
+        except Exception as exc:
+            if logger is not None:
+                logger.warn("Ignoring feature cache", path=cache_path, error=exc)
 
     df = pd.read_csv(horizontal_path)
     n = len(df)
@@ -252,10 +260,8 @@ def build_well_features(
         "last_known_tvt": last_tvt,
         "anchor_tvt": anchor_tvt,
         "idx_from_last_known": idx - float(last_known),
-        "idx_since": idx - float(last_known),
         "md_from_start": md - md[0],
         "md_from_last_known": md - md[last_known],
-        "md_since": md - md[last_known],
         "z_from_last_known": z - z[last_known],
         "x_from_last_known": x - x[last_known],
         "y_from_last_known": y - y[last_known],
@@ -302,10 +308,9 @@ def build_well_features(
         features[f"gr_roll_min_{window}"] = centered_rolling(gr, window, "min")
         features[f"gr_roll_max_{window}"] = centered_rolling(gr, window, "max")
         features[f"gr_minus_roll_mean_{window}"] = gr - gr_mean
-        features[f"z_roll_mean_{window}"] = centered_rolling(z, window, "mean")
-        features[f"z_minus_roll_mean_{window}"] = z - centered_rolling(
-            z, window, "mean"
-        )
+        z_roll_mean = centered_rolling(z, window, "mean")
+        features[f"z_roll_mean_{window}"] = z_roll_mean
+        features[f"z_minus_roll_mean_{window}"] = z - z_roll_mean
 
     if config["features"].get("include_typewell", True):
         features.update(
@@ -369,7 +374,9 @@ def build_training_table(
     loaded_rows = 0
 
     for i, path in enumerate(paths, start=1):
-        wf = build_well_features(path, config, train=True, top_context=top_context)
+        wf = build_well_features(
+            path, config, train=True, top_context=top_context, logger=logger
+        )
         mask = wf.target_mask
         if wf.target is None or not mask.any():
             continue

@@ -135,6 +135,64 @@ if NUMBA_AVAILABLE:
         return path
 
     @njit(cache=True)
+    def _lowres_dtw_path_jit(q, r, radius):
+        n = len(q)
+        m = len(r)
+        inf = 1e18
+        dp = np.full((n, m), inf)
+        parent = np.full((n, m), -1, np.int8)
+        slope = (m - 1) / max(n - 1, 1)
+        radius = max(int(radius), 1)
+
+        for i in range(n):
+            center = int(round(i * slope))
+            lo = max(0, center - radius)
+            hi = min(m - 1, center + radius)
+            for j in range(lo, hi + 1):
+                cost = (q[i] - r[j]) ** 2
+                if i == 0 and j == 0:
+                    dp[i, j] = cost
+                    continue
+
+                best_cost = inf
+                best_code = np.int8(-1)
+                if i > 0 and j > 0 and dp[i - 1, j - 1] < best_cost:
+                    best_cost = dp[i - 1, j - 1]
+                    best_code = np.int8(0)
+                if i > 0 and dp[i - 1, j] < best_cost:
+                    best_cost = dp[i - 1, j]
+                    best_code = np.int8(1)
+                if j > 0 and dp[i, j - 1] < best_cost:
+                    best_cost = dp[i, j - 1]
+                    best_code = np.int8(2)
+                dp[i, j] = cost + best_cost
+                parent[i, j] = best_code
+
+        j_end = np.int64(0)
+        best_end = dp[n - 1, 0]
+        for j in range(1, m):
+            if dp[n - 1, j] < best_end:
+                best_end = dp[n - 1, j]
+                j_end = j
+
+        i = n - 1
+        j = j_end
+        j_for_i = np.zeros(n, np.int64)
+        while i >= 0 and j >= 0:
+            j_for_i[i] = j
+            code = parent[i, j]
+            if i == 0 and j == 0:
+                break
+            if code == 0:
+                i -= 1
+                j -= 1
+            elif code == 1:
+                i -= 1
+            else:
+                j -= 1
+        return j_for_i
+
+    @njit(cache=True)
     def _pf_ancc_jit(
         md_v,
         z_v,
@@ -643,6 +701,58 @@ def downsample_indices(length: int, max_points: int) -> np.ndarray:
     return np.unique(np.linspace(0, length - 1, max_points, dtype=int))
 
 
+def lowres_dtw_path_python(q: np.ndarray, r: np.ndarray, radius: int) -> np.ndarray:
+    n = len(q)
+    m = len(r)
+    inf = 1e18
+    dp = np.full((n, m), inf, dtype=float)
+    parent = np.full((n, m), -1, dtype=np.int8)
+    slope = (m - 1) / max(n - 1, 1)
+    radius = max(int(radius), 1)
+
+    for i in range(n):
+        center = int(round(i * slope))
+        lo = max(0, center - radius)
+        hi = min(m - 1, center + radius)
+        for j in range(lo, hi + 1):
+            cost = (q[i] - r[j]) ** 2
+            if i == 0 and j == 0:
+                dp[i, j] = cost
+                continue
+
+            best_cost = inf
+            best_code = -1
+            if i > 0 and j > 0 and dp[i - 1, j - 1] < best_cost:
+                best_cost = dp[i - 1, j - 1]
+                best_code = 0
+            if i > 0 and dp[i - 1, j] < best_cost:
+                best_cost = dp[i - 1, j]
+                best_code = 1
+            if j > 0 and dp[i, j - 1] < best_cost:
+                best_cost = dp[i, j - 1]
+                best_code = 2
+            dp[i, j] = cost + best_cost
+            parent[i, j] = best_code
+
+    j_end = int(np.nanargmin(dp[-1]))
+    i = n - 1
+    j = j_end
+    j_for_i = np.zeros(n, dtype=int)
+    while i >= 0 and j >= 0:
+        j_for_i[i] = j
+        code = parent[i, j]
+        if i == 0 and j == 0:
+            break
+        if code == 0:
+            i -= 1
+            j -= 1
+        elif code == 1:
+            i -= 1
+        else:
+            j -= 1
+    return j_for_i
+
+
 def lowres_dtw_signal(
     full_gr: np.ndarray,
     tw_tvt: np.ndarray,
@@ -662,50 +772,14 @@ def lowres_dtw_signal(
     q = (q - np.nanmean(q)) / (np.nanstd(q) + 1e-6)
     r = (r - np.nanmean(r)) / (np.nanstd(r) + 1e-6)
 
-    n = len(q)
-    m = len(r)
-    inf = 1e18
-    dp = np.full((n, m), inf, dtype=float)
-    parent = np.full((n, m), -1, dtype=np.int8)
-    slope = (m - 1) / max(n - 1, 1)
-    radius = max(int(radius), 1)
-
-    for i in range(n):
-        center = int(round(i * slope))
-        lo = max(0, center - radius)
-        hi = min(m - 1, center + radius)
-        for j in range(lo, hi + 1):
-            cost = (q[i] - r[j]) ** 2
-            if i == 0 and j == 0:
-                dp[i, j] = cost
-                continue
-            choices: list[tuple[float, int]] = []
-            if i > 0 and j > 0:
-                choices.append((dp[i - 1, j - 1], 0))
-            if i > 0:
-                choices.append((dp[i - 1, j], 1))
-            if j > 0:
-                choices.append((dp[i, j - 1], 2))
-            prev_cost, prev_code = min(choices, key=lambda item: item[0])
-            dp[i, j] = cost + prev_cost
-            parent[i, j] = prev_code
-
-    j_end = int(np.nanargmin(dp[-1]))
-    i = n - 1
-    j = j_end
-    j_for_i = np.zeros(n, dtype=int)
-    while i >= 0 and j >= 0:
-        j_for_i[i] = j
-        code = parent[i, j]
-        if i == 0 and j == 0:
-            break
-        if code == 0:
-            i -= 1
-            j -= 1
-        elif code == 1:
-            i -= 1
-        else:
-            j -= 1
+    if NUMBA_AVAILABLE:
+        j_for_i = _lowres_dtw_path_jit(
+            q.astype(np.float64),
+            r.astype(np.float64),
+            int(radius),
+        )
+    else:
+        j_for_i = lowres_dtw_path_python(q, r, radius)
     coarse_tvt = tw_tvt[r_idx[j_for_i]]
     return np.interp(np.arange(len(full_gr)), q_idx, coarse_tvt).astype(float)
 

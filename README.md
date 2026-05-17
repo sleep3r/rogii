@@ -70,6 +70,10 @@ The main pipeline is:
 6. Tune PF_ANCC delta postprocess and optional Savitzky-Golay smoothing on OOF.
 7. Save `submission.csv` plus artifacts under `artifacts/stack`.
 
+Spatial distance features `kg_form_knn_dist` and `kg_dense_ancc_dist` are
+stored in normalized KD-tree units, not feet. They are meant as relative
+neighborhood-confidence features.
+
 Artifacts:
 
 ```text

@@ -8,6 +8,7 @@ def as_float_array(
     series: pd.Series | np.ndarray, default: float = np.nan
 ) -> np.ndarray:
     values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+    # NaN is not equal to itself, so default=np.nan leaves invalid values as NaN.
     if default == default:
         values[~np.isfinite(values)] = default
     return values

@@ -38,6 +38,19 @@ run here with command, data, CV, LB, runtime, and the next decision.
 Takeaway: the framework is back to a simple baseline shape. New ideas should be
 added to the main path only when they improve validation or leaderboard.
 
+### Audit Fix Pass
+
+- Fixed latent `TVT`-missing target-mask bug.
+- Removed duplicate `idx_since` and `md_since` features; postprocess now uses
+  `md_from_last_known`.
+- Moved low-resolution DTW dynamic programming into numba.
+- Added inference warnings for missing feature columns and zero-filled them.
+- Expanded full-stack residual-weight grid to `[0.7, 0.8, 0.9, 1.0, 1.1]`.
+- Added pytest coverage for target masks, feature schema, postprocess, DTW,
+  XGBoost early stopping, and inference feature filling.
+- Local result: pending.
+- Kaggle result: pending.
+
 ### EXP-20260517-1 - Initial HGB Baseline
 
 - Command/config: historical HGB baseline.
