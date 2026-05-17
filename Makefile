@@ -10,7 +10,7 @@ NOTEBOOK ?=
 VERSION ?=
 MESSAGE ?= Submission
 
-.PHONY: install-deps download-data unzip-data ensure-data baseline train quick-train validate-baseline submit
+.PHONY: install-deps download-data unzip-data ensure-data train quick-train submit
 
 install-deps:
 	$(UV) sync
@@ -27,17 +27,11 @@ ensure-data:
 		$(MAKE) unzip-data; \
 	fi
 
-baseline:
-	$(PYTHON) scripts/baseline.py --data-dir $(DATA_DIR) --output $(SUBMISSION)
-
 train: ensure-data
 	$(PYTHON) train.py --config $(CONFIG)
 
 quick-train:
 	$(PYTHON) train.py --config configs/quick.yml
-
-validate-baseline:
-	$(PYTHON) scripts/baseline.py --data-dir $(DATA_DIR) --output $(SUBMISSION) --truth-dir $(DATA_DIR)
 
 submit:
 	@test -n "$(NOTEBOOK)" || (echo "Usage: make submit NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE=\"Message\"" && exit 1)

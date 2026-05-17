@@ -4,9 +4,9 @@ Working repository for the Kaggle competition
 `rogii-wellbore-geology-prediction`.
 
 The goal is to predict `TVT` for hidden evaluation intervals in horizontal
-wellbores. The repo currently contains a flat TVT baseline, a configurable
-gradient boosting training pipeline, and local Kaggle mining tools for tracking
-public notebooks/discussions.
+wellbores. The repo currently contains a configurable gradient boosting
+training pipeline and local Kaggle mining tools for tracking public
+notebooks/discussions.
 
 ## Quick Start
 
@@ -66,34 +66,6 @@ make unzip-data
 
 `make train` depends on `ensure-data`, so it will unzip the archive if
 `data/train` or `data/test` is missing.
-
-## Baseline
-
-Generate `submission.csv` with the flat baseline:
-
-```bash
-make baseline
-```
-
-Equivalent command:
-
-```bash
-uv run python scripts/baseline.py --data-dir data --output submission.csv
-```
-
-Baseline behavior:
-
-- reads `test/*__horizontal_well.csv`;
-- identifies target rows where `TVT_input` is missing;
-- interpolates internal gaps;
-- predicts hidden tails from the median of the latest known `TVT_input`;
-- writes Kaggle-compatible `submission.csv`.
-
-For a simple local check against train truth:
-
-```bash
-make validate-baseline
-```
 
 ## Training
 
@@ -177,6 +149,17 @@ Best residual_weight: 0.75
 Kaggle top-signal features: 34
 ```
 
+Latest full local train run on visible train wells:
+
+```text
+Train rows: 3,783,989
+Features:   122
+CV RMSE:    16.63554
+Flat CV:    19.06126
+Best residual_weight: 0.75
+Kaggle top-signal features: 38
+```
+
 Configs:
 
 - `configs/hgb.yml` - main training run;
@@ -243,7 +226,7 @@ make submit NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE="Message"
 Example:
 
 ```bash
-make submit NOTEBOOK=rogii-baseline VERSION=3 MESSAGE="flat tvt baseline"
+make submit NOTEBOOK=rogii-hgb VERSION=3 MESSAGE="hgb top-signal model"
 ```
 
 Expands to:
@@ -252,9 +235,9 @@ Expands to:
 uv run kaggle competitions submit \
   -c rogii-wellbore-geology-prediction \
   -f submission.csv \
-  -k sleep3r/rogii-baseline \
+  -k sleep3r/rogii-hgb \
   -v 3 \
-  -m "flat tvt baseline"
+  -m "hgb top-signal model"
 ```
 
 ## Ignored Outputs
@@ -279,8 +262,6 @@ The following are intentionally ignored:
 ├── configs/
 │   ├── hgb.yml
 │   └── quick.yml
-├── scripts/
-│   └── baseline.py
 ├── train.py
 └── data/                 # ignored
 ```
