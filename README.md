@@ -36,8 +36,8 @@ data/
   sample_submission.csv
 ```
 
-`make train` and `make infer` run `ensure-data`, so they unzip the Kaggle archive
-if `data/train` or `data/test` is missing.
+`make train-local` runs `ensure-data`, so it unzips the Kaggle archive if
+`data/train` or `data/test` is missing.
 
 ## Training
 
@@ -50,7 +50,7 @@ make quick-train
 Main local training:
 
 ```bash
-make train
+make train-local
 ```
 
 Equivalent command:
@@ -85,40 +85,7 @@ artifacts/stack/
   source_config.yml
 ```
 
-## Inference
-
-Run local inference from a trained artifact:
-
-```bash
-make infer
-```
-
-Default model directory is `artifacts/stack`. Override it when needed:
-
-```bash
-make infer INFER_MODEL_DIR=artifacts/quick SUBMISSION=artifacts/infer_quick/submission.csv
-```
-
-Inference uses `<model-dir>/config.yml`, so it preserves the postprocess selected
-during training.
-
 ## Kaggle
-
-Dry-run inference submission packaging:
-
-```bash
-make submit-infer-dry MESSAGE="baseline dry run"
-```
-
-End-to-end inference-only submit:
-
-```bash
-make submit MESSAGE="baseline infer"
-```
-
-That command publishes the trained local artifact as a private Kaggle dataset,
-pushes a private Kaggle script, waits for `submission.csv`, validates it, and
-submits the produced notebook version.
 
 Remote Kaggle training without competition submit:
 
@@ -126,13 +93,35 @@ Remote Kaggle training without competition submit:
 make train-kaggle MESSAGE="baseline remote train"
 ```
 
+This pushes and runs a Kaggle script, downloads all output, and does not call
+the competition submit API. You can submit the produced notebook version from
+the Kaggle UI.
+
+Inference-only Kaggle run from a local artifact:
+
+```bash
+make submit MESSAGE="baseline infer"
+```
+
+That command publishes the trained local artifact as a private Kaggle dataset,
+pushes a private Kaggle script, waits for `submission.csv`, validates it, and
+also stops before the competition submit API call. Submit the notebook version
+manually from the Kaggle UI when you are happy with it.
+
+Dry runs:
+
+```bash
+make train-kaggle-dry MESSAGE="train dry run"
+make submit-dry MESSAGE="infer dry run"
+```
+
 Monitor kernels:
 
 ```bash
-make status-kaggle
-make logs-kaggle
-make status-infer
-make logs-infer
+make status-train
+make logs-train
+make status-submit
+make logs-submit
 ```
 
 ## Configs

@@ -31,9 +31,10 @@ run here with command, data, CV, LB, runtime, and the next decision.
   - non-negative hill-climb blend on OOF predictions;
   - PF_ANCC delta postprocess and smoothing tuned on OOF;
   - one artifact format used by local and Kaggle inference.
-- `make train` trains `configs/stack.yml`.
+- `make train-local` trains `configs/stack.yml`.
 - `make quick-train` trains `configs/quick.yml`.
-- `make submit` is inference-only Kaggle submit from `artifacts/stack`.
+- `make submit` is an inference-only Kaggle run from `artifacts/stack`; final
+  competition submit is manual from the Kaggle UI.
 
 Takeaway: the framework is back to a simple baseline shape. New ideas should be
 added to the main path only when they improve validation or leaderboard.
@@ -50,6 +51,15 @@ added to the main path only when they improve validation or leaderboard.
   XGBoost early stopping, and inference feature filling.
 - Local result: pending.
 - Kaggle result: pending.
+
+### Makefile Command Cleanup
+
+- Main commands are now:
+  - `make train-local` for local training;
+  - `make train-kaggle` for Kaggle training without competition submit;
+  - `make submit` for inference-only Kaggle run without competition submit.
+- Removed old submit aliases from the primary workflow; Kaggle UI remains the
+  place to press the final submit button.
 
 ### EXP-20260517-1 - Initial HGB Baseline
 
@@ -103,4 +113,4 @@ added to the main path only when they improve validation or leaderboard.
   - best smoothing: `{window: 17, polyorder: 3}`.
 - Kaggle result: not submitted.
 - Takeaway: alignment features and OOF-tuned postprocess work on the smoke set.
-  Needs full `make train` after simplification.
+  Needs full `make train-local` after simplification.
