@@ -78,13 +78,25 @@ make train
 Equivalent command:
 
 ```bash
-uv run python train.py --config configs/hgb.yml
+uv run python -m rogii --config configs/hgb.yml
 ```
 
 For a fast smoke-test on the small public sample:
 
 ```bash
 make quick-train
+```
+
+For a Kaggle submission rerun, skip CV and final train-set prediction:
+
+```bash
+make train-submit
+```
+
+Equivalent command:
+
+```bash
+uv run python -m rogii --config configs/submit.yml
 ```
 
 Training pipeline:
@@ -109,7 +121,7 @@ On 2026-05-17, public notebook mining found the strongest current signals in:
 - https://www.kaggle.com/code/cdeotte/xgb-starter-cv-15
 
 These notebooks point to the same core idea: this is less a generic tabular
-problem and more a GR/typewell alignment problem. The current `train.py`
+problem and more a GR/typewell alignment problem. The current `rogii` package
 implements a portable version of that idea:
 
 - beam-style matching of hidden horizontal-well GR against the typewell GR;
@@ -160,10 +172,47 @@ Best residual_weight: 0.75
 Kaggle top-signal features: 38
 ```
 
+## Runtime Notes
+
+The 9 hour number is the Kaggle code-competition notebook limit, not the
+expected inference time. Locally, the full visible train run with CV took about
+6.5 minutes:
+
+```text
+Spatial context:       0:04
+Training feature build 3:44
+CV:                    1:25
+Final model:           1:17
+Test sample predict:   0:01
+```
+
+For a real Kaggle submission, the visible train set is still the same, but the
+local 3-well public `test/` sample is replaced by the hidden test set. The
+hidden inference step will therefore be longer than local `test_wells=3`, but
+the training feature build is still the main cost in the current pipeline.
+
+Use `configs/submit.yml` or `make train-submit` for submission notebooks. It
+inherits `configs/hgb.yml`, disables CV, and skips final train RMSE prediction,
+so the rerun spends time on fitting and hidden-test prediction instead of local
+diagnostics.
+
+Latest local submission-mode run:
+
+```text
+make train-submit
+Total duration: 05:03
+CV: disabled
+Final train RMSE: skipped
+Output artifacts: artifacts/submit
+```
+
 Configs:
 
 - `configs/hgb.yml` - main training run;
-- `configs/quick.yml` - small sample smoke-test.
+- `configs/quick.yml` - small sample smoke-test;
+- `configs/submit.yml` - no-CV submission rerun config;
+- `configs/best.yml` - the current best experiment pointer used by
+  `make submit`.
 
 Override the config:
 
@@ -216,17 +265,78 @@ sqlite3 .kaggle_mining/ideas.sqlite \
 
 ## Submit
 
-This is a Kaggle code competition, so submissions should reference a committed
-Kaggle notebook output.
+This is a Kaggle code competition, so the real submission must reference a
+Kaggle kernel version. The end-to-end path is:
 
 ```bash
-make submit NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE="Message"
+make submit MESSAGE="hgb top-signal model"
+```
+
+That command:
+
+- builds a self-contained Kaggle `run.py` under `artifacts/kaggle_kernel`;
+- embeds the current `rogii/` package and `configs/` into that script;
+- pushes `sleep3r/rogii-hgb-submit` as a private Kaggle script;
+- waits for the Kaggle run to finish;
+- downloads and validates `submission.csv`;
+- submits that kernel version to the competition.
+
+By default it uses `configs/best.yml`, which currently inherits
+`configs/submit.yml`. To try another experiment without editing files:
+
+```bash
+make submit BEST_CONFIG=configs/my_experiment.yml KERNEL=rogii-my-experiment MESSAGE="my experiment"
+```
+
+To mark an experiment as the default best, update `configs/best.yml`:
+
+```yaml
+inherits: my_experiment.yml
+```
+
+Dry-run the packaging step without pushing or submitting:
+
+```bash
+make submit-kaggle-dry
+```
+
+Prepare only the Kaggle kernel workspace:
+
+```bash
+make prepare-kaggle-kernel
+```
+
+Manual fallback: package the current source tree for attaching to a hand-made
+Kaggle notebook/dataset:
+
+```bash
+make package-kaggle
+```
+
+This writes:
+
+```text
+artifacts/rogii_source.zip
+```
+
+Inside a Kaggle notebook, attach/unzip that source package and run:
+
+```bash
+python -m rogii \
+  --config configs/submit.yml \
+  --data-dir /kaggle/input/rogii-wellbore-geology-prediction
+```
+
+The notebook must write `submission.csv` in its working directory.
+
+```bash
+make submit-version NOTEBOOK=<NOTEBOOK> VERSION=<VERSION> MESSAGE="Message"
 ```
 
 Example:
 
 ```bash
-make submit NOTEBOOK=rogii-hgb VERSION=3 MESSAGE="hgb top-signal model"
+make submit-version NOTEBOOK=rogii-hgb VERSION=3 MESSAGE="hgb top-signal model"
 ```
 
 Expands to:
@@ -261,7 +371,23 @@ The following are intentionally ignored:
 ├── uv.lock
 ├── configs/
 │   ├── hgb.yml
-│   └── quick.yml
-├── train.py
+│   ├── quick.yml
+│   ├── best.yml
+│   └── submit.yml
+├── rogii/
+│   ├── __main__.py     # package CLI entrypoint
+│   ├── kaggle_package.py # source zip packager
+│   ├── kaggle_submit.py # end-to-end Kaggle kernel submitter
+│   ├── config.py       # config defaults and YAML loading
+│   ├── constants.py    # formation names and Kaggle paths
+│   ├── features.py     # well-level tabular feature assembly
+│   ├── io.py           # data path discovery and well file helpers
+│   ├── modeling.py     # model factory, CV, residual postprocess
+│   ├── numeric.py      # numeric helpers and flat TVT baseline
+│   ├── pipeline.py     # train orchestration
+│   ├── runlog.py       # status/timing logger
+│   ├── spatial.py      # spatial KNN/ANCC priors
+│   ├── submission.py   # test prediction and artifact writing
+│   └── top_signals.py  # beam/NCC/DTW public-solution signals
 └── data/                 # ignored
 ```

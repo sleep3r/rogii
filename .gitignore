@@ -221,4 +221,5 @@ __marimo__/
 data/
 artifacts/
 .kaggle_mining/
+_rogii_src/
 submission.csv
