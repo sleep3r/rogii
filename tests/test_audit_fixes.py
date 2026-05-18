@@ -3,8 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from rogii.features import build_target_mask, build_well_features
+from rogii.constants import FORMATIONS
+from rogii.features import build_target_mask, build_training_table, build_well_features
 from rogii.modeling import apply_postprocess, make_xgboost
+from rogii.spatial import KaggleTopContext
 from rogii.submission import predict_test
 from rogii.top_signals import downsample_indices, lowres_dtw_signal
 
@@ -27,6 +29,74 @@ def minimal_config() -> dict:
             "smoothing": {"enabled": False},
         },
     }
+
+
+def write_dwt_synthetic_well(tmp_path, name: str = "abc12345") -> tuple:
+    n = 18
+    idx = np.arange(n, dtype=float)
+    tvt = 100.0 + 0.55 * idx
+    known = idx < 12
+    tvt_input = np.where(known, tvt, np.nan)
+    z = 800.0 + 0.15 * idx
+    x = 1000.0 + 5.0 * idx
+    y = 2000.0 + 2.0 * idx
+    gr = 80.0 + 8.0 * np.sin(idx / 3.0)
+    frame = pd.DataFrame(
+        {
+            "MD": idx,
+            "X": x,
+            "Y": y,
+            "Z": z,
+            "GR": gr,
+            "TVT_input": tvt_input,
+            "TVT": tvt,
+        }
+    )
+    for offset, formation in enumerate(FORMATIONS):
+        frame[formation] = z + tvt + 10.0 * offset
+    horizontal = tmp_path / f"{name}__horizontal_well.csv"
+    frame.to_csv(horizontal, index=False)
+
+    tw_tvt = np.linspace(95.0, 115.0, 80)
+    typewell = pd.DataFrame(
+        {
+            "TVT": tw_tvt,
+            "GR": 80.0 + 8.0 * np.sin((tw_tvt - 100.0) / 1.65 / 3.0),
+            "Geology": ["ANCC"] * len(tw_tvt),
+        }
+    )
+    typewell.to_csv(tmp_path / f"{name}__typewell.csv", index=False)
+    return horizontal, frame
+
+
+def dwt_config() -> dict:
+    config = minimal_config()
+    config["features"]["include_typewell"] = True
+    config["features"]["include_kaggle_top_signals"] = True
+    config["features"]["kaggle_top"] = {
+        "mode": "notebook",
+        "beam_configs": [[4, 6.0, 40.0, 1, "cons"], [4, 6.0, 40.0, 1, "sm5"]],
+        "ncc_windows": [2, 3, 4],
+        "ncc_stride": 1,
+        "dtw_enabled": True,
+        "dtw_max_query_points": 32,
+        "dtw_max_ref_points": 32,
+        "dtw_radii": [2, 4],
+        "dtw_stochastic_enabled": True,
+        "dtw_stochastic_radius": 2,
+        "dtw_stochastic_k": 2,
+        "dtw_stochastic_temperature": 1.0,
+        "dwt_enabled": False,
+        "particle_enabled": True,
+        "particle_count": 32,
+        "ancc_particle_count": 32,
+        "spatial_k": 1,
+        "dense_k": 1,
+        "dense_fetch": 4,
+        "dense_query_chunk": 2,
+        "dense_samples_per_well": 8,
+    }
+    return config
 
 
 def reference_lowres_dtw_signal(
@@ -132,6 +202,45 @@ def test_feature_schema_keeps_only_canonical_last_known_offsets(tmp_path) -> Non
     assert "md_from_last_known" in wf.features.columns
     assert "idx_since" not in wf.features.columns
     assert "md_since" not in wf.features.columns
+
+
+def test_training_target_is_last_known_residual(tmp_path) -> None:
+    path, frame = write_dwt_synthetic_well(tmp_path)
+    config = minimal_config()
+
+    X, residual, _groups, flat, y_true = build_training_table([path], config)
+    last_known = float(frame.loc[frame["TVT_input"].notna(), "TVT_input"].iloc[-1])
+    hidden_tvt = frame.loc[frame["TVT_input"].isna(), "TVT"].to_numpy(dtype=float)
+
+    assert np.allclose(X["last_known_tvt"].to_numpy(), last_known)
+    assert np.allclose(flat, last_known)
+    assert np.allclose(y_true, hidden_tvt)
+    assert np.allclose(residual, hidden_tvt - last_known)
+
+
+def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
+    path, _frame = write_dwt_synthetic_well(tmp_path)
+    config = dwt_config()
+    context = KaggleTopContext([path], config)
+
+    wf = build_well_features(path, config, train=True, top_context=context)
+    hidden = wf.target_mask
+    required = [
+        "pf_ancc_delta",
+        "pf_z_delta",
+        "dtw_ens_d",
+        "dtw_stoch_std",
+        "tddtw0",
+        "tdpf0",
+        "tvt_dense_d",
+        "beam_cons_d",
+        "sc_cons_d",
+    ]
+
+    for column in required:
+        assert column in wf.features.columns
+        values = wf.features.loc[hidden, column].to_numpy(dtype=float)
+        assert np.isfinite(values).all()
 
 
 def test_notebook_postprocess_uses_md_from_last_known() -> None:

@@ -18,6 +18,8 @@ class KaggleTopContext:
         top_cfg = config["features"].get("kaggle_top", {})
         self.spatial_k = int(top_cfg.get("spatial_k", 10))
         self.dense_k = int(top_cfg.get("dense_k", 20))
+        self.dense_fetch = int(top_cfg.get("dense_fetch", 5000))
+        self.dense_query_chunk = int(top_cfg.get("dense_query_chunk", 512))
         self.dense_samples_per_well = int(top_cfg.get("dense_samples_per_well", 60))
         self.formation_tree: cKDTree | None = None
         self.dense_tree: cKDTree | None = None
@@ -100,11 +102,15 @@ class KaggleTopContext:
             )
         k_fetch = min(len(self.formation_values), self.spatial_k + 8)
         dist, idx = self.formation_tree.query(xy / self.formation_scale, k=k_fetch)
-        dist = np.atleast_2d(dist)
-        idx = np.atleast_2d(idx)
-        if len(xy) == 1:
-            dist = dist.reshape(1, -1)
-            idx = idx.reshape(1, -1)
+        if k_fetch == 1:
+            dist = np.asarray(dist).reshape(len(xy), 1)
+            idx = np.asarray(idx).reshape(len(xy), 1)
+        else:
+            dist = np.atleast_2d(dist)
+            idx = np.atleast_2d(idx)
+            if len(xy) == 1:
+                dist = dist.reshape(1, -1)
+                idx = idx.reshape(1, -1)
         if self_well is not None:
             dist = np.where(self.formation_wells[idx] == self_well, np.inf, dist)
 
@@ -119,9 +125,20 @@ class KaggleTopContext:
                 nearest_dist[row] = np.nan
                 continue
             chosen = order[valid]
+            chosen_idx = idx[row, chosen]
             weights = 1.0 / (dist[row, chosen] + 1e-3)
-            weights /= weights.sum()
-            pred[row] = weights @ self.formation_values[idx[row, chosen]]
+            xn = self.formation_xy[chosen_idx, 0]
+            yn = self.formation_xy[chosen_idx, 1]
+            values = self.formation_values[chosen_idx]
+            design = np.column_stack([xn, yn, np.ones_like(xn)])
+            normal = design.T @ (design * weights[:, None])
+            rhs = design.T @ (values * weights[:, None])
+            normal += np.eye(3) * 1e-9
+            try:
+                coef = np.linalg.solve(normal, rhs)
+            except np.linalg.LinAlgError:
+                coef = np.linalg.pinv(normal) @ rhs
+            pred[row] = xy[row, 0] * coef[0] + xy[row, 1] * coef[1] + coef[2]
             nearest_dist[row] = float(np.nanmin(dist[row, chosen]))
         return pred, nearest_dist
 
@@ -134,34 +151,43 @@ class KaggleTopContext:
                 np.full(len(xy), np.nan, dtype=float),
                 np.full(len(xy), np.nan, dtype=float),
             )
-        k_fetch = min(len(self.dense_ancc), max(self.dense_k + 80, self.dense_k))
-        dist, idx = self.dense_tree.query(xy / self.dense_scale, k=k_fetch)
-        dist = np.atleast_2d(dist)
-        idx = np.atleast_2d(idx)
-        if len(xy) == 1:
-            dist = dist.reshape(1, -1)
-            idx = idx.reshape(1, -1)
-        if self_well is not None:
-            dist = np.where(self.dense_wells[idx] == self_well, np.inf, dist)
-
+        k_fetch = min(len(self.dense_ancc), max(self.dense_fetch, self.dense_k))
         pred = np.empty(len(xy), dtype=float)
         std = np.empty(len(xy), dtype=float)
         nearest_dist = np.empty(len(xy), dtype=float)
         global_mean = float(np.nanmean(self.dense_ancc))
-        for row in range(len(xy)):
-            order = np.argsort(dist[row])[: self.dense_k]
-            valid = np.isfinite(dist[row, order])
-            if not valid.any():
-                pred[row] = global_mean
-                std[row] = np.nan
-                nearest_dist[row] = np.nan
-                continue
-            chosen = order[valid]
-            values = self.dense_ancc[idx[row, chosen]]
-            weights = 1.0 / (dist[row, chosen] + 1e-3)
-            weights /= weights.sum()
-            mean = float(weights @ values)
-            pred[row] = mean
-            std[row] = float(np.sqrt(weights @ ((values - mean) ** 2)))
-            nearest_dist[row] = float(np.nanmin(dist[row, chosen]))
+        chunk_size = max(1, self.dense_query_chunk)
+        for start in range(0, len(xy), chunk_size):
+            stop = min(start + chunk_size, len(xy))
+            chunk_xy = xy[start:stop]
+            dist, idx = self.dense_tree.query(chunk_xy / self.dense_scale, k=k_fetch)
+            if k_fetch == 1:
+                dist = np.asarray(dist).reshape(len(chunk_xy), 1)
+                idx = np.asarray(idx).reshape(len(chunk_xy), 1)
+            else:
+                dist = np.atleast_2d(dist)
+                idx = np.atleast_2d(idx)
+                if len(chunk_xy) == 1:
+                    dist = dist.reshape(1, -1)
+                    idx = idx.reshape(1, -1)
+            if self_well is not None:
+                dist = np.where(self.dense_wells[idx] == self_well, np.inf, dist)
+
+            for local_row in range(len(chunk_xy)):
+                row = start + local_row
+                order = np.argsort(dist[local_row])[: self.dense_k]
+                valid = np.isfinite(dist[local_row, order])
+                if not valid.any():
+                    pred[row] = global_mean
+                    std[row] = np.nan
+                    nearest_dist[row] = np.nan
+                    continue
+                chosen = order[valid]
+                values = self.dense_ancc[idx[local_row, chosen]]
+                weights = 1.0 / (dist[local_row, chosen] + 1e-3)
+                weights /= weights.sum()
+                mean = float(weights @ values)
+                pred[row] = mean
+                std[row] = float(np.sqrt(weights @ ((values - mean) ** 2)))
+                nearest_dist[row] = float(np.nanmin(dist[local_row, chosen]))
         return pred, std, nearest_dist

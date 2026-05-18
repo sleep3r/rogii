@@ -20,6 +20,32 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-18
 
+### DWT-Repro Data Baseline
+
+- Implemented the public DWT-notebook data approach as the main `stack.yml`
+  baseline without depending on `ravaghi/wellbore-geology-prediction-artifacts`.
+- Feature table now exposes DWT-style columns:
+  - `TVT - last_known_tvt` residual target;
+  - hidden-zone `frac`, geometry deltas, GR rolls/lags/diffs;
+  - `pf_ancc`, `pf_z`, beam deltas, multi-scale NCC, multi-radius DTW,
+    stochastic DTW uncertainty, DWT-lowpass DTW;
+  - formation-plane KNN, dense ANCC calibration, segment biases;
+  - offset GR residuals `tda*`, `tdbc*`, `tdsc*`, `tdpf*`, `tddtw*`.
+- `configs/stack.yml` now mirrors the DWT notebook model set: 3 LightGBM + 3
+  CatBoost CPU-safe variants; XGBoost removed from the main stack for a clean
+  baseline comparison.
+- Postprocess grid narrowed around the public notebook optimum:
+  `alpha=0.95..1.00`, `tau=5..120`, `w_pf=0.00..0.15`, PF column `pf_ancc`.
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 4; old feature caches and old
+  `artifacts/stack` are invalid.
+- Validation:
+  - `uv run pytest -q`: 8 passed;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `make quick-train`: 14,151 rows, 384 features, OOF+PP RMSE 9.68917;
+  - quick artifact inference parity: same ids, no NaN, max_abs_diff 0.0.
+- Full local result: pending; next command is `make train-local`.
+
 ### No-typewell NaN Fix (schema v3)
 
 - **Root cause found**: `build_kaggle_top_signal_features` returned early for
@@ -68,7 +94,8 @@ added to the main path only when they improve validation or leaderboard.
 - Removed duplicate `idx_since` and `md_since` features; postprocess now uses
   `md_from_last_known`.
 - Moved low-resolution DTW dynamic programming into numba.
-- Added inference warnings for missing feature columns and zero-filled them.
+- Added inference warnings for missing feature columns and preserved NaN so tree
+  models use their trained missing-value branches.
 - Expanded full-stack residual-weight grid to `[0.7, 0.8, 0.9, 1.0, 1.1]`.
 - Added pytest coverage for target masks, feature schema, postprocess, DTW,
   XGBoost early stopping, and inference feature filling.

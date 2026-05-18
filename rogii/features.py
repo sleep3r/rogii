@@ -24,7 +24,7 @@ from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
-FEATURE_CACHE_SCHEMA_VERSION = 3
+FEATURE_CACHE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -238,6 +238,23 @@ def build_well_features(
     )
     prev_known_md = np.interp(prev_known_idx, idx, md)
     prev_known_z = np.interp(prev_known_idx, idx, z)
+    hidden_idx = np.flatnonzero(~known)
+    hidden_frac = np.zeros(n, dtype=float)
+    if len(hidden_idx):
+        hidden_frac[hidden_idx] = np.arange(len(hidden_idx), dtype=float) / max(
+            len(hidden_idx) - 1, 1
+        )
+
+    gr_fill_value = float(np.nanmean(gr)) if np.isfinite(gr).any() else 0.0
+    gr_filled = (
+        pd.Series(gr, dtype=float)
+        .interpolate(limit_direction="both")
+        .fillna(gr_fill_value)
+    )
+    md_delta = pd.Series(md, dtype=float).diff().replace(0.0, np.nan)
+    dzdmd = (pd.Series(z, dtype=float).diff() / md_delta).fillna(0.0)
+    dxdmd = (pd.Series(x, dtype=float).diff() / md_delta).fillna(0.0)
+    dydmd = (pd.Series(y, dtype=float).diff() / md_delta).fillna(0.0)
 
     features: dict[str, np.ndarray | float] = {
         "idx": idx,
@@ -265,9 +282,19 @@ def build_well_features(
         "z_from_last_known": z - z[last_known],
         "x_from_last_known": x - x[last_known],
         "y_from_last_known": y - y[last_known],
+        "frac": hidden_frac,
+        "frac2": hidden_frac**2,
+        "sqrt_frac": np.sqrt(hidden_frac),
+        "dx": x - x[last_known],
+        "dy": y - y[last_known],
+        "dz": z - z[last_known],
         "xy_dist_from_last_known": np.sqrt(
             (x - x[last_known]) ** 2 + (y - y[last_known]) ** 2
         ),
+        "dxy": np.sqrt((x - x[last_known]) ** 2 + (y - y[last_known]) ** 2),
+        "dzdmd": dzdmd.to_numpy(dtype=float),
+        "dxdmd": dxdmd.to_numpy(dtype=float),
+        "dydmd": dydmd.to_numpy(dtype=float),
         "prev_known_tvt": prev_known_tvt,
         "idx_from_prev_known": idx - prev_known_idx,
         "md_from_prev_known": md - prev_known_md,
@@ -311,6 +338,28 @@ def build_well_features(
         z_roll_mean = centered_rolling(z, window, "mean")
         features[f"z_roll_mean_{window}"] = z_roll_mean
         features[f"z_minus_roll_mean_{window}"] = z - z_roll_mean
+
+    for window in [5, 21, 51, 101]:
+        rolled = gr_filled.rolling(window, center=True, min_periods=1)
+        features[f"grm{window}"] = rolled.mean().to_numpy(dtype=float)
+        features[f"grs{window}"] = rolled.std().fillna(0.0).to_numpy(dtype=float)
+    for lag in [1, 5, 15, 30]:
+        features[f"glag{lag}"] = gr_filled.shift(lag).bfill().to_numpy(dtype=float)
+        features[f"glead{lag}"] = gr_filled.shift(-lag).ffill().to_numpy(dtype=float)
+    features["gr_d1"] = gr_filled.diff().fillna(0.0).to_numpy(dtype=float)
+    features["gr_d2"] = gr_filled.diff().diff().fillna(0.0).to_numpy(dtype=float)
+    features["gr_env"] = (
+        gr_filled.rolling(21, center=True, min_periods=1).max().to_numpy(dtype=float)
+    )
+    features["gr_nrg"] = np.sqrt(
+        np.maximum(
+            (gr_filled**2)
+            .rolling(21, center=True, min_periods=1)
+            .mean()
+            .to_numpy(dtype=float),
+            0.0,
+        )
+    )
 
     if config["features"].get("include_typewell", True):
         features.update(

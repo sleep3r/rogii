@@ -26,6 +26,11 @@ PF_GR_SIG_MIN = 10.0
 PF_GR_SIG_MAX = 60.0
 PF_GR_SIG_DEF = 30.0
 PF_RESAMP = 0.5
+ANCH_OFFSETS = np.array([-80, -40, -20, -10, -5, 0, 5, 10, 20, 40, 80], dtype=float)
+BEAM_OFFSETS = np.array([-40, -20, -10, -5, -3, 0, 3, 5, 10, 20, 40], dtype=float)
+NCC_OFFSETS = np.array([-30, -15, -8, -4, -2, 0, 2, 4, 8, 15, 30], dtype=float)
+PF_OFFSETS = np.array([-30, -15, -8, -4, -2, 0, 2, 4, 8, 15, 30], dtype=float)
+DTW_OFFSETS = np.array([-20, -10, -5, -2, 0, 2, 5, 10, 20], dtype=float)
 
 
 if NUMBA_AVAILABLE:
@@ -191,6 +196,76 @@ if NUMBA_AVAILABLE:
             else:
                 j -= 1
         return j_for_i
+
+    @njit(cache=True)
+    def _stochastic_dtw_paths_jit(q, r, radius, n_paths, temperature, seed):
+        np.random.seed(seed)
+        n = len(q)
+        m = len(r)
+        inf = 1e18
+        slope = (m - 1) / max(n - 1, 1)
+        radius = max(int(radius), 1)
+        paths = np.zeros((n_paths, n), np.int64)
+        base_cost = np.full((n, m), inf)
+
+        for i in range(n):
+            center = int(round(i * slope))
+            lo = max(0, center - radius)
+            hi = min(m - 1, center + radius)
+            for j in range(lo, hi + 1):
+                base_cost[i, j] = (q[i] - r[j]) ** 2
+
+        for path_idx in range(n_paths):
+            dp = np.full((n, m), inf)
+            parent = np.full((n, m), -1, np.int8)
+            for i in range(n):
+                center = int(round(i * slope))
+                lo = max(0, center - radius)
+                hi = min(m - 1, center + radius)
+                for j in range(lo, hi + 1):
+                    u = np.random.uniform(1e-10, 1.0)
+                    noise = -temperature * np.log(-np.log(u))
+                    cost = base_cost[i, j] + noise
+                    if i == 0 and j == 0:
+                        dp[i, j] = cost
+                        continue
+
+                    best_cost = inf
+                    best_code = np.int8(-1)
+                    if i > 0 and j > 0 and dp[i - 1, j - 1] < best_cost:
+                        best_cost = dp[i - 1, j - 1]
+                        best_code = np.int8(0)
+                    if i > 0 and dp[i - 1, j] < best_cost:
+                        best_cost = dp[i - 1, j]
+                        best_code = np.int8(1)
+                    if j > 0 and dp[i, j - 1] < best_cost:
+                        best_cost = dp[i, j - 1]
+                        best_code = np.int8(2)
+                    dp[i, j] = cost + best_cost
+                    parent[i, j] = best_code
+
+            j_end = np.int64(0)
+            best_end = dp[n - 1, 0]
+            for j in range(1, m):
+                if dp[n - 1, j] < best_end:
+                    best_end = dp[n - 1, j]
+                    j_end = j
+
+            i = n - 1
+            j = j_end
+            while i >= 0 and j >= 0:
+                paths[path_idx, i] = j
+                code = parent[i, j]
+                if i == 0 and j == 0:
+                    break
+                if code == 0:
+                    i -= 1
+                    j -= 1
+                elif code == 1:
+                    i -= 1
+                else:
+                    j -= 1
+        return paths
 
     @njit(cache=True)
     def _pf_ancc_jit(
@@ -784,6 +859,129 @@ def lowres_dtw_signal(
     return np.interp(np.arange(len(full_gr)), q_idx, coarse_tvt).astype(float)
 
 
+def lowres_dtw_alignment(
+    full_gr: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    max_query_points: int,
+    max_ref_points: int,
+    radius: int,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return TVT, local path slope, and a normalized path cost."""
+    if len(full_gr) == 0 or len(tw_gr) == 0:
+        empty = np.full(len(full_gr), np.nan, dtype=float)
+        return empty, empty, np.nan
+
+    q_idx = downsample_indices(len(full_gr), max_query_points)
+    r_idx = downsample_indices(len(tw_gr), max_ref_points)
+    q = full_gr[q_idx]
+    r = tw_gr[r_idx]
+    q = (q - np.nanmean(q)) / (np.nanstd(q) + 1e-6)
+    r = (r - np.nanmean(r)) / (np.nanstd(r) + 1e-6)
+
+    if NUMBA_AVAILABLE:
+        j_for_i = _lowres_dtw_path_jit(
+            q.astype(np.float64),
+            r.astype(np.float64),
+            int(radius),
+        )
+    else:
+        j_for_i = lowres_dtw_path_python(q, r, radius)
+
+    ref_idx = r_idx[j_for_i]
+    coarse_tvt = tw_tvt[ref_idx]
+    coarse_slope = np.gradient(ref_idx.astype(float))
+    cost = float(np.nanmean((q - r[j_for_i]) ** 2))
+    x_full = np.arange(len(full_gr))
+    tvt_signal = np.interp(x_full, q_idx, coarse_tvt).astype(float)
+    slope_signal = np.interp(x_full, q_idx, coarse_slope).astype(float)
+    return tvt_signal, slope_signal, cost
+
+
+def run_dtw_multiscale(
+    full_gr: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    max_query_points: int,
+    max_ref_points: int,
+    radii: list[int],
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[int, float], np.ndarray]:
+    tvt_by_radius: dict[int, np.ndarray] = {}
+    slope_by_radius: dict[int, np.ndarray] = {}
+    costs: dict[int, float] = {}
+    weighted_signals: list[np.ndarray] = []
+    inv_costs: list[float] = []
+
+    for radius in radii:
+        tvt_signal, slope_signal, cost = lowres_dtw_alignment(
+            full_gr,
+            tw_tvt,
+            tw_gr,
+            max_query_points,
+            max_ref_points,
+            int(radius),
+        )
+        tvt_by_radius[int(radius)] = tvt_signal
+        slope_by_radius[int(radius)] = slope_signal
+        costs[int(radius)] = cost
+        inv_cost = 1.0 / (cost + 1e-6) if np.isfinite(cost) else 0.0
+        weighted_signals.append(tvt_signal)
+        inv_costs.append(inv_cost)
+
+    if not weighted_signals:
+        ensemble = np.full(len(full_gr), np.nan, dtype=float)
+    else:
+        weights = np.asarray(inv_costs, dtype=float)
+        if not np.isfinite(weights).any() or float(weights.sum()) <= 0.0:
+            weights = np.ones(len(weighted_signals), dtype=float)
+        weights = weights / float(weights.sum())
+        ensemble = np.vstack(weighted_signals).T @ weights
+    return tvt_by_radius, slope_by_radius, costs, ensemble.astype(float)
+
+
+def run_dtw_stochastic(
+    full_gr: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    max_query_points: int,
+    max_ref_points: int,
+    radius: int,
+    n_paths: int,
+    temperature: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if len(full_gr) == 0 or len(tw_gr) == 0:
+        empty = np.full(len(full_gr), np.nan, dtype=float)
+        return empty, empty, empty
+    if not NUMBA_AVAILABLE:
+        raise ImportError("Stochastic DTW requires numba.")
+
+    q_idx = downsample_indices(len(full_gr), max_query_points)
+    r_idx = downsample_indices(len(tw_gr), max_ref_points)
+    q = full_gr[q_idx]
+    r = tw_gr[r_idx]
+    q = (q - np.nanmean(q)) / (np.nanstd(q) + 1e-6)
+    r = (r - np.nanmean(r)) / (np.nanstd(r) + 1e-6)
+    paths = _stochastic_dtw_paths_jit(
+        q.astype(np.float64),
+        r.astype(np.float64),
+        int(radius),
+        max(int(n_paths), 1),
+        float(temperature),
+        int(seed % (2**31 - 1)),
+    )
+    tvt_realizations = tw_tvt[r_idx[paths]]
+    mean_coarse = np.nanmean(tvt_realizations, axis=0)
+    std_coarse = np.nanstd(tvt_realizations, axis=0)
+    cv_coarse = std_coarse / (np.abs(mean_coarse) + 1e-6)
+    x_full = np.arange(len(full_gr))
+    return (
+        np.interp(x_full, q_idx, mean_coarse).astype(float),
+        np.interp(x_full, q_idx, std_coarse).astype(float),
+        np.interp(x_full, q_idx, cv_coarse).astype(float),
+    )
+
+
 def wavelet_lowpass(
     values: np.ndarray,
     wavelet: str,
@@ -876,6 +1074,82 @@ def particle_filter_signal(
             weights.fill(1.0 / n_particles)
 
     return means, stds
+
+
+def robust_slope(x: np.ndarray, y: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if valid.sum() < 2 or float(np.nanstd(x[valid])) < 1e-6:
+        return 0.0
+    return float(np.polyfit(x[valid], y[valid], 1)[0])
+
+
+def affine_calibration(
+    known_gr: np.ndarray, typewell_gr_at_known: np.ndarray
+) -> tuple[float, float]:
+    valid = np.isfinite(known_gr) & np.isfinite(typewell_gr_at_known)
+    if valid.sum() < 20 or float(np.nanstd(typewell_gr_at_known[valid])) < 1e-6:
+        bias = (
+            float(np.nanmean(known_gr[valid]) - np.nanmean(typewell_gr_at_known[valid]))
+            if valid.any()
+            else 0.0
+        )
+        return 1.0, bias
+    scale, bias = np.polyfit(typewell_gr_at_known[valid], known_gr[valid], 1)
+    return float(scale), float(bias)
+
+
+def segment_biases(
+    known_tvt: np.ndarray,
+    known_z: np.ndarray,
+    reference: np.ndarray,
+) -> tuple[float, float, float, float, float]:
+    bias_values = np.asarray(known_tvt + known_z - reference, dtype=float)
+    valid = np.isfinite(bias_values)
+    if not valid.any():
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    clean = bias_values[valid]
+    n = len(clean)
+    full = float(np.nanmedian(clean))
+    one_third = n // 3
+    two_thirds = 2 * n // 3
+    early = float(np.nanmedian(clean[: max(1, one_third)]))
+    mid = float(np.nanmedian(clean[one_third : max(one_third + 1, two_thirds)]))
+    late = float(np.nanmedian(clean[max(0, n - 50) :]))
+    weights = np.exp(0.02 * np.arange(n, dtype=float))
+    weights /= float(weights.sum())
+    weighted = float(weights @ clean)
+    return full, early, mid, late, weighted
+
+
+def full_feature(n: int, hidden_idx: np.ndarray, values: np.ndarray) -> np.ndarray:
+    full = np.full(n, np.nan, dtype=float)
+    full[hidden_idx] = values
+    return full
+
+
+def full_scalar(n: int, hidden_idx: np.ndarray, value: float) -> np.ndarray:
+    full = np.full(n, np.nan, dtype=float)
+    full[hidden_idx] = float(value)
+    return full
+
+
+def add_offset_residuals(
+    features: dict[str, np.ndarray | float],
+    prefix: str,
+    n: int,
+    hidden_idx: np.ndarray,
+    hidden_gr: np.ndarray,
+    reference_tvt: np.ndarray,
+    tw_tvt: np.ndarray,
+    tw_gr: np.ndarray,
+    offsets: np.ndarray,
+) -> None:
+    for offset in offsets:
+        name = f"{prefix}{int(offset)}"
+        expected_gr = np.interp(reference_tvt + offset, tw_tvt, tw_gr)
+        features[name] = full_feature(n, hidden_idx, hidden_gr - expected_gr)
 
 
 def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
@@ -1023,8 +1297,10 @@ def build_kaggle_top_signal_features(
     dwt_signal = None
     dense_signal = None
     form_ancc_signal = None
+    pf_ancc_signal = None
 
     beam_signals: list[np.ndarray] = []
+    beam_by_tag: dict[str, np.ndarray] = {}
     for beam_cfg in top_cfg.get("beam_configs", []):
         beam_width, move_cost, emit_scale, smooth_radius, tag = parse_beam_config(
             beam_cfg
@@ -1041,6 +1317,7 @@ def build_kaggle_top_signal_features(
             notebook_mode,
         )
         beam_signals.append(signal)
+        beam_by_tag[tag] = signal
         features[f"kg_beam_{tag}_tvt"] = np.zeros(n, dtype=float)
         features[f"kg_beam_{tag}_tvt"][hidden_idx] = signal
         features[f"kg_beam_{tag}_minus_flat"] = np.zeros(n, dtype=float)
@@ -1053,6 +1330,7 @@ def build_kaggle_top_signal_features(
     if beam_signals:
         beam_matrix = np.vstack(beam_signals).T
         beam_mean = np.nanmean(beam_matrix, axis=1)
+        beam_median = np.nanmedian(beam_matrix, axis=1)
         features["kg_beam_mean_tvt"][hidden_idx] = beam_mean
         features["kg_beam_mean_minus_flat"][hidden_idx] = (
             beam_mean - flat_pred[hidden_idx]
@@ -1061,6 +1339,21 @@ def build_kaggle_top_signal_features(
         features["kg_beam_std"][hidden_idx] = np.nanstd(beam_matrix, axis=1)
     else:
         beam_mean = flat_pred[hidden_idx]
+        beam_median = beam_mean
+
+    if "cons" in beam_by_tag and "sm5" in beam_by_tag:
+        beam_ref = (beam_by_tag["cons"] + beam_by_tag["sm5"]) / 2.0
+    else:
+        beam_ref = beam_mean
+    for tag, signal in beam_by_tag.items():
+        features[f"beam_{tag}_d"] = full_feature(n, hidden_idx, signal - last_tvt)
+    features["beam_mean_d"] = full_feature(n, hidden_idx, beam_mean - last_tvt)
+    features["beam_std_d"] = full_feature(
+        n,
+        hidden_idx,
+        np.nanstd(beam_matrix, axis=1) if beam_signals else np.zeros(len(hidden_idx)),
+    )
+    features["beam_med_d"] = full_feature(n, hidden_idx, beam_median - last_tvt)
 
     ncc = multi_scale_ncc(
         known_gr,
@@ -1099,19 +1392,76 @@ def build_kaggle_top_signal_features(
             np.vstack(ncc_scores).T, axis=1
         )
 
+    ncc_windows = [int(item) for item in top_cfg.get("ncc_windows", [8, 15, 25])]
+    ncc_tvt_by_window = {
+        window: ncc.get(f"ncc_{window}_tvt", np.full(len(hidden_idx), last_tvt))
+        for window in ncc_windows
+    }
+    ncc_score_by_window = {
+        window: ncc.get(f"ncc_{window}_score", np.zeros(len(hidden_idx), dtype=float))
+        for window in ncc_windows
+    }
+    if ncc_tvt_by_window:
+        ncc_matrix = np.vstack(list(ncc_tvt_by_window.values())).T
+        ncc_cons = np.nanmean(ncc_matrix, axis=1)
+    else:
+        ncc_cons = np.full(len(hidden_idx), last_tvt, dtype=float)
+    if ncc_scores:
+        score_matrix = np.vstack(list(ncc_score_by_window.values())).T
+        score_weights = np.exp(3.0 * score_matrix)
+        score_weights /= score_weights.sum(axis=1, keepdims=True) + 1e-9
+        ncc_ens = (ncc_matrix * score_weights).sum(axis=1)
+    else:
+        ncc_ens = ncc_cons
+    known_trust = float(np.clip(len(known_idx) / 200.0, 0.0, 0.6))
+    hybrid_ref = (1.0 - known_trust) * beam_ref + known_trust * ncc_ens
+    for window in ncc_windows:
+        features[f"sc{window}_d"] = full_feature(
+            n, hidden_idx, ncc_tvt_by_window[window] - last_tvt
+        )
+        features[f"sc{window}_sc"] = full_feature(
+            n, hidden_idx, ncc_score_by_window[window]
+        )
+    if 8 in ncc_tvt_by_window:
+        features["sc8_d"] = full_feature(n, hidden_idx, ncc_tvt_by_window[8] - last_tvt)
+        features["sc8_sc"] = full_feature(n, hidden_idx, ncc_score_by_window[8])
+    if 15 in ncc_tvt_by_window:
+        features["sc15_d"] = full_feature(
+            n, hidden_idx, ncc_tvt_by_window[15] - last_tvt
+        )
+        features["sc15_sc"] = full_feature(n, hidden_idx, ncc_score_by_window[15])
+    if 25 in ncc_tvt_by_window:
+        features["sc25_d"] = full_feature(
+            n, hidden_idx, ncc_tvt_by_window[25] - last_tvt
+        )
+        features["sc25_sc"] = full_feature(n, hidden_idx, ncc_score_by_window[25])
+    features["sc_cons_d"] = full_feature(n, hidden_idx, ncc_cons - last_tvt)
+    features["sc_ens_d"] = full_feature(n, hidden_idx, ncc_ens - last_tvt)
+    features["sc_trust"] = full_scalar(n, hidden_idx, known_trust)
+    features["hyb_d"] = full_feature(n, hidden_idx, hybrid_ref - last_tvt)
+
     if top_cfg.get("dtw_enabled", True):
-        dtw_hidden_signals = []
-        dtw_radii = top_cfg.get("dtw_radii") or [top_cfg.get("dtw_radius", 35)]
-        for radius in [int(item) for item in dtw_radii]:
-            signal = lowres_dtw_signal(
+        dtw_radii = [
+            int(item)
+            for item in (top_cfg.get("dtw_radii") or [top_cfg.get("dtw_radius", 35)])
+        ]
+        dtw_by_radius, dtw_slope_by_radius, dtw_costs, dtw_ensemble = (
+            run_dtw_multiscale(
                 gr_full,
                 tw_tvt,
                 tw_gr,
                 int(top_cfg.get("dtw_max_query_points", 700)),
                 int(top_cfg.get("dtw_max_ref_points", 700)),
-                radius,
+                dtw_radii,
             )
+        )
+        dtw_hidden_signals = []
+        dtw_hidden_slopes = []
+        for radius in dtw_radii:
+            signal = dtw_by_radius[radius]
+            slope = dtw_slope_by_radius[radius]
             dtw_hidden_signals.append(signal[hidden_idx])
+            dtw_hidden_slopes.append(slope[hidden_idx])
             features[f"kg_dtw_r{radius}_tvt"] = np.zeros(n, dtype=float)
             features[f"kg_dtw_r{radius}_tvt"][hidden_idx] = signal[hidden_idx]
             features[f"kg_dtw_r{radius}_minus_flat"] = np.zeros(n, dtype=float)
@@ -1122,8 +1472,16 @@ def build_kaggle_top_signal_features(
             features[f"kg_dtw_r{radius}_minus_last"][hidden_idx] = (
                 signal[hidden_idx] - last_tvt
             )
+            features[f"dtw_r{radius}_d"] = full_feature(
+                n, hidden_idx, signal[hidden_idx] - last_tvt
+            )
+            features[f"dtw_slope_r{radius}"] = full_feature(
+                n, hidden_idx, slope[hidden_idx]
+            )
         dtw_matrix = np.vstack(dtw_hidden_signals).T
-        dtw_hidden = np.nanmean(dtw_matrix, axis=1)
+        dtw_hidden = dtw_ensemble[hidden_idx]
+        dtw_slope_matrix = np.vstack(dtw_hidden_slopes).T
+        dtw_slope_mean = np.nanmean(dtw_slope_matrix, axis=1)
         dtw_signal = np.full(n, np.nan, dtype=float)
         dtw_signal[hidden_idx] = dtw_hidden
         features["kg_dtw_tvt"][hidden_idx] = dtw_signal[hidden_idx]
@@ -1133,6 +1491,36 @@ def build_kaggle_top_signal_features(
         features["kg_dtw_minus_last"][hidden_idx] = dtw_signal[hidden_idx] - last_tvt
         features["kg_dtw_std"][hidden_idx] = np.nanstd(dtw_matrix, axis=1)
         features["kg_dtw_vs_beam"][hidden_idx] = dtw_signal[hidden_idx] - beam_mean
+        cost_values = np.array([dtw_costs[radius] for radius in dtw_radii], dtype=float)
+        features["dtw_ens_d"] = full_feature(n, hidden_idx, dtw_hidden - last_tvt)
+        features["dtw_slope_mean"] = full_feature(n, hidden_idx, dtw_slope_mean)
+        features["dtw_cost_min"] = full_scalar(
+            n, hidden_idx, float(np.nanmin(cost_values))
+        )
+        features["dtw_cost_range"] = full_scalar(
+            n, hidden_idx, float(np.nanmax(cost_values) - np.nanmin(cost_values))
+        )
+        features["dtw_vs_beam"] = full_feature(n, hidden_idx, dtw_hidden - beam_ref)
+        features["dtw_vs_sc"] = full_feature(n, hidden_idx, dtw_hidden - ncc_ens)
+        if top_cfg.get("dtw_stochastic_enabled", True):
+            stoch_mean, stoch_std, stoch_cv = run_dtw_stochastic(
+                gr_full,
+                tw_tvt,
+                tw_gr,
+                int(top_cfg.get("dtw_max_query_points", 700)),
+                int(top_cfg.get("dtw_max_ref_points", 700)),
+                int(top_cfg.get("dtw_stochastic_radius", 50)),
+                int(top_cfg.get("dtw_stochastic_k", 12)),
+                float(top_cfg.get("dtw_stochastic_temperature", 3.0)),
+                deterministic_seed(f"{well}:dtw_stochastic"),
+            )
+            features["dtw_stoch_mean_d"] = full_feature(
+                n, hidden_idx, stoch_mean[hidden_idx] - last_tvt
+            )
+            features["dtw_stoch_std"] = full_feature(
+                n, hidden_idx, stoch_std[hidden_idx]
+            )
+            features["dtw_stoch_cv"] = full_feature(n, hidden_idx, stoch_cv[hidden_idx])
         signal_stack = [beam_mean, dtw_signal[hidden_idx]]
     else:
         dtw_signal = None
@@ -1194,6 +1582,7 @@ def build_kaggle_top_signal_features(
         )
         features["kg_dwt_minus_last"][hidden_idx] = dwt_signal[hidden_idx] - last_tvt
         features["kg_dwt_std"][hidden_idx] = np.nanstd(dwt_matrix, axis=1)
+        features["dwt_ens_d"] = full_feature(n, hidden_idx, dwt_hidden - last_tvt)
         if dtw_signal is not None:
             features["kg_dwt_vs_dtw"][hidden_idx] = (
                 dwt_signal[hidden_idx] - dtw_signal[hidden_idx]
@@ -1208,14 +1597,16 @@ def build_kaggle_top_signal_features(
         form_known, _ = context.impute_formations(xy_known, self_well)
         if form_hidden.shape[1] == len(FORMATIONS) and np.isfinite(form_hidden).any():
             form_signals = []
+            form_rmse: dict[str, float] = {}
             for formation_idx, formation in enumerate(FORMATIONS):
-                residual_base = known_tvt + z[known_idx] - form_known[:, formation_idx]
-                b = (
-                    float(np.nanmedian(residual_base))
-                    if np.isfinite(residual_base).any()
-                    else 0.0
+                b_full, b_early, b_mid, b_late, b_weighted = segment_biases(
+                    known_tvt, z[known_idx], form_known[:, formation_idx]
                 )
-                signal = -z[hidden_idx] + form_hidden[:, formation_idx] + b
+                signal = -z[hidden_idx] + form_hidden[:, formation_idx] + b_full
+                signal_weighted = (
+                    -z[hidden_idx] + form_hidden[:, formation_idx] + b_weighted
+                )
+                signal_late = -z[hidden_idx] + form_hidden[:, formation_idx] + b_late
                 form_signals.append(signal)
                 tvt_col = f"kg_form_{formation}_tvt"
                 features[tvt_col] = np.zeros(n, dtype=float)
@@ -1223,6 +1614,22 @@ def build_kaggle_top_signal_features(
                 diff_col = f"kg_form_{formation}_minus_flat"
                 features[diff_col] = np.zeros(n, dtype=float)
                 features[diff_col][hidden_idx] = signal - flat_pred[hidden_idx]
+                features[f"tvtF_{formation}"] = full_feature(n, hidden_idx, signal)
+                features[f"tvtFw_{formation}"] = full_feature(
+                    n, hidden_idx, signal_weighted
+                )
+                features[f"tvtF50_{formation}"] = full_feature(
+                    n, hidden_idx, signal_late
+                )
+                features[f"bw_{formation}"] = full_scalar(n, hidden_idx, b_full)
+                features[f"bww_{formation}"] = full_scalar(n, hidden_idx, b_weighted)
+                features[f"bw50_{formation}"] = full_scalar(n, hidden_idx, b_late)
+                features[f"bw_early_{formation}"] = full_scalar(n, hidden_idx, b_early)
+                features[f"bw_mid_{formation}"] = full_scalar(n, hidden_idx, b_mid)
+                known_signal = -z[known_idx] + form_known[:, formation_idx] + b_full
+                form_rmse[formation] = float(
+                    np.sqrt(np.nanmean((known_tvt - known_signal) ** 2))
+                )
             form_matrix = np.vstack(form_signals).T
             form_mean = np.nanmean(form_matrix, axis=1)
             form_ancc_signal = form_matrix[:, 0]
@@ -1243,6 +1650,23 @@ def build_kaggle_top_signal_features(
                 form_matrix, axis=1
             ) - np.nanmin(form_matrix, axis=1)
             features["kg_form_knn_dist"][hidden_idx] = form_dist
+            features["form_mean_d"] = full_feature(n, hidden_idx, form_mean - last_tvt)
+            features["form_std_d"] = full_feature(
+                n, hidden_idx, np.nanstd(form_matrix, axis=1)
+            )
+            features["form_rng_d"] = full_feature(
+                n,
+                hidden_idx,
+                np.nanmax(form_matrix, axis=1) - np.nanmin(form_matrix, axis=1),
+            )
+            features["spatial_ancc_d"] = full_feature(
+                n,
+                hidden_idx,
+                form_hidden[:, 0] - np.interp(last_tvt, tw_tvt, tw_gr),
+            )
+            features["spatial_knn_dist"] = full_feature(n, hidden_idx, form_dist)
+            for formation, score in form_rmse.items():
+                features[f"frm_rmse_{formation}"] = full_scalar(n, hidden_idx, score)
             signal_stack.append(form_mean)
         else:
             form_mean = flat_pred[hidden_idx]
@@ -1251,13 +1675,26 @@ def build_kaggle_top_signal_features(
             xy_hidden, self_well
         )
         dense_known, _, _ = context.impute_dense_ancc(xy_known, self_well)
-        dense_residual = known_tvt + z[known_idx] - dense_known
-        dense_b = (
-            float(np.nanmedian(dense_residual))
-            if np.isfinite(dense_residual).any()
-            else 0.0
+        dense_b, _, _, dense_b_late, dense_b_weighted = segment_biases(
+            known_tvt, z[known_idx], dense_known
         )
         dense_signal = -z[hidden_idx] + dense_ancc + dense_b
+        dense_signal_weighted = -z[hidden_idx] + dense_ancc + dense_b_weighted
+        dense_signal_late = -z[hidden_idx] + dense_ancc + dense_b_late
+        dense_known_residual = known_tvt + z[known_idx] - dense_known
+        dense_rmse = (
+            float(np.sqrt(np.nanmean(dense_known_residual**2)))
+            if np.isfinite(dense_known_residual).any()
+            else np.nan
+        )
+        dense_bias = (
+            float(np.nanmean(dense_known_residual))
+            if np.isfinite(dense_known_residual).any()
+            else np.nan
+        )
+        dense_nb_std = (
+            float(np.nanmean(dense_std)) if np.isfinite(dense_std).any() else np.nan
+        )
         features["kg_dense_ancc_tvt"][hidden_idx] = dense_signal
         features["kg_dense_ancc_minus_flat"][hidden_idx] = (
             dense_signal - flat_pred[hidden_idx]
@@ -1266,6 +1703,26 @@ def build_kaggle_top_signal_features(
         features["kg_dense_ancc_std"][hidden_idx] = dense_std
         features["kg_dense_ancc_dist"][hidden_idx] = dense_dist
         features["kg_dense_vs_form"][hidden_idx] = dense_signal - form_mean
+        features["dense_ancc"] = full_feature(n, hidden_idx, dense_ancc)
+        features["dense_std"] = full_feature(n, hidden_idx, dense_std)
+        features["dense_dist"] = full_feature(n, hidden_idx, dense_dist)
+        features["tvt_dense_d"] = full_feature(n, hidden_idx, dense_signal - last_tvt)
+        features["tvt_densew_d"] = full_feature(
+            n, hidden_idx, dense_signal_weighted - last_tvt
+        )
+        features["tvt_dense50_d"] = full_feature(
+            n, hidden_idx, dense_signal_late - last_tvt
+        )
+        features["dense_rmse"] = full_scalar(n, hidden_idx, dense_rmse)
+        features["dense_bias"] = full_scalar(n, hidden_idx, dense_bias)
+        features["dense_nb_std"] = full_scalar(n, hidden_idx, dense_nb_std)
+        if form_ancc_signal is not None:
+            features["spatial_vs_dense"] = full_feature(
+                n, hidden_idx, form_ancc_signal - dense_signal
+            )
+            features["beam_vs_spatial"] = full_feature(
+                n, hidden_idx, beam_ref - form_ancc_signal
+            )
         signal_stack.append(dense_signal)
 
     if top_cfg.get("particle_enabled", False):
@@ -1333,10 +1790,130 @@ def build_kaggle_top_signal_features(
         features["kg_pf_ancc_minus_flat"][hidden_idx] = pf_ancc - flat_pred[hidden_idx]
         features["kg_pf_ancc_minus_last"][hidden_idx] = pf_ancc - last_tvt
         features["kg_pf_ancc_std"][hidden_idx] = pf_ancc_std
+        pf_ancc_signal = pf_ancc
+        features["pf_ancc"] = full_feature(n, hidden_idx, pf_ancc)
+        features["pf_ancc_std"] = full_feature(n, hidden_idx, pf_ancc_std)
+        features["pf_ancc_delta"] = full_feature(n, hidden_idx, pf_ancc - last_tvt)
+        features["pf_z"] = full_feature(n, hidden_idx, pf_z)
+        features["pf_z_delta"] = full_feature(n, hidden_idx, pf_z - last_tvt)
+        features["pf_vs_z"] = full_feature(n, hidden_idx, pf_ancc - pf_z)
         if dense_signal is not None:
             features["kg_pf_ancc_vs_dense"][hidden_idx] = pf_ancc - dense_signal
+            features["pf_vs_dense"] = full_feature(
+                n, hidden_idx, pf_ancc - dense_signal
+            )
+        if form_ancc_signal is not None:
+            features["pf_vs_spatial"] = full_feature(
+                n, hidden_idx, pf_ancc - form_ancc_signal
+            )
+        if dtw_signal is not None:
+            features["dtw_vs_pf"] = full_feature(
+                n, hidden_idx, dtw_signal[hidden_idx] - pf_ancc
+            )
+
+    if pf_ancc_signal is not None:
+        signal_stack.append(pf_ancc_signal)
+    signal_stack.extend([ncc_ens, hybrid_ref])
+
+    typewell_gr_at_known = np.interp(known_tvt, tw_tvt, tw_gr)
+    cal_a, cal_b = affine_calibration(known_gr, typewell_gr_at_known)
+    pfx_rmse = float(np.sqrt(np.nanmean((known_gr - typewell_gr_at_known) ** 2)))
+    slope_all = robust_slope(md[known_idx], known_tvt)
+    slope_50 = robust_slope(md[known_idx][-50:], known_tvt[-50:])
+    slope_z = robust_slope(z[known_idx], known_tvt)
+    md_hidden_from_last = md[hidden_idx] - md[last_known_idx]
+    slope_baseline_all = last_tvt + slope_all * md_hidden_from_last
+    slope_baseline_50 = last_tvt + slope_50 * md_hidden_from_last
+
+    features["cal_a"] = full_scalar(n, hidden_idx, cal_a)
+    features["cal_b"] = full_scalar(n, hidden_idx, cal_b)
+    features["pfx_rmse"] = full_scalar(n, hidden_idx, pfx_rmse)
+    features["known_len"] = full_scalar(n, hidden_idx, float(len(known_idx)))
+    features["eval_len"] = full_scalar(n, hidden_idx, float(len(hidden_idx)))
+    features["slp_all"] = full_scalar(n, hidden_idx, slope_all)
+    features["slp_50"] = full_scalar(n, hidden_idx, slope_50)
+    features["slp_z"] = full_scalar(n, hidden_idx, slope_z)
+    features["slp_b_d_all"] = full_feature(n, hidden_idx, slope_baseline_all - last_tvt)
+    features["slp_b_d_50"] = full_feature(n, hidden_idx, slope_baseline_50 - last_tvt)
+    features["ktvt_range"] = full_scalar(
+        n, hidden_idx, float(np.nanmax(known_tvt) - np.nanmin(known_tvt))
+    )
+    features["ktvt_std"] = full_scalar(n, hidden_idx, float(np.nanstd(known_tvt)))
+    features["tw_range"] = full_scalar(
+        n, hidden_idx, float(np.nanmax(tw_tvt) - np.nanmin(tw_tvt))
+    )
+    features["tw_gr_mean"] = full_scalar(n, hidden_idx, float(np.nanmean(tw_gr)))
+    features["gr_vs_tw_anc"] = full_feature(
+        n, hidden_idx, hidden_gr - np.interp(last_tvt, tw_tvt, tw_gr)
+    )
+    features["gr_vs_slp_all"] = full_feature(
+        n,
+        hidden_idx,
+        hidden_gr - np.interp(slope_baseline_all, tw_tvt, tw_gr),
+    )
+    add_offset_residuals(
+        features,
+        "tda",
+        n,
+        hidden_idx,
+        hidden_gr,
+        np.full(len(hidden_idx), last_tvt, dtype=float),
+        tw_tvt,
+        tw_gr,
+        ANCH_OFFSETS,
+    )
+    add_offset_residuals(
+        features,
+        "tdbc",
+        n,
+        hidden_idx,
+        hidden_gr,
+        beam_ref,
+        tw_tvt,
+        tw_gr,
+        BEAM_OFFSETS,
+    )
+    add_offset_residuals(
+        features,
+        "tdsc",
+        n,
+        hidden_idx,
+        hidden_gr,
+        ncc_ens,
+        tw_tvt,
+        tw_gr,
+        NCC_OFFSETS,
+    )
+    if pf_ancc_signal is not None:
+        add_offset_residuals(
+            features,
+            "tdpf",
+            n,
+            hidden_idx,
+            hidden_gr,
+            pf_ancc_signal,
+            tw_tvt,
+            tw_gr,
+            PF_OFFSETS,
+        )
+    if dtw_signal is not None:
+        add_offset_residuals(
+            features,
+            "tddtw",
+            n,
+            hidden_idx,
+            hidden_gr,
+            dtw_signal[hidden_idx],
+            tw_tvt,
+            tw_gr,
+            DTW_OFFSETS,
+        )
 
     signal_matrix = np.vstack(signal_stack).T
+    features["sig_std"] = full_feature(n, hidden_idx, np.nanstd(signal_matrix, axis=1))
+    features["sig_mean_d"] = full_feature(
+        n, hidden_idx, np.nanmean(signal_matrix, axis=1) - last_tvt
+    )
     features["kg_signal_mean_tvt"][hidden_idx] = np.nanmean(signal_matrix, axis=1)
     features["kg_signal_mean_minus_flat"][hidden_idx] = (
         np.nanmean(signal_matrix, axis=1) - flat_pred[hidden_idx]

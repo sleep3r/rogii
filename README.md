@@ -59,16 +59,24 @@ Equivalent command:
 uv run python -m rogii --config configs/stack.yml
 ```
 
-The main pipeline is:
+The main `stack.yml` pipeline is the local, reproducible version of the public
+DWT-style baseline:
 
 1. Build per-row features from trajectory, GR, `TVT_input`, typewell logs, and
    notebook-style alignment signals.
 2. Train residuals from `last_known_tvt`.
 3. Fit grouped OOF fold models by well.
-4. Build an OOF matrix from LightGBM, XGBoost, and CatBoost base models.
+4. Build an OOF matrix from three LightGBM and three CatBoost base models.
 5. Fit non-negative hill-climb blend weights.
-6. Tune PF_ANCC delta postprocess and optional Savitzky-Golay smoothing on OOF.
+6. Tune PF_ANCC delta postprocess around the DWT-notebook optimum and optional
+   Savitzky-Golay smoothing on OOF.
 7. Save `submission.csv` plus artifacts under `artifacts/stack`.
+
+The feature table includes PF_ANCC/PF_Z, beam paths, multi-scale NCC,
+multi-radius DTW, stochastic DTW uncertainty, DWT-lowpass DTW, spatial formation
+planes, dense ANCC calibration, and offset GR residuals (`tda*`, `tdbc*`,
+`tdsc*`, `tdpf*`, `tddtw*`). After feature changes, old `artifacts/stack`
+models are invalid; run `make train-local` again before `make submit`.
 
 Spatial distance features `kg_form_knn_dist` and `kg_dense_ancc_dist` are
 stored in normalized KD-tree units, not feet. They are meant as relative
