@@ -6,8 +6,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from rogii.best_public_solution import Source, claimed_score, select_best_source
+from rogii.config import DEFAULT_CONFIG
 from rogii.constants import FORMATIONS
 from rogii.diagnostics import append_run_registry
 from rogii.features import (
@@ -23,6 +25,7 @@ from rogii.modeling import (
     ResidualModel,
     apply_postprocess,
     make_xgboost,
+    notebook_blend_candidates,
     tune_postprocess,
 )
 from rogii.pipeline import assert_fold_context_safe
@@ -149,7 +152,12 @@ def dwt_config() -> dict:
         "dtw_stochastic_radius": 2,
         "dtw_stochastic_k": 2,
         "dtw_stochastic_temperature": 1.0,
-        "dwt_enabled": False,
+        "dwt_enabled": True,
+        "dwt_wavelet": "db2",
+        "dwt_level": 1,
+        "dwt_radii": [2, 4],
+        "dwt_max_query_points": 32,
+        "dwt_max_ref_points": 32,
         "particle_enabled": True,
         "particle_count": 32,
         "ancc_particle_count": 32,
@@ -361,8 +369,16 @@ def test_feature_schema_keeps_only_canonical_last_known_offsets(tmp_path) -> Non
     wf = build_well_features(path, minimal_config(), train=True)
     assert "idx_from_last_known" in wf.features.columns
     assert "md_from_last_known" in wf.features.columns
+    assert "x_from_last_known" in wf.features.columns
+    assert "y_from_last_known" in wf.features.columns
+    assert "z_from_last_known" in wf.features.columns
+    assert "xy_dist_from_last_known" in wf.features.columns
     assert "idx_since" not in wf.features.columns
     assert "md_since" not in wf.features.columns
+    assert "dx" not in wf.features.columns
+    assert "dy" not in wf.features.columns
+    assert "dz" not in wf.features.columns
+    assert "dxy" not in wf.features.columns
 
 
 def test_training_target_is_last_known_residual(tmp_path) -> None:
@@ -391,6 +407,8 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         "pf_z_delta",
         "dtw_ens_d",
         "dtw_stoch_std",
+        "dwt_ens_d",
+        "kg_dwt_r2_tvt",
         "tddtw0",
         "tdpf0",
         "tvt_dense_d",
@@ -511,6 +529,47 @@ def test_ensemble_predict_uses_final_models() -> None:
 
     pred = model.predict(pd.DataFrame({"x": [0.0, 1.0]}))
     assert np.allclose(pred, [2.5, 2.5])
+
+
+def test_ensemble_predict_uses_fold_average_without_final_models() -> None:
+    class ConstantModel(ResidualModel):
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def fit(self, X: pd.DataFrame, y: np.ndarray, **_) -> "ConstantModel":
+            return self
+
+        def predict(self, X: pd.DataFrame) -> np.ndarray:
+            return np.full(len(X), self.value, dtype=float)
+
+    config = {
+        "model": {"base_models": [{"id": "a"}, {"id": "b"}], "blend": {}},
+        "validation": {"n_splits": 2, "final_model_strategy": "fold_average"},
+    }
+    model = EnsembleRegressor(config, seed=42)
+    model.base_names = ["a", "b"]
+    model.weights = np.array([0.25, 0.75])
+    model.fold_models = [
+        [ConstantModel(80.0), ConstantModel(120.0)],
+        [ConstantModel(180.0), ConstantModel(220.0)],
+    ]
+
+    pred = model.predict(pd.DataFrame({"x": [0.0, 1.0]}))
+    assert np.allclose(pred, [175.0, 175.0])
+
+
+def test_notebook_blend_candidates_support_ranges() -> None:
+    config = minimal_config()
+    config["postprocess"]["notebook_blend"] = {
+        "enabled": True,
+        "alpha_range": [0.5, 0.7, 0.1],
+        "tau_range": [0, 10, 5],
+        "w_pf_range": [0, 0.2, 0.1],
+    }
+    candidates = notebook_blend_candidates(config)
+    assert len(candidates) == 27
+    assert candidates[0] == {"alpha": 0.5, "tau": 0.0, "w_pf": 0.0}
+    assert candidates[-1] == {"alpha": 0.7, "tau": 10.0, "w_pf": 0.2}
 
 
 def test_run_registry_appends_required_columns(tmp_path) -> None:
@@ -682,6 +741,13 @@ def test_make_xgboost_keeps_early_stopping_rounds_in_estimator_params() -> None:
     assert model.estimator.get_params()["early_stopping_rounds"] == 17
 
 
+def test_configs_use_canonical_pf_postprocess_column() -> None:
+    assert DEFAULT_CONFIG["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
+    for path in [Path("configs/quick.yml"), Path("configs/stack.yml")]:
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert config["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
+
+
 def test_predict_test_keeps_missing_features_as_nan(tmp_path) -> None:
     class DummyModel:
         def __init__(self) -> None:
@@ -735,3 +801,35 @@ def test_predict_test_keeps_missing_features_as_nan(tmp_path) -> None:
     assert np.all(np.isnan(model.seen_missing))
     assert logger.warnings
     assert logger.warnings[0][0] == "Missing inference features kept as NaN"
+
+
+def test_predict_test_rejects_out_of_range_sample_row_id(tmp_path) -> None:
+    class DummyModel:
+        def predict(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.zeros(len(frame), dtype=float)
+
+    path = tmp_path / "abcdef12__horizontal_well.csv"
+    pd.DataFrame(
+        {
+            "MD": [0, 1, 2],
+            "X": [0, 1, 2],
+            "Y": [0, 0, 0],
+            "Z": [100, 101, 102],
+            "GR": [80, 82, 85],
+            "TVT_input": [10.0, np.nan, np.nan],
+        }
+    ).to_csv(path, index=False)
+    sample = tmp_path / "sample_submission.csv"
+    pd.DataFrame({"id": ["abcdef12_99"], "tvt": [0.0]}).to_csv(
+        sample,
+        index=False,
+    )
+
+    with pytest.raises(IndexError, match="out of range"):
+        predict_test(
+            model=DummyModel(),
+            test_paths=[path],
+            sample_submission_path=sample,
+            config=minimal_config(),
+            feature_names=["idx"],
+        )

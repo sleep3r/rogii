@@ -66,18 +66,33 @@ def predict_test(
         sample = pd.read_csv(sample_submission_path)
         rows: list[tuple[str, float]] = []
         missing: set[str] = set()
+        invalid_ids: list[str] = []
+        out_of_range: list[str] = []
         for row_id in sample["id"].astype(str):
-            well, row_index_text = row_id.rsplit("_", 1)
-            row_index = int(row_index_text)
+            try:
+                well, row_index_text = row_id.rsplit("_", 1)
+                row_index = int(row_index_text)
+            except ValueError:
+                invalid_ids.append(row_id)
+                continue
             pred = predictions_by_well.get(well)
             if pred is None:
                 missing.add(well)
                 continue
+            if row_index < 0 or row_index >= len(pred):
+                out_of_range.append(row_id)
+                continue
             rows.append((row_id, float(pred[row_index])))
+        if invalid_ids:
+            preview = ", ".join(invalid_ids[:5])
+            raise ValueError(f"Malformed sample submission ids: {preview}")
         if missing:
             raise FileNotFoundError(
                 f"Missing test predictions for wells: {', '.join(sorted(missing))}"
             )
+        if out_of_range:
+            preview = ", ".join(out_of_range[:5])
+            raise IndexError(f"Sample submission row ids out of range: {preview}")
         return pd.DataFrame(rows, columns=["id", "tvt"])
 
     rows = []

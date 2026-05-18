@@ -58,8 +58,8 @@ model:
     - id: cat_lr025
       name: catboost
       params:
-        iterations: 2500
-        early_stopping_rounds: 250
+        iterations: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.025
         depth: 7
         l2_leaf_reg: 2.0
@@ -71,8 +71,8 @@ model:
     - id: cat_lr020
       name: catboost
       params:
-        iterations: 2500
-        early_stopping_rounds: 250
+        iterations: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.020
         depth: 7
         l2_leaf_reg: 2.0
@@ -84,8 +84,8 @@ model:
     - id: cat_lr030
       name: catboost
       params:
-        iterations: 2500
-        early_stopping_rounds: 250
+        iterations: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.030
         depth: 7
         l2_leaf_reg: 2.0
@@ -97,8 +97,8 @@ model:
     - id: lgb_lr025
       name: lightgbm
       params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
+        n_estimators: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.025
         num_leaves: 255
         min_child_samples: 15
@@ -110,8 +110,8 @@ model:
     - id: lgb_lr020
       name: lightgbm
       params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
+        n_estimators: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.020
         num_leaves: 255
         min_child_samples: 15
@@ -123,8 +123,8 @@ model:
     - id: lgb_lr030
       name: lightgbm
       params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
+        n_estimators: 8000
+        early_stopping_rounds: 300
         learning_rate: 0.030
         num_leaves: 255
         min_child_samples: 15
@@ -141,19 +141,19 @@ model:
 validation:
   n_splits: 5
   fold_safe_context: true
-  final_model_strategy: full_context
+  final_model_strategy: fold_average
 
 postprocess:
-  progress_interval: 200
+  progress_interval: 50000
   residual_weight: 1.0
-  residual_weight_grid: [1.0]
+  residual_weight_grid: [0.9, 1.0, 1.05]
   residual_clip: 250.0
   notebook_blend:
     enabled: true
     pf_column: pf_ancc
-    alpha_grid: [0.95, 0.96, 0.97, 0.98, 0.99, 1.00]
-    tau_grid: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120]
-    w_pf_grid: [0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15]
+    alpha_range: [0.50, 1.10, 0.01]
+    tau_range: [0, 500, 5]
+    w_pf_range: [0, 0.50, 0.01]
   smoothing:
     enabled: true
     candidates:

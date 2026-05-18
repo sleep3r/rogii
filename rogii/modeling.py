@@ -308,6 +308,19 @@ class EnsembleRegressor(ResidualModel):
         }
         return self
 
+    def use_fold_average_models(self) -> None:
+        if self.weights is None or not self.base_names:
+            raise RuntimeError(
+                "OOF blend weights must be fitted before fold averaging."
+            )
+        if not self.fold_models:
+            raise RuntimeError("Fold-average inference requires stored fold models.")
+        self.final_models = []
+        self.metrics_["final_models"] = {
+            "count": int(sum(len(models) for models in self.fold_models)),
+            "strategy": "fold_average",
+        }
+
     def predict_base_stack(self, X: pd.DataFrame) -> np.ndarray:
         final_models = getattr(self, "final_models", [])
         if final_models:
@@ -576,13 +589,34 @@ def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] |
             )
         return parsed
 
-    alpha_grid = blend_cfg.get("alpha_grid") or [blend_cfg.get("alpha", 1.0)]
-    tau_grid = blend_cfg.get("tau_grid") or [blend_cfg.get("tau", 0.0)]
-    w_pf_grid = blend_cfg.get("w_pf_grid") or [blend_cfg.get("w_pf", 0.0)]
+    alpha_grid = grid_values(blend_cfg, "alpha", blend_cfg.get("alpha", 1.0))
+    tau_grid = grid_values(blend_cfg, "tau", blend_cfg.get("tau", 0.0))
+    w_pf_grid = grid_values(blend_cfg, "w_pf", blend_cfg.get("w_pf", 0.0))
     return [
         {"alpha": float(alpha), "tau": float(tau), "w_pf": float(w_pf)}
         for alpha, tau, w_pf in product(alpha_grid, tau_grid, w_pf_grid)
     ]
+
+
+def grid_values(config: dict[str, Any], name: str, default: float) -> list[float]:
+    explicit = config.get(f"{name}_grid")
+    if explicit:
+        return [float(value) for value in explicit]
+    range_value = config.get(f"{name}_range")
+    if range_value:
+        if len(range_value) != 3:
+            raise ValueError(f"{name}_range must be [start, stop, step].")
+        start, stop, step = [float(value) for value in range_value]
+        if step <= 0:
+            raise ValueError(f"{name}_range step must be positive.")
+        values = []
+        current = start
+        epsilon = step * 1e-6
+        while current <= stop + epsilon:
+            values.append(round(current, 10))
+            current += step
+        return values
+    return [float(default)]
 
 
 def smoothing_candidates(config: dict[str, Any]) -> list[dict[str, float] | None]:

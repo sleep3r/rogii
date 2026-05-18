@@ -24,7 +24,7 @@ from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
-FEATURE_CACHE_SCHEMA_VERSION = 6
+FEATURE_CACHE_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -288,13 +288,9 @@ def build_well_features(
         "frac": hidden_frac,
         "frac2": hidden_frac**2,
         "sqrt_frac": np.sqrt(hidden_frac),
-        "dx": x - x[last_known],
-        "dy": y - y[last_known],
-        "dz": z - z[last_known],
         "xy_dist_from_last_known": np.sqrt(
             (x - x[last_known]) ** 2 + (y - y[last_known]) ** 2
         ),
-        "dxy": np.sqrt((x - x[last_known]) ** 2 + (y - y[last_known]) ** 2),
         "dzdmd": dzdmd.to_numpy(dtype=float),
         "dxdmd": dxdmd.to_numpy(dtype=float),
         "dydmd": dydmd.to_numpy(dtype=float),

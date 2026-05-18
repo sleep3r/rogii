@@ -18,6 +18,68 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Next:
 ```
 
+## 2026-05-19
+
+### Pre-Full-Run Hardening Pass
+
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 7; old schema-v6 caches/artifacts are
+  invalid for the next clean full run.
+- Removed duplicate last-known offset aliases from the feature table:
+  - dropped `dx`, `dy`, `dz`, and `dxy`;
+  - kept canonical `x_from_last_known`, `y_from_last_known`,
+    `z_from_last_known`, and `xy_dist_from_last_known`.
+- Unified notebook postprocess PF column to `pf_ancc` in defaults, `quick.yml`,
+  and `stack.yml`.
+- Expanded `configs/stack.yml` postprocess residual grid to
+  `[0.9, 1.0, 1.05]`; this is now cheap after the exact basis scorer.
+- Hardened sample-submission inference:
+  - malformed sample ids now raise `ValueError`;
+  - row ids outside a well prediction array now raise `IndexError` instead of
+    silently indexing the wrong row.
+- Strengthened tests:
+  - DWT repro smoke now runs with `dwt_enabled: true`;
+  - canonical PF column is checked across default/quick/stack configs;
+  - out-of-range sample ids are covered.
+- Validation:
+  - `uv run pytest -q`: 19 passed;
+  - `uv run python -m ruff check .`: passed;
+  - `make quick-train`: 14,151 rows, 380 features, fold-safe OOF+PP RMSE
+    10.06087, final summary RMSE 10.06095.
+- Next: rebuild the model bundle, then start a clean full `make train-local`
+  after clearing stale caches/artifacts.
+
+### Capacity + Fold-Average Inference Pass
+
+- Increased main `configs/stack.yml` model capacity toward the public DWT
+  notebook setup:
+  - CatBoost variants now use `iterations: 8000`;
+  - LightGBM variants now use `n_estimators: 8000`;
+  - early stopping patience is now `300`.
+- Switched the main inference strategy to fold averaging:
+  - `validation.final_model_strategy: fold_average`;
+  - fold-safe OOF models are retained in the artifact;
+  - inference averages each base model across its fold models before applying
+    hill-climb blend weights.
+- Kept final full-train `KaggleTopContext` for test feature generation, but
+  skipped the final full-context model fit under fold-average strategy.
+- Widened `stack.yml` postprocess search using compact ranges:
+  - `alpha_range: [0.50, 1.10, 0.01]`;
+  - `tau_range: [0, 500, 5]`;
+  - `w_pf_range: [0, 0.50, 0.01]`;
+  - with 3 residual weights and 2 smoothing candidates this is 1,885,266
+    candidates, now feasible because scoring uses the exact basis cache.
+- Added `*_range` support for notebook-blend grids so large searches do not
+  require enormous YAML lists.
+- Validation:
+  - `uv run pytest -q`: 21 passed;
+  - `uv run python -m ruff check .`: passed;
+  - `make quick-train`: fold-average smoke passed, 9 fold models retained,
+    OOF+PP RMSE 10.06087.
+- Expected impact:
+  - full training will be slower per fold because model ceilings are higher;
+  - final full-context fit is skipped, partly offsetting runtime;
+  - artifact size will grow because it stores 30 fold models for the full stack.
+
 ## 2026-05-18
 
 ### EXP-20260518-1 - Global-Context DWT Stack Anchor
@@ -48,7 +110,7 @@ run here with command, data, CV, LB, runtime, and the next decision.
   the old HGB anchor 12.803 to 9.946, but the local OOF is still not an honest
   CV target. Use this run as the current public-LB anchor, not as validation
   truth.
-- Next: rerun clean schema v6 fold-safe full training after clearing
+- Next: rerun clean schema v7 fold-safe full training after clearing
   `artifacts/feature_cache` and `artifacts/stack`.
 
 ### Fold-Safe Validation + Run Registry

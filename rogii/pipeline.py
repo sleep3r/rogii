@@ -165,6 +165,11 @@ def train_fold_safe_oof(
     flat_parts: list[np.ndarray] = []
     true_parts: list[np.ndarray] = []
     stack_parts: list[np.ndarray] = []
+    final_strategy = str(
+        config["validation"].get("final_model_strategy", "full_context")
+    ).lower()
+    store_fold_models = final_strategy in {"fold_average", "fold_averaging"}
+    fold_models_by_base: list[list[Any]] = [[] for _ in base_specs]
 
     logger.info("Prepared fold-safe CV", folds=len(folds), models=len(base_specs))
     for fold_id, fold_train_paths, fold_valid_paths in folds:
@@ -222,9 +227,11 @@ def train_fold_safe_oof(
             iteration_count = fitted_iteration_count(base_model, model_name)
             if iteration_count is not None:
                 iteration_counts[name].append(iteration_count)
+            if store_fold_models:
+                fold_models_by_base[model_idx].append(base_model)
             logger.metric("OOF fold RMSE", model=name, fold=fold_id, rmse=score)
 
-        valid_features.append(X_valid)
+        valid_features.append(X_valid_model)
         residual_parts.append(y_valid.astype("float32"))
         group_parts.append(groups_valid)
         flat_parts.append(flat_valid.astype("float32"))
@@ -255,6 +262,8 @@ def train_fold_safe_oof(
         iteration_counts,
         logger,
     )
+    if store_fold_models:
+        model.fold_models = fold_models_by_base
     return X_oof, residual_oof, groups_oof, flat_oof, true_oof
 
 
@@ -353,37 +362,53 @@ def main() -> None:
         )
     apply_cv_selection(metrics["cv"])
 
+    final_strategy = str(
+        config["validation"].get("final_model_strategy", "full_context")
+    ).lower()
     final_context = build_top_context(
         train_paths,
         config,
         logger,
         "Build final full-train Kaggle top context",
     )
-    with logger.step("Build final training table", train_wells=len(train_paths)):
-        X_full, residual_full, _groups_full, _flat_full, _y_true_full = (
-            build_training_table(train_paths, config, final_context, logger)
-        )
-    with logger.step("Train final full-context models", rows=len(X_full)):
-        model.fit_final(X_full, residual_full, logger)
-    metrics["model"] = model.metrics_
-
-    feature_names = list(X_full.columns)
-    metrics["features"] = {
-        "count": int(len(feature_names)),
-        "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
-        "context_mode": "fold_safe" if fold_safe else "global",
-        "final_model_strategy": config["validation"].get(
-            "final_model_strategy", "full_context"
-        ),
-        "final_context_key": getattr(final_context, "context_key", None),
-    }
     metrics["train"] = {
         "rows": int(len(X_oof)),
         "wells": int(len(set(groups_oof))),
         "baseline": baseline_name,
         "baseline_rmse": rmse(flat_oof, y_true_oof),
         "flat_rmse": rmse(flat_oof, y_true_oof),
-        "final_rows": int(len(X_full)),
+    }
+    if final_strategy in {"fold_average", "fold_averaging"}:
+        feature_names = list(X_oof.columns)
+        model.use_fold_average_models()
+        logger.info(
+            "Using fold-average inference models",
+            base_models=len(model.base_names),
+            fold_models=sum(len(models) for models in model.fold_models),
+        )
+    else:
+        with logger.step("Build final training table", train_wells=len(train_paths)):
+            X_full, residual_full, _groups_full, _flat_full, _y_true_full = (
+                build_training_table(train_paths, config, final_context, logger)
+            )
+        with logger.step("Train final full-context models", rows=len(X_full)):
+            model.fit_final(X_full, residual_full, logger)
+        feature_names = list(X_full.columns)
+        metrics["train"]["final_rows"] = int(len(X_full))
+    metrics["model"] = model.metrics_
+
+    if final_strategy in {"fold_average", "fold_averaging"}:
+        metrics["train"]["final_rows"] = None
+        metrics["train"]["skipped_full_context_final_fit"] = True
+    else:
+        metrics["train"]["skipped_full_context_final_fit"] = False
+
+    metrics["features"] = {
+        "count": int(len(feature_names)),
+        "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
+        "context_mode": "fold_safe" if fold_safe else "global",
+        "final_model_strategy": final_strategy,
+        "final_context_key": getattr(final_context, "context_key", None),
     }
     if config.get("reporting", {}).get("compute_train_metrics", True):
         with logger.step("Evaluate OOF train prediction", rows=len(X_oof)):

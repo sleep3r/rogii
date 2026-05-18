@@ -82,7 +82,7 @@ model:
 validation:
   n_splits: 3
   fold_safe_context: true
-  final_model_strategy: full_context
+  final_model_strategy: fold_average
 
 postprocess:
   progress_interval: 10
@@ -91,7 +91,7 @@ postprocess:
   residual_clip: 250.0
   notebook_blend:
     enabled: true
-    pf_column: kg_pf_ancc_tvt
+    pf_column: pf_ancc
     alpha_grid: [0.95, 1.00, 1.05]
     tau_grid: [0, 50, 100]
     w_pf_grid: [0, 0.10, 0.25]

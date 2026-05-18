@@ -89,7 +89,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "validation": {
         "n_splits": 5,
         "fold_safe_context": True,
-        "final_model_strategy": "full_context",
+        "final_model_strategy": "fold_average",
     },
     "postprocess": {
         "progress_interval": 200,
@@ -98,7 +98,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "residual_clip": 250.0,
         "notebook_blend": {
             "enabled": True,
-            "pf_column": "kg_pf_ancc_tvt",
+            "pf_column": "pf_ancc",
             "alpha": 1.0,
             "tau": 0.0,
             "w_pf": 0.0,
