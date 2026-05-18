@@ -20,6 +20,34 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-18
 
+### EXP-20260518-1 - Global-Context DWT Stack Anchor
+
+- Command/config: `make train` / `configs/stack.yml` before fold-safe
+  `KaggleTopContext` landed.
+- Data: 773 train wells, 3,783,989 hidden-zone train rows, 419 features.
+- Local result:
+  - baseline `last_known_tvt` RMSE: 15.90987;
+  - best single model: `cat_lr025` OOF RMSE 10.59987;
+  - other CatBoost OOF RMSE: 10.61972 / 10.62590;
+  - LightGBM OOF RMSE: 10.91615 / 10.95738 / 10.96038;
+  - hill-climb OOF RMSE: 10.54106;
+  - OOF + postprocess RMSE: 10.51127;
+  - selected postprocess: `{alpha: 1.0, tau: 70.0, w_pf: 0.07}` plus
+    Savitzky-Golay `{window: 17, polyorder: 3}`;
+  - nonzero blend weights: `cat_lr025=0.3900`, `cat_lr020=0.1307`,
+    `cat_lr030=0.2434`, `lgb_lr025=0.2359`.
+- Runtime: 7h08m local. Postprocess grid alone took 1h44m for 4,608 candidates.
+- Kaggle result: not submitted.
+- Important caveat: this is a **global-context / leaky OOF** anchor. Validation
+  features were built with `KaggleTopContext` containing validation wells, and
+  the old pipeline predicted test from averaged fold models rather than final
+  full-context models trained on all rows.
+- Takeaway: the DWT-style feature table is in the right family, close to the
+  public DWT notebook's reported single-model OOF range, but this number is not
+  an honest CV target. Use it only as a pre-fix reference.
+- Next: rerun clean schema v5 fold-safe full training after clearing
+  `artifacts/feature_cache` and `artifacts/stack`.
+
 ### Fold-Safe Validation + Run Registry
 
 - Reworked the main trainer so OOF features are built fold-by-fold with

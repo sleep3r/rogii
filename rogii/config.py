@@ -92,6 +92,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "final_model_strategy": "full_context",
     },
     "postprocess": {
+        "progress_interval": 200,
         "residual_weight": 1.0,
         "residual_weight_grid": [0.7, 0.8, 0.9, 1.0, 1.1],
         "residual_clip": 250.0,

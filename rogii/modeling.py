@@ -4,13 +4,14 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import product
+from time import perf_counter
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
-from .runlog import RunLogger
+from .runlog import RunLogger, format_duration
 
 
 class ResidualModel:
@@ -300,13 +301,15 @@ class EnsembleRegressor(ResidualModel):
         return self
 
     def predict_base_stack(self, X: pd.DataFrame) -> np.ndarray:
-        if self.final_models:
-            return np.vstack([model.predict(X) for model in self.final_models]).T
-        if not self.fold_models:
+        final_models = getattr(self, "final_models", [])
+        if final_models:
+            return np.vstack([model.predict(X) for model in final_models]).T
+        fold_models = getattr(self, "fold_models", [])
+        if not fold_models:
             raise RuntimeError("EnsembleRegressor is not fitted.")
         columns = []
-        for fold_models in self.fold_models:
-            fold_pred = np.vstack([model.predict(X) for model in fold_models])
+        for models in fold_models:
+            fold_pred = np.vstack([model.predict(X) for model in models])
             columns.append(np.mean(fold_pred, axis=0))
         return np.vstack(columns).T
 
@@ -664,17 +667,34 @@ def tune_postprocess(
     config: dict[str, Any],
     features: pd.DataFrame,
     groups: np.ndarray,
+    logger: RunLogger | None = None,
 ) -> tuple[
     float, list[dict[str, float]], dict[str, float] | None, dict[str, float] | None
 ]:
     residual_grid = config["postprocess"].get("residual_weight_grid") or [
         config["postprocess"].get("residual_weight", 1.0)
     ]
+    blend_options = notebook_blend_candidates(config)
+    smoothing_options = smoothing_candidates(config)
+    total_candidates = (
+        max(len(residual_grid), 1)
+        * max(len(blend_options), 1)
+        * max(len(smoothing_options), 1)
+    )
+    progress_interval = int(
+        config["postprocess"].get("progress_interval") or max(1, total_candidates // 20)
+    )
     scores: list[dict[str, float]] = []
-    for weight, blend, smoothing in product(
-        residual_grid,
-        notebook_blend_candidates(config),
-        smoothing_candidates(config),
+    best_score = float("inf")
+    best: dict[str, float] | None = None
+    started_at = perf_counter()
+    for candidate_idx, (weight, blend, smoothing) in enumerate(
+        product(
+            residual_grid,
+            blend_options,
+            smoothing_options,
+        ),
+        start=1,
     ):
         weight = float(weight)
         pred = apply_postprocess(
@@ -695,8 +715,43 @@ def tune_postprocess(
                 {f"smooth_{key}": float(value) for key, value in smoothing.items()}
             )
         scores.append(score)
+        if score["rmse"] < best_score:
+            best_score = float(score["rmse"])
+            best = score
 
-    best = min(scores, key=lambda item: item["rmse"])
+        if logger is not None and (
+            candidate_idx == 1
+            or candidate_idx == total_candidates
+            or candidate_idx % progress_interval == 0
+        ):
+            elapsed = perf_counter() - started_at
+            rate = candidate_idx / max(elapsed, 1e-9)
+            remaining = (total_candidates - candidate_idx) / max(rate, 1e-9)
+            best_blend = {
+                key.replace("blend_", ""): best[key]
+                for key in ("blend_alpha", "blend_tau", "blend_w_pf")
+                if best is not None and key in best
+            }
+            best_smooth = {
+                key.replace("smooth_", ""): best[key]
+                for key in ("smooth_window", "smooth_polyorder")
+                if best is not None and key in best
+            }
+            logger.info(
+                "Postprocess tuning progress",
+                current=candidate_idx,
+                total=total_candidates,
+                pct=100.0 * candidate_idx / max(total_candidates, 1),
+                elapsed=format_duration(elapsed),
+                eta=format_duration(remaining),
+                best_rmse=best_score,
+                best_weight=best.get("weight") if best is not None else None,
+                best_blend=best_blend or None,
+                best_smoothing=best_smooth or None,
+            )
+
+    if best is None:
+        best = min(scores, key=lambda item: item["rmse"])
     best_blend = {
         key.replace("blend_", ""): best[key]
         for key in ("blend_alpha", "blend_tau", "blend_w_pf")
@@ -733,6 +788,7 @@ def evaluate_oof_predictions(
         config,
         X,
         groups,
+        logger=logger,
     )
     oof_pred = apply_postprocess(
         flat,

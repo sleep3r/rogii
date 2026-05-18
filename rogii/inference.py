@@ -61,6 +61,65 @@ def choose_config_path(model_dir: Path, requested: Path | None) -> Path:
     return Path("configs/stack.yml")
 
 
+def find_model_artifact_dir(root: Path) -> Path | None:
+    if (root / "model.pkl").is_file() and (root / "features.json").is_file():
+        return root
+    if not root.is_dir():
+        return None
+    candidates = [
+        path.parent
+        for path in sorted(root.rglob("model.pkl"))
+        if (path.parent / "features.json").is_file()
+    ]
+    return candidates[0] if candidates else None
+
+
+def resolve_model_dir(model_dir: Path) -> Path:
+    resolved = find_model_artifact_dir(model_dir)
+    if resolved is not None:
+        return resolved
+
+    # Kaggle sometimes displays the dataset as attached while mounting it under
+    # a title-derived or nested path. Search all inputs before failing.
+    if str(model_dir).startswith("/kaggle/input"):
+        resolved = find_model_artifact_dir(Path("/kaggle/input"))
+        if resolved is not None:
+            return resolved
+
+    return model_dir
+
+
+def describe_tree(root: Path, limit: int = 80) -> list[str]:
+    if not root.exists():
+        return [f"{root} [missing]"]
+    output: list[str] = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        kind = "dir" if child.is_dir() else "file"
+        output.append(f"{child} [{kind}]")
+        if len(output) >= limit:
+            output.append("... truncated ...")
+            return output
+    for path in sorted(root.rglob("*")):
+        if path.parent == root:
+            continue
+        if len(output) >= limit:
+            output.append("... truncated ...")
+            break
+        kind = "dir" if path.is_dir() else "file"
+        output.append(f"{path} [{kind}]")
+    return output
+
+
+def has_model_artifacts(model_dir: Path) -> bool:
+    if (model_dir / "model.pkl").is_file() and (model_dir / "features.json").is_file():
+        return True
+    return False
+
+
 def load_artifact_config(path: Path) -> dict[str, Any]:
     if path.is_file():
         text = path.read_text(encoding="utf-8")
@@ -97,7 +156,18 @@ def main() -> None:
     logger = RunLogger()
     logger.log("RUN", "ROGII inference started", model_dir=args.model_dir)
 
-    model_dir = args.model_dir
+    model_dir = resolve_model_dir(args.model_dir)
+    if model_dir != args.model_dir:
+        logger.info("Resolved nested model artifact dir", model_dir=model_dir)
+    if not (model_dir / "model.pkl").is_file():
+        logger.warn(
+            "Model artifact files not found", requested_model_dir=args.model_dir
+        )
+        for line in describe_tree(Path("/kaggle/input")):
+            logger.warn("Kaggle input tree", path=line)
+        for line in describe_tree(args.model_dir):
+            logger.warn("Requested model dir tree", path=line)
+        raise FileNotFoundError(f"Model artifact not found under {args.model_dir}")
     config_path = choose_config_path(model_dir, args.config)
     config = load_artifact_config(config_path)
 

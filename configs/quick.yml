@@ -85,6 +85,7 @@ validation:
   final_model_strategy: full_context
 
 postprocess:
+  progress_interval: 10
   residual_weight: 1.0
   residual_weight_grid: [1.0]
   residual_clip: 250.0
