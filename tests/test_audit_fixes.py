@@ -177,7 +177,7 @@ def test_make_xgboost_keeps_early_stopping_rounds_in_estimator_params() -> None:
     assert model.estimator.get_params()["early_stopping_rounds"] == 17
 
 
-def test_predict_test_warns_and_zero_fills_missing_features(tmp_path) -> None:
+def test_predict_test_keeps_missing_features_as_nan(tmp_path) -> None:
     class DummyModel:
         def __init__(self) -> None:
             self.seen_missing: np.ndarray | None = None
@@ -225,6 +225,8 @@ def test_predict_test_warns_and_zero_fills_missing_features(tmp_path) -> None:
 
     assert not submission["tvt"].isna().any()
     assert model.seen_missing is not None
-    assert np.all(model.seen_missing == 0.0)
+    # Missing features must arrive as NaN so tree models use their trained
+    # "missing" branch (matching how no-typewell rows looked at train time).
+    assert np.all(np.isnan(model.seen_missing))
     assert logger.warnings
-    assert logger.warnings[0][0] == "Missing inference features filled with zero"
+    assert logger.warnings[0][0] == "Missing inference features kept as NaN"

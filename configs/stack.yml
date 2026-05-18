@@ -49,45 +49,6 @@ features:
 
 model:
   base_models:
-    - id: lgb_lr025
-      name: lightgbm
-      params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
-        learning_rate: 0.025
-        num_leaves: 255
-        min_child_samples: 15
-        subsample: 0.8
-        subsample_freq: 1
-        colsample_bytree: 0.8
-        reg_alpha: 0.05
-        reg_lambda: 3.0
-    - id: lgb_lr020
-      name: lightgbm
-      params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
-        learning_rate: 0.020
-        num_leaves: 255
-        min_child_samples: 15
-        subsample: 0.8
-        subsample_freq: 1
-        colsample_bytree: 0.8
-        reg_alpha: 0.05
-        reg_lambda: 3.0
-    - id: lgb_lr030
-      name: lightgbm
-      params:
-        n_estimators: 2500
-        early_stopping_rounds: 250
-        learning_rate: 0.030
-        num_leaves: 255
-        min_child_samples: 15
-        subsample: 0.8
-        subsample_freq: 1
-        colsample_bytree: 0.8
-        reg_alpha: 0.05
-        reg_lambda: 3.0
     - id: cat_lr025
       name: catboost
       params:
@@ -127,6 +88,45 @@ model:
         random_strength: 0.2
         bootstrap_type: Bernoulli
         subsample: 0.8
+    - id: lgb_lr025
+      name: lightgbm
+      params:
+        n_estimators: 2500
+        early_stopping_rounds: 250
+        learning_rate: 0.025
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr020
+      name: lightgbm
+      params:
+        n_estimators: 2500
+        early_stopping_rounds: 250
+        learning_rate: 0.020
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr030
+      name: lightgbm
+      params:
+        n_estimators: 2500
+        early_stopping_rounds: 250
+        learning_rate: 0.030
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
     - id: xgb_lr025
       name: xgboost
       params:

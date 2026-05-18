@@ -41,12 +41,14 @@ def predict_test(
         if missing_features:
             if logger is not None:
                 logger.warn(
-                    "Missing inference features filled with zero",
+                    "Missing inference features kept as NaN",
                     well=wf.well,
                     count=len(missing_features),
                     first=missing_features[0],
                 )
-            test_features.loc[:, missing_features] = 0.0
+            # Keep NaN (already set by reindex).  Tree models use their
+            # trained "missing" branch for NaN, which matches how these
+            # features were absent (→ NaN via pd.concat) during training.
         test_features = test_features.astype("float32")
         residual_pred = model.predict(test_features)
         predictions_by_well[wf.well] = apply_postprocess(

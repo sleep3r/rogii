@@ -18,6 +18,29 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Next:
 ```
 
+## 2026-05-18
+
+### No-typewell NaN Fix (schema v3)
+
+- **Root cause found**: `build_kaggle_top_signal_features` returned early for
+  no-typewell wells with only the base features from `empty_top_signal_features`.
+  Dynamic per-config features (`kg_beam_{tag}_tvt`, `kg_ncc_{w}_tvt`,
+  `kg_dtw_r{r}_tvt`, `kg_dwt_r{r}_tvt`, `kg_form_{f}_tvt`, …) were entirely
+  absent from the feature dict.  During training `pd.concat` filled those absent
+  columns with NaN, so tree models learn a "missing" branch.  At test time
+  `submission.py` was overwriting that NaN with `0.0`, sending rows down the
+  wrong tree branch — clearly OOD for TVT-scale features (typical values ~1000 m).
+- **Fix**: Pre-initialize all dynamic config-driven features with NaN at the
+  start of `build_kaggle_top_signal_features` before any early return.  The NaN
+  is now always present and consistent with the training distribution.
+- `submission.py` now preserves the NaN from `reindex` (no longer writes 0.0);
+  warning message updated to "Missing inference features kept as NaN".
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 3 — old caches invalidated.
+- Test renamed to `test_predict_test_keeps_missing_features_as_nan`; asserts NaN.
+- Local result: pending (needs `make train-local` after cache flush).
+- Expected LB impact: positive; the previous 0.0 fill was an inference-only
+  data leak relative to training.
+
 ## 2026-05-17
 
 ### Framework Simplification
@@ -56,7 +79,8 @@ added to the main path only when they improve validation or leaderboard.
 
 - Main commands are now:
   - `make train-local` for local training;
-  - `make train-kaggle` for push-only Kaggle training;
+  - `make train-kaggle` is intentionally disabled because full training exceeds
+    Kaggle's 9-hour CPU limit;
   - `make submit` for inference-only Kaggle run without competition submit.
 - Removed old submit aliases from the primary workflow; Kaggle UI remains the
   place to press the final submit button.

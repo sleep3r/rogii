@@ -87,15 +87,14 @@ artifacts/stack/
 
 ## Kaggle
 
-Remote Kaggle training without competition submit:
+Remote Kaggle training is intentionally disabled:
 
 ```bash
-make train-kaggle MESSAGE="baseline remote train"
+make train-kaggle
 ```
 
-This pushes a Kaggle script version and returns immediately. It does not wait
-for training, download output, or call the competition submit API. Watch it in
-the Kaggle UI and submit the produced notebook version there when it finishes.
+The full `stack.yml` train run exceeds Kaggle's 9-hour CPU notebook limit. The
+working path is local training followed by an inference-only Kaggle run.
 
 Inference-only Kaggle run from a local artifact:
 
@@ -111,7 +110,6 @@ manually from the Kaggle UI when you are happy with it.
 Dry runs:
 
 ```bash
-make train-kaggle-dry MESSAGE="train dry run"
 make submit-dry MESSAGE="infer dry run"
 ```
 

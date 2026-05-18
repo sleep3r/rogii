@@ -24,7 +24,7 @@ from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
-FEATURE_CACHE_SCHEMA_VERSION = 2
+FEATURE_CACHE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)

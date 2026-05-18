@@ -69,10 +69,13 @@ quick-train:
 	$(PYTHON) -m rogii --config configs/quick.yml
 
 train-kaggle:
-	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(TRAIN_KERNEL) --title "$(TRAIN_TITLE)" --config $(CONFIG) --kernel-dir $(TRAIN_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(TRAIN_ARTIFACT_DIR) --output-dir $(TRAIN_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output --push-only
+	@echo "Kaggle CPU full training is disabled: stack.yml exceeds the 9h notebook limit."
+	@echo "Use: make train-local"
+	@echo "Then: make submit MESSAGE=\"...\""
+	@exit 1
 
 train-kaggle-dry:
-	$(PYTHON) -m rogii.kaggle_submit run --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(TRAIN_KERNEL) --title "$(TRAIN_TITLE)" --config $(CONFIG) --kernel-dir $(TRAIN_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(TRAIN_ARTIFACT_DIR) --output-dir $(TRAIN_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output --push-only --dry-run
+	@echo "Kaggle CPU full training is disabled. Dry run skipped."
 
 submit:
 	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(SUBMIT_KERNEL) --title "$(SUBMIT_TITLE)" --config $(CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --publish-model-dataset --kernel-dir $(SUBMIT_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(SUBMIT_ARTIFACT_DIR) --output-dir $(SUBMIT_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output

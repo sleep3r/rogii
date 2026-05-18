@@ -952,6 +952,42 @@ def build_kaggle_top_signal_features(
     top_cfg = config["features"].get("kaggle_top", {})
     require_numba_for_notebook_mode(top_cfg)
     notebook_mode = str(top_cfg.get("mode", "")).lower() == "notebook"
+
+    # Pre-initialize all dynamic config-driven features with NaN so the
+    # feature schema is stable regardless of typewell presence.  During
+    # training, no-typewell wells produce NaN for these columns via
+    # pd.concat; using NaN here keeps inference aligned with that
+    # training distribution (tree models use their "missing" branch).
+    _nan = np.full(n, np.nan, dtype=float)
+    for beam_cfg in top_cfg.get("beam_configs", []):
+        _, _, _, _, tag = parse_beam_config(beam_cfg)
+        features[f"kg_beam_{tag}_tvt"] = _nan.copy()
+        features[f"kg_beam_{tag}_minus_flat"] = _nan.copy()
+        features[f"kg_beam_{tag}_minus_last"] = _nan.copy()
+    for hw in [int(w) for w in top_cfg.get("ncc_windows", [8, 15, 25])]:
+        features[f"kg_ncc_{hw}_tvt"] = _nan.copy()
+        features[f"kg_ncc_{hw}_tvt_minus_flat"] = _nan.copy()
+        features[f"kg_ncc_{hw}_score"] = _nan.copy()
+    if top_cfg.get("dtw_enabled", True):
+        for radius in [
+            int(r)
+            for r in (top_cfg.get("dtw_radii") or [top_cfg.get("dtw_radius", 35)])
+        ]:
+            features[f"kg_dtw_r{radius}_tvt"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_minus_flat"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_minus_last"] = _nan.copy()
+    if top_cfg.get("dwt_enabled", False):
+        for radius in [
+            int(r)
+            for r in (top_cfg.get("dwt_radii") or [top_cfg.get("dwt_radius", 35)])
+        ]:
+            features[f"kg_dwt_r{radius}_tvt"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_minus_flat"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_minus_last"] = _nan.copy()
+    for formation in FORMATIONS:
+        features[f"kg_form_{formation}_tvt"] = _nan.copy()
+        features[f"kg_form_{formation}_minus_flat"] = _nan.copy()
+
     known = np.isfinite(tvt_input)
     hidden = ~known
     hidden_idx = np.flatnonzero(hidden)
