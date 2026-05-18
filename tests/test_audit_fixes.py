@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from rogii.modeling import (
     ResidualModel,
     apply_postprocess,
     make_xgboost,
+    tune_postprocess,
 )
 from rogii.pipeline import assert_fold_context_safe
 from rogii.spatial import KaggleTopContext, context_key_for_paths, context_well_overlap
@@ -85,6 +87,29 @@ def write_dwt_synthetic_well(tmp_path, name: str = "abc12345") -> tuple:
     return horizontal, frame
 
 
+def write_spatial_context_well(
+    tmp_path, name: str, x0: float, y0: float, shift: float
+) -> Path:
+    n = 24
+    idx = np.arange(n, dtype=float)
+    frame = pd.DataFrame(
+        {
+            "MD": idx,
+            "X": x0 + 2.0 * idx,
+            "Y": y0 + 0.5 * idx,
+            "Z": 1000.0 + 0.1 * idx,
+            "GR": 80.0 + idx,
+            "TVT_input": 10.0 + idx,
+            "TVT": 10.0 + idx,
+        }
+    )
+    for offset, formation in enumerate(FORMATIONS):
+        frame[formation] = 900.0 + shift + 4.0 * offset + 0.2 * idx
+    horizontal = tmp_path / f"{name}__horizontal_well.csv"
+    frame.to_csv(horizontal, index=False)
+    return horizontal
+
+
 def dwt_config() -> dict:
     config = minimal_config()
     config["features"]["include_typewell"] = True
@@ -113,6 +138,104 @@ def dwt_config() -> dict:
         "dense_samples_per_well": 8,
     }
     return config
+
+
+def reference_impute_formations(context, xy: np.ndarray, self_well: str | None):
+    if context.formation_tree is None or len(context.formation_values) == 0:
+        return (
+            np.full((len(xy), len(FORMATIONS)), np.nan, dtype=float),
+            np.full(len(xy), np.nan, dtype=float),
+        )
+    k_fetch = min(len(context.formation_values), context.spatial_k + 8)
+    dist, idx = context.formation_tree.query(xy / context.formation_scale, k=k_fetch)
+    if k_fetch == 1:
+        dist = np.asarray(dist).reshape(len(xy), 1)
+        idx = np.asarray(idx).reshape(len(xy), 1)
+    else:
+        dist = np.atleast_2d(dist)
+        idx = np.atleast_2d(idx)
+        if len(xy) == 1:
+            dist = dist.reshape(1, -1)
+            idx = idx.reshape(1, -1)
+    if self_well is not None:
+        dist = np.where(context.formation_wells[idx] == self_well, np.inf, dist)
+
+    pred = np.empty((len(xy), len(FORMATIONS)), dtype=float)
+    nearest_dist = np.empty(len(xy), dtype=float)
+    global_mean = np.nanmean(context.formation_values, axis=0)
+    for row in range(len(xy)):
+        order = np.argsort(dist[row])[: context.spatial_k]
+        valid = np.isfinite(dist[row, order])
+        if not valid.any():
+            pred[row] = global_mean
+            nearest_dist[row] = np.nan
+            continue
+        chosen = order[valid]
+        chosen_idx = idx[row, chosen]
+        weights = 1.0 / (dist[row, chosen] + 1e-3)
+        xn = context.formation_xy[chosen_idx, 0]
+        yn = context.formation_xy[chosen_idx, 1]
+        values = context.formation_values[chosen_idx]
+        design = np.column_stack([xn, yn, np.ones_like(xn)])
+        normal = design.T @ (design * weights[:, None])
+        rhs = design.T @ (values * weights[:, None])
+        normal += np.eye(3) * 1e-9
+        try:
+            coef = np.linalg.solve(normal, rhs)
+        except np.linalg.LinAlgError:
+            coef = np.linalg.pinv(normal) @ rhs
+        pred[row] = xy[row, 0] * coef[0] + xy[row, 1] * coef[1] + coef[2]
+        nearest_dist[row] = float(np.nanmin(dist[row, chosen]))
+    return pred, nearest_dist
+
+
+def reference_impute_dense_ancc(context, xy: np.ndarray, self_well: str | None):
+    if context.dense_tree is None or len(context.dense_ancc) == 0:
+        return (
+            np.full(len(xy), np.nan, dtype=float),
+            np.full(len(xy), np.nan, dtype=float),
+            np.full(len(xy), np.nan, dtype=float),
+        )
+    k_fetch = min(len(context.dense_ancc), max(context.dense_fetch, context.dense_k))
+    pred = np.empty(len(xy), dtype=float)
+    std = np.empty(len(xy), dtype=float)
+    nearest_dist = np.empty(len(xy), dtype=float)
+    global_mean = float(np.nanmean(context.dense_ancc))
+    chunk_size = max(1, context.dense_query_chunk)
+    for start in range(0, len(xy), chunk_size):
+        stop = min(start + chunk_size, len(xy))
+        chunk_xy = xy[start:stop]
+        dist, idx = context.dense_tree.query(chunk_xy / context.dense_scale, k=k_fetch)
+        if k_fetch == 1:
+            dist = np.asarray(dist).reshape(len(chunk_xy), 1)
+            idx = np.asarray(idx).reshape(len(chunk_xy), 1)
+        else:
+            dist = np.atleast_2d(dist)
+            idx = np.atleast_2d(idx)
+            if len(chunk_xy) == 1:
+                dist = dist.reshape(1, -1)
+                idx = idx.reshape(1, -1)
+        if self_well is not None:
+            dist = np.where(context.dense_wells[idx] == self_well, np.inf, dist)
+
+        for local_row in range(len(chunk_xy)):
+            row = start + local_row
+            order = np.argsort(dist[local_row])[: context.dense_k]
+            valid = np.isfinite(dist[local_row, order])
+            if not valid.any():
+                pred[row] = global_mean
+                std[row] = np.nan
+                nearest_dist[row] = np.nan
+                continue
+            chosen = order[valid]
+            values = context.dense_ancc[idx[local_row, chosen]]
+            weights = 1.0 / (dist[local_row, chosen] + 1e-3)
+            weights /= weights.sum()
+            mean = float(weights @ values)
+            pred[row] = mean
+            std[row] = float(np.sqrt(weights @ ((values - mean) ** 2)))
+            nearest_dist[row] = float(np.nanmin(dist[local_row, chosen]))
+    return pred, std, nearest_dist
 
 
 def reference_lowres_dtw_signal(
@@ -301,6 +424,48 @@ def test_fold_context_excludes_validation_wells(tmp_path) -> None:
         assert_fold_context_safe(context, [path_a], fold_id=1)
 
 
+def test_vectorized_spatial_imputation_matches_reference(tmp_path) -> None:
+    paths = [
+        write_spatial_context_well(tmp_path, "aaaa1111", 1000, 2000, 0),
+        write_spatial_context_well(tmp_path, "bbbb2222", 1100, 2030, 25),
+        write_spatial_context_well(tmp_path, "cccc3333", 1200, 1980, 50),
+        write_spatial_context_well(tmp_path, "dddd4444", 1300, 2080, 75),
+        write_spatial_context_well(tmp_path, "eeee5555", 1400, 2100, 100),
+    ]
+    config = dwt_config()
+    config["features"]["kaggle_top"].update(
+        {
+            "spatial_k": 3,
+            "dense_k": 4,
+            "dense_fetch": 8,
+            "dense_query_chunk": 3,
+            "dense_samples_per_well": 6,
+        }
+    )
+    context = KaggleTopContext(paths, config)
+    xy = np.array(
+        [
+            [1010.0, 2001.0],
+            [1120.0, 2035.0],
+            [1260.0, 2050.0],
+            [1450.0, 2110.0],
+        ],
+        dtype=float,
+    )
+
+    expected_form, expected_form_dist = reference_impute_formations(
+        context, xy, "bbbb2222"
+    )
+    actual_form, actual_form_dist = context.impute_formations(xy, "bbbb2222")
+    assert np.allclose(actual_form, expected_form, equal_nan=True)
+    assert np.allclose(actual_form_dist, expected_form_dist, equal_nan=True)
+
+    expected_dense = reference_impute_dense_ancc(context, xy, "bbbb2222")
+    actual_dense = context.impute_dense_ancc(xy, "bbbb2222")
+    for actual, expected in zip(actual_dense, expected_dense, strict=True):
+        assert np.allclose(actual, expected, equal_nan=True)
+
+
 def test_ensemble_predict_uses_final_models() -> None:
     class ConstantModel(ResidualModel):
         def __init__(self, value: float) -> None:
@@ -389,6 +554,92 @@ def test_notebook_postprocess_uses_md_from_last_known() -> None:
         features=features,
     )
     assert np.allclose(pred, [10.0, 10.0 + 2.0 * (1.0 - np.exp(-1.0))])
+
+
+def test_fast_postprocess_tuning_matches_bruteforce() -> None:
+    config = minimal_config()
+    config["postprocess"] = {
+        "residual_weight": 1.0,
+        "residual_weight_grid": [0.7, 1.0, 1.1],
+        "residual_clip": 10.0,
+        "notebook_blend": {
+            "enabled": True,
+            "pf_column": "kg_pf_ancc_tvt",
+            "alpha_grid": [0.95, 1.0],
+            "tau_grid": [0, 20],
+            "w_pf_grid": [0, 0.2],
+        },
+        "smoothing": {
+            "enabled": True,
+            "candidates": [{"enabled": False}, {"window": 5, "polyorder": 2}],
+        },
+    }
+    flat = np.array([10, 10, 10, 10, 20, 20, 20, 20], dtype=float)
+    residual = np.array([0.5, 1.5, 2.0, 2.5, -1.0, -1.5, -2.0, -2.5])
+    y_true = np.array([10.8, 11.4, 12.2, 12.9, 18.8, 18.3, 17.8, 17.3])
+    features = pd.DataFrame(
+        {
+            "last_known_tvt": [10.0] * 4 + [20.0] * 4,
+            "md_from_last_known": [0.0, 10.0, 20.0, 30.0] * 2,
+            "kg_pf_ancc_tvt": [10.7, 11.6, 12.1, 12.8, 19.0, 18.6, 17.9, 17.1],
+        }
+    )
+    groups = np.array(["a"] * 4 + ["b"] * 4)
+
+    best_weight, scores, best_blend, best_smoothing = tune_postprocess(
+        flat,
+        residual,
+        y_true,
+        config,
+        features,
+        groups,
+    )
+
+    brute_scores = []
+    for weight in config["postprocess"]["residual_weight_grid"]:
+        for alpha in config["postprocess"]["notebook_blend"]["alpha_grid"]:
+            for tau in config["postprocess"]["notebook_blend"]["tau_grid"]:
+                for w_pf in config["postprocess"]["notebook_blend"]["w_pf_grid"]:
+                    blend = {"alpha": alpha, "tau": tau, "w_pf": w_pf}
+                    for smoothing in [None, {"window": 5, "polyorder": 2}]:
+                        pred = apply_postprocess(
+                            flat,
+                            residual,
+                            config,
+                            residual_weight=weight,
+                            features=features,
+                            groups=groups,
+                            notebook_blend=blend,
+                            smoothing=smoothing,
+                        )
+                        score = {
+                            "weight": float(weight),
+                            "rmse": float(np.sqrt(np.mean((pred - y_true) ** 2))),
+                            "blend_alpha": float(alpha),
+                            "blend_tau": float(tau),
+                            "blend_w_pf": float(w_pf),
+                        }
+                        if smoothing is not None:
+                            score["smooth_window"] = 5.0
+                            score["smooth_polyorder"] = 2.0
+                        brute_scores.append(score)
+
+    assert len(scores) == len(brute_scores)
+    assert np.allclose(
+        [score["rmse"] for score in scores],
+        [score["rmse"] for score in brute_scores],
+    )
+    best_brute = min(brute_scores, key=lambda item: item["rmse"])
+    assert best_weight == pytest.approx(best_brute["weight"])
+    assert best_blend == {
+        "alpha": best_brute["blend_alpha"],
+        "tau": best_brute["blend_tau"],
+        "w_pf": best_brute["blend_w_pf"],
+    }
+    if "smooth_window" in best_brute:
+        assert best_smoothing == {"window": 5.0, "polyorder": 2.0}
+    else:
+        assert best_smoothing is None
 
 
 def test_lowres_dtw_signal_matches_reference() -> None:

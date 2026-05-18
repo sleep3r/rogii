@@ -48,7 +48,7 @@ run here with command, data, CV, LB, runtime, and the next decision.
   the old HGB anchor 12.803 to 9.946, but the local OOF is still not an honest
   CV target. Use this run as the current public-LB anchor, not as validation
   truth.
-- Next: rerun clean schema v5 fold-safe full training after clearing
+- Next: rerun clean schema v6 fold-safe full training after clearing
   `artifacts/feature_cache` and `artifacts/stack`.
 
 ### Fold-Safe Validation + Run Registry
@@ -57,7 +57,7 @@ run here with command, data, CV, LB, runtime, and the next decision.
   `KaggleTopContext` constructed only from train-fold wells.
 - Final artifacts now train separate full-context final models on all train
   wells after OOF weights/postprocess are selected.
-- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 5; feature cache keys now include the
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 6; feature cache keys now include the
   `KaggleTopContext` key, so fold-safe and full-context features cannot collide.
 - Added run diagnostics and `artifacts/runs.csv` registry with global RMSE,
   per-well RMSE, P90/worst well RMSE, typewell/no-typewell slices, hidden-length
@@ -74,6 +74,70 @@ run here with command, data, CV, LB, runtime, and the next decision.
     10.04130;
   - quick artifact inference parity: same ids, no NaN, max_abs_diff 0.0.
 - Full local result: pending; clean caches/artifacts before the next full run.
+
+### Profiling Baseline
+
+- Added `make profile`, `make profile-quick`, `make profile-train`, and
+  `make profile-report`.
+- Added `rogii.profile_report` to convert `cProfile` output plus ROGII logs into
+  Markdown reports under `artifacts/profiles/`.
+- Added `PROFILING.md` as the performance ledger:
+  - full-run anchor: 7h08m, with OOF training 65.2% and postprocess tuning 24.3%;
+  - quick profile: 26.36s RunLogger total, 28.316s cProfile total;
+  - current hot paths: model training, `build_kaggle_top_signal_features`,
+    `impute_formations`, and `impute_dense_ancc`.
+- `make model-bundle` now includes `PROFILING.md`, so performance context is
+  sent to external review models too.
+- Next: use this document as the baseline for speed deltas before changing model
+  count or feature families.
+
+### Postprocess Tuning Speedup
+
+- Replaced brute-force postprocess scoring with an exact basis scorer.
+- The selected formula is unchanged:
+  `last_known_tvt + alpha * decay(md_from_last_known, tau) *
+  ((1 - w_pf) * model_delta + w_pf * pf_delta)`, with optional Savitzky-Golay
+  smoothing by well.
+- Instead of materializing a full prediction vector for every grid candidate,
+  the tuner now builds a linear basis per `(tau, smoothing)` pair and scores
+  candidates from cached dot-products.
+- Synthetic benchmark, 50k rows, 4,608 candidates:
+  - brute force: 53.015s;
+  - basis scorer: 0.863s;
+  - speedup: 61.5x;
+  - best RMSE delta: 1.8e-9.
+- Added unit coverage comparing the fast scorer against brute-force
+  `apply_postprocess`.
+- Expected full-stack impact: the historical 1h44m postprocess phase should drop
+  sharply; exact full-run delta is pending.
+
+### Spatial Imputation Speedup
+
+- Vectorized `KaggleTopContext.impute_dense_ancc`:
+  - one KD-tree query per chunk;
+  - vectorized neighbor selection, weighted mean, weighted std, and nearest
+    distance;
+  - preserves the old row-loop outputs up to floating noise (`~1e-12` on public
+    sample checks).
+- Added a vectorized formation-plane path for non-degenerate contexts:
+  - batched weighted normal equations;
+  - exact row-loop fallback when fewer than 3 valid neighbors are available.
+- Important guardrail: `quick.yml` uses `spatial_k=2`, so formation planes are
+  underdetermined there and intentionally stay on the exact old fallback. Full
+  `stack.yml` uses `spatial_k=10`, so the fast formation path should apply in the
+  serious run.
+- Added unit coverage comparing vectorized spatial outputs against the previous
+  row-loop reference.
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 6 after the spatial kernel change so
+  stale row-loop feature caches do not mask the new implementation.
+- Quick profile after postprocess + spatial changes:
+  - RunLogger total: 15.95s;
+  - cProfile total: 17.644s;
+  - `impute_dense_ancc`: 1.880s -> 0.264s;
+  - quick CV stayed at 10.04136 after fallback guard.
+- Expected full-stack impact: dense ANCC is now much cheaper, and formation
+  imputation should speed up materially on `stack.yml`; exact full-run delta is
+  pending.
 
 ### Model Bundle Skill
 

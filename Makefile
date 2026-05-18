@@ -1,5 +1,6 @@
 COMPETITION := rogii-wellbore-geology-prediction
 KAGGLE_USER ?= sleep3r
+SHELL := /bin/bash
 UV ?= uv
 PYTHON ?= $(UV) run python
 KAGGLE ?= $(UV) run kaggle
@@ -8,6 +9,12 @@ DATA_DIR ?= data
 CONFIG ?= configs/stack.yml
 SUBMISSION ?= submission.csv
 MESSAGE ?= Submission
+PROFILE_DIR ?= artifacts/profiles
+PROFILE_NAME ?= profile
+PROFILE_FILE ?= $(PROFILE_DIR)/$(PROFILE_NAME).prof
+PROFILE_LOG ?= $(PROFILE_DIR)/$(PROFILE_NAME).log
+PROFILE_REPORT ?= $(PROFILE_DIR)/$(PROFILE_NAME).md
+PROFILE_REPORT_LIMIT ?= 40
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -37,6 +44,7 @@ RESEARCH_BRIEF ?= .kaggle_mining/research_brief.md
 MODEL_BUNDLE ?= .kaggle_mining/model_bundle.md
 OVERVIEW_DOC ?= .kaggle_mining/overview.tex
 MANUAL_IDEAS_DOC ?= .kaggle_mining/manual_ideas.md
+PROFILE_DOC ?= PROFILING.md
 COMPETITION_DESC ?= COMPETITION.md
 CODE_MINER ?= $(CODEX_HOME)/skills/kaggle-code-miner/scripts/mine_kaggle_code.py
 DISCUSSION_MINER ?= $(CODEX_HOME)/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py
@@ -47,7 +55,7 @@ DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -71,6 +79,20 @@ train: train-local
 
 quick-train:
 	$(PYTHON) -m rogii --config configs/quick.yml
+
+profile: ensure-data
+	mkdir -p $(PROFILE_DIR)
+	set -o pipefail; $(PYTHON) -m cProfile -o $(PROFILE_FILE) -m rogii --config $(CONFIG) 2>&1 | tee $(PROFILE_LOG)
+	$(PYTHON) -m rogii.profile_report --profile $(PROFILE_FILE) --log $(PROFILE_LOG) --output $(PROFILE_REPORT) --limit $(PROFILE_REPORT_LIMIT) --title "ROGII profile: $(PROFILE_NAME)"
+
+profile-quick:
+	$(MAKE) profile CONFIG=configs/quick.yml PROFILE_NAME=quick
+
+profile-train:
+	$(MAKE) profile CONFIG=$(CONFIG) PROFILE_NAME=stack
+
+profile-report:
+	$(PYTHON) -m rogii.profile_report --profile $(PROFILE_FILE) --log $(PROFILE_LOG) --output $(PROFILE_REPORT) --limit $(PROFILE_REPORT_LIMIT) --title "ROGII profile: $(PROFILE_NAME)"
 
 train-kaggle:
 	@echo "Kaggle CPU full training is disabled: stack.yml exceeds the 9h notebook limit."
@@ -109,7 +131,7 @@ research-brief:
 	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --competition-description-file $(COMPETITION_DESC) --max-all-ideas $(BRIEF_MAX_IDEAS)
 
 model-bundle:
-	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --context-file $(OVERVIEW_DOC) --context-file $(MANUAL_IDEAS_DOC) --max-all-ideas 0 --max-discussion-ideas 0
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --context-file $(OVERVIEW_DOC) --context-file $(MANUAL_IDEAS_DOC) --context-file $(PROFILE_DOC) --max-all-ideas 0 --max-discussion-ideas 0
 
 research-db: mine-code mine-discussions model-bundle
 

@@ -141,6 +141,47 @@ class KaggleTopContext:
         if self_well is not None:
             dist = np.where(self.formation_wells[idx] == self_well, np.inf, dist)
 
+        order = np.argsort(dist, axis=1)[:, : self.spatial_k]
+        chosen_dist = np.take_along_axis(dist, order, axis=1)
+        chosen_idx = np.take_along_axis(idx, order, axis=1)
+        valid = np.isfinite(chosen_dist)
+        if (valid.sum(axis=1) < 3).any():
+            return self._impute_formations_row_loop(xy, dist, idx)
+        any_valid = valid.any(axis=1)
+        weights = np.where(valid, 1.0 / (chosen_dist + 1e-3), 0.0)
+
+        xn = self.formation_xy[chosen_idx, 0]
+        yn = self.formation_xy[chosen_idx, 1]
+        ones = np.ones_like(xn)
+        design = np.stack([xn, yn, ones], axis=2)
+        values = self.formation_values[chosen_idx]
+        normal = np.einsum("nki,nkj,nk->nij", design, design, weights)
+        rhs = np.einsum("nki,nkf,nk->nif", design, values, weights)
+        normal += np.eye(3, dtype=float)[None, :, :] * 1e-9
+
+        try:
+            coef = np.linalg.solve(normal, rhs)
+        except np.linalg.LinAlgError:
+            coef = np.einsum("nij,njf->nif", np.linalg.pinv(normal), rhs)
+
+        query_design = np.column_stack([xy[:, 0], xy[:, 1], np.ones(len(xy))])
+        pred = np.einsum("ni,nif->nf", query_design, coef)
+        global_mean = np.nanmean(self.formation_values, axis=0)
+        pred[~any_valid] = global_mean
+        nearest_dist = np.full(len(xy), np.nan, dtype=float)
+        if any_valid.any():
+            nearest_dist[any_valid] = np.min(
+                np.where(valid[any_valid], chosen_dist[any_valid], np.inf),
+                axis=1,
+            )
+        return pred, nearest_dist
+
+    def _impute_formations_row_loop(
+        self,
+        xy: np.ndarray,
+        dist: np.ndarray,
+        idx: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         pred = np.empty((len(xy), len(FORMATIONS)), dtype=float)
         nearest_dist = np.empty(len(xy), dtype=float)
         global_mean = np.nanmean(self.formation_values, axis=0)
@@ -200,21 +241,30 @@ class KaggleTopContext:
             if self_well is not None:
                 dist = np.where(self.dense_wells[idx] == self_well, np.inf, dist)
 
-            for local_row in range(len(chunk_xy)):
-                row = start + local_row
-                order = np.argsort(dist[local_row])[: self.dense_k]
-                valid = np.isfinite(dist[local_row, order])
-                if not valid.any():
-                    pred[row] = global_mean
-                    std[row] = np.nan
-                    nearest_dist[row] = np.nan
-                    continue
-                chosen = order[valid]
-                values = self.dense_ancc[idx[local_row, chosen]]
-                weights = 1.0 / (dist[local_row, chosen] + 1e-3)
-                weights /= weights.sum()
-                mean = float(weights @ values)
-                pred[row] = mean
-                std[row] = float(np.sqrt(weights @ ((values - mean) ** 2)))
-                nearest_dist[row] = float(np.nanmin(dist[local_row, chosen]))
+            order = np.argsort(dist, axis=1)[:, : self.dense_k]
+            chosen_dist = np.take_along_axis(dist, order, axis=1)
+            chosen_idx = np.take_along_axis(idx, order, axis=1)
+            valid = np.isfinite(chosen_dist)
+            any_valid = valid.any(axis=1)
+            values = self.dense_ancc[chosen_idx]
+            raw_weights = np.where(valid, 1.0 / (chosen_dist + 1e-3), 0.0)
+            weight_sums = raw_weights.sum(axis=1)
+            weights = np.divide(
+                raw_weights,
+                weight_sums[:, None],
+                out=np.zeros_like(raw_weights),
+                where=weight_sums[:, None] > 0,
+            )
+            mean = np.sum(weights * values, axis=1)
+            variance = np.sum(weights * (values - mean[:, None]) ** 2, axis=1)
+
+            pred[start:stop] = np.where(any_valid, mean, global_mean)
+            std[start:stop] = np.where(any_valid, np.sqrt(variance), np.nan)
+            chunk_nearest = np.full(len(chunk_xy), np.nan, dtype=float)
+            if any_valid.any():
+                chunk_nearest[any_valid] = np.min(
+                    np.where(valid[any_valid], chosen_dist[any_valid], np.inf),
+                    axis=1,
+                )
+            nearest_dist[start:stop] = chunk_nearest
         return pred, std, nearest_dist

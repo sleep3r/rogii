@@ -82,6 +82,14 @@ class WrappedRegressor(ResidualModel):
         return np.asarray(self.estimator.predict(X), dtype=float)
 
 
+@dataclass(frozen=True)
+class PostprocessBasisStats:
+    gram: np.ndarray
+    target_dot: np.ndarray
+    target_norm: float
+    rows: int
+
+
 class EnsembleRegressor(ResidualModel):
     """Grouped OOF ensemble used by both local training and Kaggle inference."""
 
@@ -660,6 +668,151 @@ def apply_smoothing(
     return smoothed
 
 
+def apply_smoothing_to_basis(
+    basis: np.ndarray, groups: np.ndarray | None, params: dict[str, float] | None
+) -> np.ndarray:
+    if params is None or groups is None:
+        return basis
+    window = int(params.get("window", 17))
+    polyorder = int(params.get("polyorder", 3))
+    smoothed = np.asarray(basis, dtype=float).copy()
+    group_array = np.asarray(groups)
+    for group in pd.unique(group_array):
+        idx = np.flatnonzero(group_array == group)
+        width = min(window, len(idx))
+        if width % 2 == 0:
+            width -= 1
+        if width >= polyorder + 2:
+            smoothed[idx, :] = savgol_filter(
+                smoothed[idx, :],
+                width,
+                polyorder,
+                axis=0,
+            )
+    return smoothed
+
+
+def postprocess_basis_matrix(
+    flat: np.ndarray,
+    residual: np.ndarray,
+    config: dict[str, Any],
+    features: pd.DataFrame,
+    blend: dict[str, float] | None,
+) -> np.ndarray:
+    if blend is None:
+        return np.column_stack([flat, residual])
+
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    if not blend_cfg.get("enabled", False):
+        return np.column_stack([flat, residual])
+
+    pf_column = str(blend_cfg.get("pf_column", "kg_pf_ancc_tvt"))
+    required = {"last_known_tvt", "md_from_last_known", pf_column}
+    if not required.issubset(features.columns):
+        return np.column_stack([flat, residual])
+
+    last = features["last_known_tvt"].to_numpy(dtype=float)
+    md_from_last_known = features["md_from_last_known"].to_numpy(dtype=float)
+    pf_tvt = features[pf_column].to_numpy(dtype=float)
+    valid = np.isfinite(last) & np.isfinite(md_from_last_known) & np.isfinite(pf_tvt)
+    if not valid.any():
+        return np.column_stack([flat, residual])
+
+    tau = float(blend.get("tau", 0.0))
+    decay = np.zeros_like(flat, dtype=float)
+    if tau > 0:
+        decay[valid] = 1.0 - np.exp(-np.maximum(md_from_last_known[valid], 0.0) / tau)
+    else:
+        decay[valid] = 1.0
+
+    intercept = np.asarray(flat, dtype=float).copy()
+    residual_outside_valid = np.asarray(residual, dtype=float).copy()
+    model_delta = np.zeros_like(flat, dtype=float)
+    residual_inside_valid = np.zeros_like(flat, dtype=float)
+    pf_delta = np.zeros_like(flat, dtype=float)
+
+    intercept[valid] = last[valid]
+    residual_outside_valid[valid] = 0.0
+    model_delta[valid] = decay[valid] * (flat[valid] - last[valid])
+    residual_inside_valid[valid] = decay[valid] * residual[valid]
+    pf_delta[valid] = decay[valid] * (pf_tvt[valid] - last[valid])
+    return np.column_stack(
+        [
+            intercept,
+            residual_outside_valid,
+            model_delta,
+            residual_inside_valid,
+            pf_delta,
+        ]
+    )
+
+
+def postprocess_coefficients(
+    weight: float,
+    blend: dict[str, float] | None,
+    basis_width: int,
+) -> np.ndarray:
+    if blend is None or basis_width == 2:
+        return np.array([1.0, float(weight)], dtype=float)
+    alpha = float(blend.get("alpha", 1.0))
+    w_pf = float(np.clip(blend.get("w_pf", 0.0), 0.0, 1.0))
+    return np.array(
+        [
+            1.0,
+            float(weight),
+            alpha * (1.0 - w_pf),
+            alpha * float(weight) * (1.0 - w_pf),
+            alpha * w_pf,
+        ],
+        dtype=float,
+    )
+
+
+def smoothing_key(params: dict[str, float] | None) -> tuple[str, int, int]:
+    if params is None:
+        return ("none", 0, 0)
+    return (
+        "savgol",
+        int(params.get("window", 17)),
+        int(params.get("polyorder", 3)),
+    )
+
+
+def blend_basis_key(blend: dict[str, float] | None) -> tuple[str, float]:
+    if blend is None:
+        return ("none", 0.0)
+    return ("notebook", float(blend.get("tau", 0.0)))
+
+
+def postprocess_basis_stats(
+    flat: np.ndarray,
+    residual: np.ndarray,
+    y_true: np.ndarray,
+    config: dict[str, Any],
+    features: pd.DataFrame,
+    groups: np.ndarray,
+    blend: dict[str, float] | None,
+    smoothing: dict[str, float] | None,
+) -> PostprocessBasisStats:
+    basis = postprocess_basis_matrix(flat, residual, config, features, blend)
+    basis = apply_smoothing_to_basis(basis, groups, smoothing)
+    return PostprocessBasisStats(
+        gram=basis.T @ basis,
+        target_dot=basis.T @ y_true,
+        target_norm=float(y_true @ y_true),
+        rows=int(len(y_true)),
+    )
+
+
+def rmse_from_basis_stats(stats: PostprocessBasisStats, coeffs: np.ndarray) -> float:
+    sse = (
+        float(coeffs @ stats.gram @ coeffs)
+        - 2.0 * float(coeffs @ stats.target_dot)
+        + stats.target_norm
+    )
+    return float(np.sqrt(max(sse, 0.0) / max(stats.rows, 1)))
+
+
 def tune_postprocess(
     flat: np.ndarray,
     residual_pred: np.ndarray,
@@ -684,10 +837,20 @@ def tune_postprocess(
     progress_interval = int(
         config["postprocess"].get("progress_interval") or max(1, total_candidates // 20)
     )
+    flat = np.asarray(flat, dtype=float)
+    residual_pred = np.asarray(residual_pred, dtype=float)
+    clip_value = config["postprocess"].get("residual_clip")
+    if clip_value not in (None, ""):
+        residual_pred = np.clip(residual_pred, -float(clip_value), float(clip_value))
+    y_true = np.asarray(y_true, dtype=float)
+
     scores: list[dict[str, float]] = []
     best_score = float("inf")
     best: dict[str, float] | None = None
     started_at = perf_counter()
+    stats_cache: dict[
+        tuple[tuple[str, float], tuple[str, int, int]], PostprocessBasisStats
+    ] = {}
     for candidate_idx, (weight, blend, smoothing) in enumerate(
         product(
             residual_grid,
@@ -697,17 +860,26 @@ def tune_postprocess(
         start=1,
     ):
         weight = float(weight)
-        pred = apply_postprocess(
-            flat,
-            residual_pred,
-            config,
-            residual_weight=weight,
-            features=features,
-            groups=groups,
-            notebook_blend=blend,
-            smoothing=smoothing,
+        basis_key = (blend_basis_key(blend), smoothing_key(smoothing))
+        stats = stats_cache.get(basis_key)
+        if stats is None:
+            stats = postprocess_basis_stats(
+                flat,
+                residual_pred,
+                y_true,
+                config,
+                features,
+                groups,
+                blend,
+                smoothing,
+            )
+            stats_cache[basis_key] = stats
+        coeffs = postprocess_coefficients(
+            weight,
+            blend,
+            len(stats.target_dot),
         )
-        score = {"weight": weight, "rmse": rmse(pred, y_true)}
+        score = {"weight": weight, "rmse": rmse_from_basis_stats(stats, coeffs)}
         if blend is not None:
             score.update({f"blend_{key}": float(value) for key, value in blend.items()})
         if smoothing is not None:
