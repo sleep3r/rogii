@@ -20,6 +20,30 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-18
 
+### Fold-Safe Validation + Run Registry
+
+- Reworked the main trainer so OOF features are built fold-by-fold with
+  `KaggleTopContext` constructed only from train-fold wells.
+- Final artifacts now train separate full-context final models on all train
+  wells after OOF weights/postprocess are selected.
+- `FEATURE_CACHE_SCHEMA_VERSION` bumped to 5; feature cache keys now include the
+  `KaggleTopContext` key, so fold-safe and full-context features cannot collide.
+- Added run diagnostics and `artifacts/runs.csv` registry with global RMSE,
+  per-well RMSE, P90/worst well RMSE, typewell/no-typewell slices, hidden-length
+  slices, selected postprocess, runtime, notes, and optional public LB.
+- Public config additions:
+  - `validation.fold_safe_context: true`;
+  - `validation.final_model_strategy: full_context`;
+  - `runs.registry_path: artifacts/runs.csv`.
+- Validation:
+  - `uv run pytest -q`: 13 passed;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `make quick-train`: 14,151 rows, 384 features, fold-safe OOF+PP RMSE
+    10.04130;
+  - quick artifact inference parity: same ids, no NaN, max_abs_diff 0.0.
+- Full local result: pending; clean caches/artifacts before the next full run.
+
 ### Model Bundle Skill
 
 - Expanded the local `kaggle-research-brief` skill into a model-ready bundle

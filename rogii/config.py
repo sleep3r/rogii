@@ -88,6 +88,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "validation": {
         "n_splits": 5,
+        "fold_safe_context": True,
+        "final_model_strategy": "full_context",
     },
     "postprocess": {
         "residual_weight": 1.0,
@@ -112,6 +114,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "outputs": {
         "output_dir": "artifacts/stack",
         "submission_path": "submission.csv",
+    },
+    "runs": {
+        "registry_path": "artifacts/runs.csv",
     },
 }
 

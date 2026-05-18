@@ -35,6 +35,8 @@ MINE_DB ?= .kaggle_mining/ideas.sqlite
 MINE_WORK_DIR ?= .kaggle_mining/code
 RESEARCH_BRIEF ?= .kaggle_mining/research_brief.md
 MODEL_BUNDLE ?= .kaggle_mining/model_bundle.md
+OVERVIEW_DOC ?= .kaggle_mining/overview.tex
+MANUAL_IDEAS_DOC ?= .kaggle_mining/manual_ideas.md
 COMPETITION_DESC ?= COMPETITION.md
 CODE_MINER ?= $(CODEX_HOME)/skills/kaggle-code-miner/scripts/mine_kaggle_code.py
 DISCUSSION_MINER ?= $(CODEX_HOME)/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py
@@ -107,7 +109,7 @@ research-brief:
 	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --competition-description-file $(COMPETITION_DESC) --max-all-ideas $(BRIEF_MAX_IDEAS)
 
 model-bundle:
-	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --max-all-ideas 0 --max-discussion-ideas 0
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --context-file $(OVERVIEW_DOC) --context-file $(MANUAL_IDEAS_DOC) --max-all-ideas 0 --max-discussion-ideas 0
 
 research-db: mine-code mine-discussions model-bundle
 

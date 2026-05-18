@@ -140,6 +140,8 @@ model:
 
 validation:
   n_splits: 5
+  fold_safe_context: true
+  final_model_strategy: full_context
 
 postprocess:
   residual_weight: 1.0
@@ -160,3 +162,6 @@ postprocess:
 outputs:
   output_dir: artifacts/stack
   submission_path: submission.csv
+
+runs:
+  registry_path: artifacts/runs.csv

@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import csv
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from rogii.constants import FORMATIONS
-from rogii.features import build_target_mask, build_training_table, build_well_features
-from rogii.modeling import apply_postprocess, make_xgboost
-from rogii.spatial import KaggleTopContext
+from rogii.diagnostics import append_run_registry
+from rogii.features import (
+    FEATURE_CACHE_SCHEMA_VERSION,
+    build_target_mask,
+    build_training_table,
+    build_well_features,
+    feature_cache_path,
+)
+from rogii.modeling import (
+    EnsembleRegressor,
+    ResidualModel,
+    apply_postprocess,
+    make_xgboost,
+)
+from rogii.pipeline import assert_fold_context_safe
+from rogii.spatial import KaggleTopContext, context_key_for_paths, context_well_overlap
 from rogii.submission import predict_test
 from rogii.top_signals import downsample_indices, lowres_dtw_signal
 
@@ -241,6 +257,113 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         assert column in wf.features.columns
         values = wf.features.loc[hidden, column].to_numpy(dtype=float)
         assert np.isfinite(values).all()
+
+
+def test_context_key_is_stable_and_changes_with_context_wells(tmp_path) -> None:
+    path_a, _frame_a = write_dwt_synthetic_well(tmp_path, "aaaa1111")
+    path_b, _frame_b = write_dwt_synthetic_well(tmp_path, "bbbb2222")
+    config = dwt_config()
+
+    key_a1 = context_key_for_paths([path_a], config)
+    key_a2 = context_key_for_paths([path_a], config)
+    key_ab = context_key_for_paths([path_a, path_b], config)
+
+    assert key_a1 == key_a2
+    assert key_a1 != key_ab
+
+
+def test_feature_cache_path_includes_context_key(tmp_path) -> None:
+    path_a, _frame_a = write_dwt_synthetic_well(tmp_path, "aaaa1111")
+    path_b, _frame_b = write_dwt_synthetic_well(tmp_path, "bbbb2222")
+    config = dwt_config()
+    config["features"]["cache"] = {"enabled": True, "dir": str(tmp_path / "cache")}
+    key_a = context_key_for_paths([path_a], config)
+    key_ab = context_key_for_paths([path_a, path_b], config)
+
+    cache_a = feature_cache_path(path_a, config, train=True, context_key=key_a)
+    cache_ab = feature_cache_path(path_a, config, train=True, context_key=key_ab)
+
+    assert cache_a is not None
+    assert cache_ab is not None
+    assert cache_a != cache_ab
+
+
+def test_fold_context_excludes_validation_wells(tmp_path) -> None:
+    path_a, _frame_a = write_dwt_synthetic_well(tmp_path, "aaaa1111")
+    path_b, _frame_b = write_dwt_synthetic_well(tmp_path, "bbbb2222")
+    config = dwt_config()
+    context = KaggleTopContext([path_a], config)
+
+    assert not context_well_overlap(context, [path_b])
+    assert_fold_context_safe(context, [path_b], fold_id=1)
+    assert context_well_overlap(context, [path_a]) == {"aaaa1111"}
+    with pytest.raises(RuntimeError, match="validation wells"):
+        assert_fold_context_safe(context, [path_a], fold_id=1)
+
+
+def test_ensemble_predict_uses_final_models() -> None:
+    class ConstantModel(ResidualModel):
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def fit(self, X: pd.DataFrame, y: np.ndarray, **_) -> "ConstantModel":
+            return self
+
+        def predict(self, X: pd.DataFrame) -> np.ndarray:
+            return np.full(len(X), self.value, dtype=float)
+
+    config = {
+        "model": {"base_models": [{"id": "a"}, {"id": "b"}], "blend": {}},
+        "validation": {"n_splits": 2},
+    }
+    model = EnsembleRegressor(config, seed=42)
+    model.base_names = ["a", "b"]
+    model.weights = np.array([0.25, 0.75])
+    model.fold_models = [[ConstantModel(100.0)], [ConstantModel(200.0)]]
+    model.final_models = [ConstantModel(1.0), ConstantModel(3.0)]
+
+    pred = model.predict(pd.DataFrame({"x": [0.0, 1.0]}))
+    assert np.allclose(pred, [2.5, 2.5])
+
+
+def test_run_registry_appends_required_columns(tmp_path) -> None:
+    path = tmp_path / "runs.csv"
+    metrics = {
+        "train": {"rows": 10, "wells": 2},
+        "features": {"count": 5, "schema_version": FEATURE_CACHE_SCHEMA_VERSION},
+        "cv": {
+            "rmse": 1.23,
+            "best_residual_weight": 1.0,
+            "best_notebook_blend": {"alpha": 0.98, "tau": 50.0, "w_pf": 0.05},
+            "best_smoothing": None,
+        },
+        "diagnostics": {
+            "global_rmse": 1.23,
+            "mean_well_rmse": 1.1,
+            "p90_well_rmse": 1.4,
+            "worst_well_rmse": 1.5,
+            "no_typewell_rmse": None,
+            "long_hidden_rmse": 1.2,
+            "short_hidden_rmse": 1.0,
+        },
+    }
+
+    append_run_registry(
+        path,
+        metrics,
+        tmp_path / "config.yml",
+        "test_run",
+        public_lb=None,
+        runtime_seconds=90.0,
+        notes="unit",
+    )
+
+    with path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "test_run"
+    assert rows[0]["schema_version"] == str(FEATURE_CACHE_SCHEMA_VERSION)
+    assert rows[0]["notes"] == "unit"
 
 
 def test_notebook_postprocess_uses_md_from_last_known() -> None:

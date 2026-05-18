@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import product
 from typing import Any
@@ -89,9 +90,11 @@ class EnsembleRegressor(ResidualModel):
         self.seed = seed
         self.base_names: list[str] = []
         self.fold_models: list[list[ResidualModel]] = []
+        self.final_models: list[ResidualModel] = []
         self.weights: np.ndarray | None = None
         self.oof_residual_: np.ndarray | None = None
         self.oof_stack_: np.ndarray | None = None
+        self.final_iteration_overrides_: dict[str, int] = {}
         self.metrics_: dict[str, Any] = {}
 
     def fit(
@@ -201,7 +204,104 @@ class EnsembleRegressor(ResidualModel):
             )
         return self
 
+    def set_oof_results(
+        self,
+        oof_stack: np.ndarray,
+        y: np.ndarray,
+        base_names: list[str],
+        base_metrics: list[dict[str, Any]],
+        iteration_counts: dict[str, list[int]],
+        logger: RunLogger | None = None,
+    ) -> None:
+        self.base_names = list(base_names)
+        self.oof_stack_ = np.asarray(oof_stack, dtype=float)
+        blend_cfg = self.model_config.get("blend") or {}
+        self.weights = fit_hill_climb_weights(
+            self.oof_stack_,
+            y,
+            iterations=int(blend_cfg.get("iterations", 1000)),
+            alpha_grid=blend_cfg.get("alpha_grid"),
+        )
+        self.oof_residual_ = self.oof_stack_ @ self.weights
+        self.final_iteration_overrides_ = {
+            name: int(np.median(values))
+            for name, values in iteration_counts.items()
+            if values
+        }
+
+        for item, weight in zip(base_metrics, self.weights, strict=True):
+            item["weight"] = float(weight)
+            override = self.final_iteration_overrides_.get(str(item["name"]))
+            if override is not None:
+                item["final_iterations"] = int(override)
+
+        self.metrics_ = {
+            "type": "ensemble",
+            "n_splits": int(
+                max(
+                    (len(item.get("fold_rmse", [])) for item in base_metrics), default=0
+                )
+            ),
+            "base_models": base_metrics,
+            "blend_method": "hill_climb",
+            "blend_weights": dict(
+                zip(self.base_names, [float(w) for w in self.weights], strict=True)
+            ),
+            "final_iteration_overrides": self.final_iteration_overrides_,
+            "oof_rmse": rmse(self.oof_residual_, y),
+        }
+        if logger is not None:
+            logger.metric(
+                "OOF ensemble RMSE",
+                rmse=self.metrics_["oof_rmse"],
+                nonzero_weights=int(np.sum(self.weights > 1e-9)),
+            )
+
+    def fit_final(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        logger: RunLogger | None = None,
+    ) -> "EnsembleRegressor":
+        if self.weights is None or not self.base_names:
+            raise RuntimeError("OOF blend weights must be fitted before final models.")
+
+        base_specs = self.model_config.get("base_models") or []
+        self.final_models = []
+        y = np.asarray(y, dtype=float)
+        for model_idx, spec in enumerate(base_specs):
+            name = model_spec_name(spec, model_idx)
+            final_spec = final_model_spec(
+                spec,
+                self.final_iteration_overrides_.get(name),
+            )
+            model = make_single_model(
+                final_spec,
+                self.seed + 10_000 + 1000 * (model_idx + 1),
+            )
+            context = (
+                logger.step(
+                    "Final model",
+                    model=name,
+                    rows=len(X),
+                    features=len(X.columns),
+                    iterations=self.final_iteration_overrides_.get(name),
+                )
+                if logger is not None
+                else nullcontext()
+            )
+            with context:
+                model.fit(X, y)
+            self.final_models.append(model)
+        self.metrics_["final_models"] = {
+            "count": len(self.final_models),
+            "strategy": "full_context",
+        }
+        return self
+
     def predict_base_stack(self, X: pd.DataFrame) -> np.ndarray:
+        if self.final_models:
+            return np.vstack([model.predict(X) for model in self.final_models]).T
         if not self.fold_models:
             raise RuntimeError("EnsembleRegressor is not fitted.")
         columns = []
@@ -358,6 +458,45 @@ def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:
     if name in {"catboost", "cat"}:
         return make_catboost(params, seed)
     raise ValueError(f"Unsupported base model: {name!r}.")
+
+
+def fitted_iteration_count(model: ResidualModel, model_name: str) -> int | None:
+    estimator = getattr(model, "estimator", None)
+    if estimator is None:
+        return None
+
+    tree_count = getattr(estimator, "tree_count_", None)
+    if tree_count not in (None, ""):
+        count = int(tree_count)
+        return count if count > 0 else None
+
+    if model_name in {"lightgbm", "lgbm", "lgb"}:
+        best_iteration = getattr(estimator, "best_iteration_", None)
+        if best_iteration not in (None, ""):
+            count = int(best_iteration)
+            return count if count > 0 else None
+
+    best_iteration = getattr(estimator, "best_iteration", None)
+    if best_iteration not in (None, ""):
+        count = int(best_iteration) + 1
+        return count if count > 0 else None
+    return None
+
+
+def final_model_spec(
+    spec: dict[str, Any], iteration_count: int | None
+) -> dict[str, Any]:
+    final_spec = deepcopy(spec)
+    params = dict(final_spec.get("params") or {})
+    params.pop("early_stopping_rounds", None)
+    name = str(final_spec.get("name", "lightgbm")).lower()
+    if iteration_count is not None and iteration_count > 0:
+        if name in {"catboost", "cat"}:
+            params["iterations"] = int(iteration_count)
+        else:
+            params["n_estimators"] = int(iteration_count)
+    final_spec["params"] = params
+    return final_spec
 
 
 def rmse(y_pred: np.ndarray, y_true: np.ndarray) -> float:

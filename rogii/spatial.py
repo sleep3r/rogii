@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +13,36 @@ from .constants import FORMATIONS
 from .io import well_name
 
 
+def context_key_for_paths(train_paths: list[Path], config: dict[str, Any]) -> str:
+    path_stats = []
+    for path in sorted(train_paths, key=well_name):
+        path_stats.append(
+            {
+                "well": well_name(path),
+                "name": path.name,
+                "size": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            }
+        )
+    payload = {
+        "wells": path_stats,
+        "kaggle_top": config.get("features", {}).get("kaggle_top", {}),
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()[:16]
+
+
+def context_well_overlap(context: "KaggleTopContext", paths: list[Path]) -> set[str]:
+    return set(context.context_wells).intersection(well_name(path) for path in paths)
+
+
 class KaggleTopContext:
     """Spatial priors inspired by the current public Kaggle top notebooks."""
 
     def __init__(self, train_paths: list[Path], config: dict[str, Any]) -> None:
         top_cfg = config["features"].get("kaggle_top", {})
+        self.context_wells = frozenset(well_name(path) for path in train_paths)
+        self.context_key = context_key_for_paths(train_paths, config)
         self.spatial_k = int(top_cfg.get("spatial_k", 10))
         self.dense_k = int(top_cfg.get("dense_k", 20))
         self.dense_fetch = int(top_cfg.get("dense_fetch", 5000))

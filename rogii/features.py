@@ -24,7 +24,7 @@ from .runlog import RunLogger
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
-FEATURE_CACHE_SCHEMA_VERSION = 4
+FEATURE_CACHE_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,7 @@ def feature_cache_path(
     horizontal_path: Path,
     config: dict[str, Any],
     train: bool,
+    context_key: str | None = None,
 ) -> Path | None:
     cache_cfg = config["features"].get("cache") or {}
     if not cache_cfg.get("enabled", False):
@@ -70,6 +71,7 @@ def feature_cache_path(
         },
         "typewell": None,
         "train": bool(train),
+        "context_key": context_key,
         "features": config.get("features", {}),
         "target_rows": config.get("data", {}).get("target_rows", "hidden_only"),
     }
@@ -172,7 +174,8 @@ def build_well_features(
     top_context: KaggleTopContext | None = None,
     logger: RunLogger | None = None,
 ) -> WellFeatures:
-    cache_path = feature_cache_path(horizontal_path, config, train)
+    context_key = getattr(top_context, "context_key", None)
+    cache_path = feature_cache_path(horizontal_path, config, train, context_key)
     if cache_path is not None and cache_path.is_file():
         try:
             with cache_path.open("rb") as file:
