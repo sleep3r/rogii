@@ -37,14 +37,17 @@ run here with command, data, CV, LB, runtime, and the next decision.
   - nonzero blend weights: `cat_lr025=0.3900`, `cat_lr020=0.1307`,
     `cat_lr030=0.2434`, `lgb_lr025=0.2359`.
 - Runtime: 7h08m local. Postprocess grid alone took 1h44m for 4,608 candidates.
-- Kaggle result: not submitted.
+- Kaggle result: public LB 9.946, submission ref `52780788`, submitted from
+  inference-only Kaggle kernel `sleep3r/rogii-global-stack-infer` version 2.
 - Important caveat: this is a **global-context / leaky OOF** anchor. Validation
   features were built with `KaggleTopContext` containing validation wells, and
   the old pipeline predicted test from averaged fold models rather than final
   full-context models trained on all rows.
 - Takeaway: the DWT-style feature table is in the right family, close to the
-  public DWT notebook's reported single-model OOF range, but this number is not
-  an honest CV target. Use it only as a pre-fix reference.
+  public DWT notebook's reported single-model OOF range. Public LB improved from
+  the old HGB anchor 12.803 to 9.946, but the local OOF is still not an honest
+  CV target. Use this run as the current public-LB anchor, not as validation
+  truth.
 - Next: rerun clean schema v5 fold-safe full training after clearing
   `artifacts/feature_cache` and `artifacts/stack`.
 
