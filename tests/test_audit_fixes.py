@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from rogii.best_public_solution import Source, claimed_score, select_best_source
 from rogii.constants import FORMATIONS
 from rogii.diagnostics import append_run_registry
 from rogii.features import (
@@ -16,6 +17,7 @@ from rogii.features import (
     build_well_features,
     feature_cache_path,
 )
+from rogii.filter_model_bundle import filter_lines
 from rogii.modeling import (
     EnsembleRegressor,
     ResidualModel,
@@ -47,6 +49,26 @@ def minimal_config() -> dict:
             "smoothing": {"enabled": False},
         },
     }
+
+
+def test_best_public_solution_score_selection() -> None:
+    assert claimed_score("9.251 ROGII-Wellbore Geology Prediction: DWT-based") == 9.251
+    assert claimed_score("LB-9.830: ROGII - LGB+XGB") == 9.830
+    assert claimed_score("[ROGII] SUPER SOLUTION |LB: TOP 3") is None
+
+    selected = select_best_source(
+        [
+            Source("a/lb-9-830", "LB-9.830", "A", "", 30, "", 9.830),
+            Source("b/9-251", "9.251 DWT", "B", "", 12, "", 9.251),
+            Source("c/9-251-more-votes", "9.251 DWT fork", "C", "", 40, "", 9.251),
+        ]
+    )
+    assert selected.source_ref == "c/9-251-more-votes"
+
+
+def test_filter_model_bundle_removes_excluded_lines() -> None:
+    text = "keep\n M tests/test_audit_fixes.py\nalso keep\n- tests/foo.py\n"
+    assert filter_lines(text, ["tests/"]) == "keep\nalso keep\n"
 
 
 def write_dwt_synthetic_well(tmp_path, name: str = "abc12345") -> tuple:

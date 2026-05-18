@@ -144,11 +144,19 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Expanded the local `kaggle-research-brief` skill into a model-ready bundle
   builder.
 - Added `COMPETITION.md` as the canonical local competition description.
+- Added generated best-public-solution context:
+  - `make best-public-solution` writes
+    `.kaggle_mining/best_public_solution.md`;
+  - selection rule: lowest score-looking value in mined public notebook
+    title/slug, with votes as tie-breaker;
+  - the document includes source metadata, extracted idea rows, a code inventory,
+    a paraphrased implementation shape, and high-claim alternative notebooks.
 - New `make model-bundle` target writes `.kaggle_mining/model_bundle.md` with:
   - competition description;
   - `CHANGELOG.md`;
   - mined public code ideas;
   - mined discussion ideas;
+  - best open public solution context;
   - repo git state, configs, metrics, package map, and solution code snapshot.
 - `make research-db` now refreshes mining inputs and builds the full model
   bundle.

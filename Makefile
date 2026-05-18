@@ -42,9 +42,9 @@ MINE_DB ?= .kaggle_mining/ideas.sqlite
 MINE_WORK_DIR ?= .kaggle_mining/code
 RESEARCH_BRIEF ?= .kaggle_mining/research_brief.md
 MODEL_BUNDLE ?= .kaggle_mining/model_bundle.md
-OVERVIEW_DOC ?= .kaggle_mining/overview.tex
 MANUAL_IDEAS_DOC ?= .kaggle_mining/manual_ideas.md
 PROFILE_DOC ?= PROFILING.md
+BEST_PUBLIC_SOLUTION_DOC ?= .kaggle_mining/best_public_solution.md
 COMPETITION_DESC ?= COMPETITION.md
 CODE_MINER ?= $(CODEX_HOME)/skills/kaggle-code-miner/scripts/mine_kaggle_code.py
 DISCUSSION_MINER ?= $(CODEX_HOME)/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py
@@ -54,8 +54,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/quick.yml rogii/config.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py
+BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
+BUNDLE_EXCLUDE ?= tests/
+BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -130,8 +134,12 @@ mine-discussions:
 research-brief:
 	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --competition-description-file $(COMPETITION_DESC) --max-all-ideas $(BRIEF_MAX_IDEAS)
 
-model-bundle:
-	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --context-file $(OVERVIEW_DOC) --context-file $(MANUAL_IDEAS_DOC) --context-file $(PROFILE_DOC) --max-all-ideas 0 --max-discussion-ideas 0
+best-public-solution:
+	$(PYTHON) -m rogii.best_public_solution --db $(MINE_DB) --work-dir .kaggle_mining --output $(BEST_PUBLIC_SOLUTION_DOC)
+
+model-bundle: best-public-solution
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --context-file $(MANUAL_IDEAS_DOC) --context-file $(PROFILE_DOC) --context-file $(BEST_PUBLIC_SOLUTION_DOC) $(BUNDLE_SOLUTION_ARGS) --max-all-ideas 0 --max-discussion-ideas 0
+	$(PYTHON) -m rogii.filter_model_bundle --path $(MODEL_BUNDLE) $(BUNDLE_EXCLUDE_ARGS)
 
 research-db: mine-code mine-discussions model-bundle
 
