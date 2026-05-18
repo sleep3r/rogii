@@ -148,10 +148,13 @@ Public notebook/discussion mining lives outside the model path:
 ```bash
 make mine-code
 make mine-discussions
-make research-brief
+make model-bundle
 ```
 
-The generated brief is written to `.kaggle_mining/research_brief.md`.
+The generated model bundle is written to `.kaggle_mining/model_bundle.md`.
+It includes `COMPETITION.md`, `CHANGELOG.md`, mined public notebooks,
+discussion-derived ideas, current configs, metrics, and the current solution
+code snapshot.
 
 ## Checks
 

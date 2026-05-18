@@ -34,6 +34,8 @@ CODEX_HOME ?= $(HOME)/.codex
 MINE_DB ?= .kaggle_mining/ideas.sqlite
 MINE_WORK_DIR ?= .kaggle_mining/code
 RESEARCH_BRIEF ?= .kaggle_mining/research_brief.md
+MODEL_BUNDLE ?= .kaggle_mining/model_bundle.md
+COMPETITION_DESC ?= COMPETITION.md
 CODE_MINER ?= $(CODEX_HOME)/skills/kaggle-code-miner/scripts/mine_kaggle_code.py
 DISCUSSION_MINER ?= $(CODEX_HOME)/skills/kaggle-discussion-miner/scripts/mine_kaggle_discussions.py
 BRIEF_BUILDER ?= $(CODEX_HOME)/skills/kaggle-research-brief/scripts/build_research_brief.py
@@ -43,7 +45,7 @@ DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
 
-.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -102,9 +104,12 @@ mine-discussions:
 	$(PYTHON) $(DISCUSSION_MINER) --competition $(COMPETITION) --db $(MINE_DB) --source mcp --pages $(DISCUSSION_PAGES) --sort-by $(DISCUSSION_SORT) --message-page-size $(DISCUSSION_MESSAGE_PAGE_SIZE)
 
 research-brief:
-	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --max-all-ideas $(BRIEF_MAX_IDEAS)
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(RESEARCH_BRIEF) --competition-description-file $(COMPETITION_DESC) --max-all-ideas $(BRIEF_MAX_IDEAS)
 
-research-db: mine-code mine-discussions research-brief
+model-bundle:
+	$(PYTHON) $(BRIEF_BUILDER) --db $(MINE_DB) --repo . --output $(MODEL_BUNDLE) --competition-description-file $(COMPETITION_DESC) --max-all-ideas 0 --max-discussion-ideas 0
+
+research-db: mine-code mine-discussions model-bundle
 
 format:
 	$(PYTHON) -m ruff check --fix --select I .

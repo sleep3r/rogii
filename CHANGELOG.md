@@ -20,6 +20,21 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-18
 
+### Model Bundle Skill
+
+- Expanded the local `kaggle-research-brief` skill into a model-ready bundle
+  builder.
+- Added `COMPETITION.md` as the canonical local competition description.
+- New `make model-bundle` target writes `.kaggle_mining/model_bundle.md` with:
+  - competition description;
+  - `CHANGELOG.md`;
+  - mined public code ideas;
+  - mined discussion ideas;
+  - repo git state, configs, metrics, package map, and solution code snapshot.
+- `make research-db` now refreshes mining inputs and builds the full model
+  bundle.
+- Result: pending first generated bundle after the current mining DB is present.
+
 ### DWT-Repro Data Baseline
 
 - Implemented the public DWT-notebook data approach as the main `stack.yml`
