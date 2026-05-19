@@ -19,6 +19,7 @@ from rogii.clearml_tracking import apply_clearml_overrides
 from rogii.config import DEFAULT_CONFIG
 from rogii.constants import FORMATIONS
 from rogii.features import (
+    _build_well_features_single_layer,
     build_target_mask,
     build_training_table,
     build_well_features,
@@ -590,6 +591,31 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         assert column in wf.features.columns
         values = wf.features.loc[hidden, column].to_numpy(dtype=float)
         assert np.isfinite(values).all()
+
+
+def test_split_context_features_match_full_builder_on_hidden_rows(tmp_path) -> None:
+    path, _frame = write_dwt_synthetic_well(tmp_path)
+    config = dwt_config()
+    config["features"]["cache"] = {"enabled": False}
+    context = KaggleTopContext([path], config)
+
+    split = build_well_features(path, config, train=True, top_context=context)
+    full = _build_well_features_single_layer(
+        path,
+        config,
+        train=True,
+        top_context=context,
+        cache_layer="full",
+    )
+    hidden = full.target_mask
+
+    assert set(split.features.columns) == set(full.features.columns)
+    for column in full.features.columns:
+        assert np.allclose(
+            split.features.loc[hidden, column].to_numpy(dtype=float),
+            full.features.loc[hidden, column].to_numpy(dtype=float),
+            equal_nan=True,
+        )
 
 
 def test_context_key_is_stable_and_changes_with_context_wells(tmp_path) -> None:

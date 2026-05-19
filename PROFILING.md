@@ -179,11 +179,16 @@ Top self-time functions:
        `impute_dense_ancc = 0.084s`;
      - table-build speedup: `7.0x`;
      - dense ANCC speedup: `98.5x`.
-   - Stack feature-prep profile, fold 1 train context, 25 wells, cache off:
+  - Stack feature-prep profile, fold 1 train context, 25 wells, cache off:
      `Profile feature table = 10.69s`, `117,140` rows, `415` features.
      The matching server symptom before this fix was `25/618` wells in `03:18`,
      so rerun server logs should show whether the remote bottleneck was the
      same dense-neighbor fetch path.
+   - After split-cache and 8 worker processes, the same 25-well profile with
+     `CONFIG=configs/stack_gpu.yml FEATURE_PROFILE_STAGE=false` built `117,140`
+     rows / `415` features in `4.59s` (`25,529 rows/sec`). This is a `2.3x`
+     table-build speedup over the post-dense-optimization serial profile, and
+     about `43x` faster than the original server symptom.
    - New spatial stage logs on the same after-profile:
      `top.spatial.formations = 0.014-0.017s/well`,
      `top.spatial.dense = 0.024-0.033s/well`,

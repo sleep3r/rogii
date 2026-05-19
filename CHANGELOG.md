@@ -39,6 +39,13 @@ run here with command, data, CV, LB, runtime, and the next decision.
   and final rows/sec.
 - Added tests for split cache keys, serial/parallel feature parity, and worker
   error reporting with well name.
+- Validation:
+  - `uv run pytest -q`: 31 passed;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `make quick-train`: passed, 14,151 rows, 380 features, OOF+PP RMSE 10.05721;
+  - `make profile-features PROFILE_NAME=features_stack_gpu25_split_workers CONFIG=configs/stack_gpu.yml FEATURE_PROFILE_WELLS=25 FEATURE_PROFILE_STAGE=false`:
+    25 wells, 117,140 rows, 415 features in 4.59s.
 - Rust remains deferred until the next profiling pass shows a stable kernel-level
   bottleneck after split-cache and workers.
 
