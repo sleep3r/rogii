@@ -100,7 +100,7 @@ model:
         reg_lambda: 3.0
 
 validation:
-  final_model_strategy: fold_average
+  final_model_strategy: full_context
 
 postprocess:
   notebook_blend:

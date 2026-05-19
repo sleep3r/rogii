@@ -20,6 +20,29 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Fold-Average Submit A/B
+
+- Submitted the ClearML task `4294380230f645feb4a2189cdd7beeb8`
+  (`rogii-stack_gpu-run_20260519_155906`) through the inference-only Kaggle
+  path.
+- First attempt produced Kaggle kernel version 5 but failed because the
+  ClearML artifact `config.yml` had `data.clearml.enabled: true`; the Kaggle
+  notebook already has competition data mounted and does not install ClearML.
+- Fixed `rogii.inference`: an explicit `--data-dir` now disables
+  `data.clearml.enabled` before dataset preparation, so Kaggle inference never
+  tries to import ClearML when competition data is supplied directly.
+- Retried as Kaggle kernel version 6:
+  - output downloaded and validated locally;
+  - `submission.csv` has 14,151 rows;
+  - public LB: `9.952`.
+- A/B result:
+  - version 4 full-context baseline: `9.945`;
+  - version 6 fold-average artifact: `9.952`.
+- Takeaway: fold averaging is not worth making the default. The delta is small
+  but worse, and the train/inference context mismatch remains conceptually
+  ugly. `configs/stack_gpu.yml` is back to
+  `validation.final_model_strategy: full_context`.
+
 ### Public DWT Feature Schema Parity
 
 - Compared the local feature builder against the visible Roman/Ravaghi/DWT
