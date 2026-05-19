@@ -31,6 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tail_windows": [25, 100, 250],
         "rolling_windows": [5, 25, 101],
         "prediction_baseline": "last_known_tvt",
+        "num_workers": 1,
         "progress_interval": 25,
         "cache": {
             "enabled": False,

@@ -621,6 +621,88 @@ def test_feature_cache_path_includes_context_key(tmp_path) -> None:
     assert cache_a != cache_ab
 
 
+def test_split_feature_cache_layers_handle_context_key(tmp_path) -> None:
+    path_a, _frame_a = write_dwt_synthetic_well(tmp_path, "aaaa1111")
+    path_b, _frame_b = write_dwt_synthetic_well(tmp_path, "bbbb2222")
+    config = dwt_config()
+    config["features"]["cache"] = {"enabled": True, "dir": str(tmp_path / "cache")}
+    key_a = context_key_for_paths([path_a], config)
+    key_ab = context_key_for_paths([path_a, path_b], config)
+
+    free_a = feature_cache_path(
+        path_a, config, train=True, context_key=key_a, layer="context_free"
+    )
+    free_ab = feature_cache_path(
+        path_a, config, train=True, context_key=key_ab, layer="context_free"
+    )
+    context_a = feature_cache_path(
+        path_a, config, train=True, context_key=key_a, layer="context"
+    )
+    context_ab = feature_cache_path(
+        path_a, config, train=True, context_key=key_ab, layer="context"
+    )
+    worker_config = dwt_config()
+    worker_config["features"]["cache"] = config["features"]["cache"]
+    worker_config["features"]["num_workers"] = 8
+    free_worker = feature_cache_path(
+        path_a, worker_config, train=True, context_key=key_ab, layer="context_free"
+    )
+
+    assert free_a is not None
+    assert free_ab is not None
+    assert free_worker is not None
+    assert context_a is not None
+    assert context_ab is not None
+    assert free_a == free_ab
+    assert free_a == free_worker
+    assert context_a != context_ab
+
+
+def test_parallel_feature_build_matches_serial_order_and_values(tmp_path) -> None:
+    paths = [
+        write_dwt_synthetic_well(tmp_path, "aaaa1111")[0],
+        write_dwt_synthetic_well(tmp_path, "bbbb2222")[0],
+        write_dwt_synthetic_well(tmp_path, "cccc3333")[0],
+    ]
+    serial_config = dwt_config()
+    parallel_config = dwt_config()
+    serial_config["features"]["cache"] = {"enabled": False}
+    parallel_config["features"]["cache"] = {"enabled": False}
+    serial_config["features"]["num_workers"] = 1
+    parallel_config["features"]["num_workers"] = 2
+    serial_context = KaggleTopContext(paths, serial_config)
+    parallel_context = KaggleTopContext(paths, parallel_config)
+
+    X1, residual1, groups1, flat1, y_true1 = build_training_table(
+        paths,
+        serial_config,
+        serial_context,
+    )
+    X2, residual2, groups2, flat2, y_true2 = build_training_table(
+        paths,
+        parallel_config,
+        parallel_context,
+    )
+
+    assert X1.columns.tolist() == X2.columns.tolist()
+    assert groups1.tolist() == groups2.tolist()
+    assert np.allclose(
+        X1.to_numpy(dtype=float), X2.to_numpy(dtype=float), equal_nan=True
+    )
+    assert np.allclose(residual1, residual2)
+    assert np.allclose(flat1, flat2)
+    assert np.allclose(y_true1, y_true2)
+
+
+def test_parallel_feature_worker_reports_well_name_on_error(tmp_path) -> None:
+    bad_path = tmp_path / "badwell1__horizontal_well.csv"
+    config = minimal_config()
+    config["features"]["num_workers"] = 2
+
+    with pytest.raises(RuntimeError, match="badwell1"):
+        build_training_table([bad_path], config)
+
+
 def test_fold_context_excludes_validation_wells(tmp_path) -> None:
     path_a, _frame_a = write_dwt_synthetic_well(tmp_path, "aaaa1111")
     path_b, _frame_b = write_dwt_synthetic_well(tmp_path, "bbbb2222")

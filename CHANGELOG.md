@@ -20,6 +20,28 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Split-Cache + Parallel Feature Preparation
+
+- Bumped `FEATURE_CACHE_SCHEMA_VERSION` to 8.
+- Split feature caching into two layers:
+  - `context_free` caches geometry/GR/typewell/alignment/PF/offset features once
+    per well and ignores `KaggleTopContext.context_key`;
+  - `context` caches fold/full-context spatial formation, dense ANCC, and
+    context-aware aggregate signal columns with `context_key` included.
+- Added `features.num_workers`:
+  - default/config `stack.yml` and `quick.yml`: `1` for deterministic local
+    debugging;
+  - `configs/stack_gpu.yml`: `8` for server/GPU runs.
+- Added process-based per-well feature preparation. Completed worker outputs are
+  sorted by original path order before concatenation, so row order stays
+  deterministic.
+- Feature table logs now report workers, cache layers, context key, rows/sec,
+  and final rows/sec.
+- Added tests for split cache keys, serial/parallel feature parity, and worker
+  error reporting with well name.
+- Rust remains deferred until the next profiling pass shows a stable kernel-level
+  bottleneck after split-cache and workers.
+
 ### Spacebridge + ClearML Server Training Pass
 
 - Added top-level experiment destination config:

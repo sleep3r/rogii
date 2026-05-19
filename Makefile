@@ -22,6 +22,8 @@ FEATURE_PROFILE_FOLD ?= 1
 FEATURE_PROFILE_CONTEXT ?= fold-train
 FEATURE_PROFILE_DISABLE_CACHE ?= true
 FEATURE_PROFILE_CACHE_ARG := $(if $(filter true 1 yes,$(FEATURE_PROFILE_DISABLE_CACHE)),--disable-cache,)
+FEATURE_PROFILE_STAGE ?= true
+FEATURE_PROFILE_STAGE_ARG := $(if $(filter false 0 no,$(FEATURE_PROFILE_STAGE)),--no-stage-profile,)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -137,7 +139,7 @@ profile-train:
 
 profile-features: ensure-data
 	mkdir -p $(PROFILE_DIR)
-	set -o pipefail; $(PYTHON) -m cProfile -o $(PROFILE_FILE) -m rogii.feature_profile --config $(CONFIG) --max-wells $(FEATURE_PROFILE_WELLS) --fold-id $(FEATURE_PROFILE_FOLD) --context $(FEATURE_PROFILE_CONTEXT) $(FEATURE_PROFILE_CACHE_ARG) 2>&1 | tee $(PROFILE_LOG)
+	set -o pipefail; $(PYTHON) -m cProfile -o $(PROFILE_FILE) -m rogii.feature_profile --config $(CONFIG) --max-wells $(FEATURE_PROFILE_WELLS) --fold-id $(FEATURE_PROFILE_FOLD) --context $(FEATURE_PROFILE_CONTEXT) $(FEATURE_PROFILE_CACHE_ARG) $(FEATURE_PROFILE_STAGE_ARG) 2>&1 | tee $(PROFILE_LOG)
 	$(PYTHON) -m rogii.profile_report --profile $(PROFILE_FILE) --log $(PROFILE_LOG) --output $(PROFILE_REPORT) --limit $(PROFILE_REPORT_LIMIT) --title "ROGII feature profile: $(PROFILE_NAME)"
 
 profile-report:

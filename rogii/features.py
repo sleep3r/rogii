@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -23,9 +24,15 @@ from .numeric import (
 )
 from .runlog import RunLogger, format_duration
 from .spatial import KaggleTopContext
-from .top_signals import build_kaggle_top_signal_features
+from .top_signals import (
+    build_kaggle_context_signal_features,
+    build_kaggle_top_signal_features,
+)
 
-FEATURE_CACHE_SCHEMA_VERSION = 7
+FEATURE_CACHE_SCHEMA_VERSION = 8
+
+_WORKER_CONFIG: dict[str, Any] | None = None
+_WORKER_TOP_CONTEXT: KaggleTopContext | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,82 @@ class WellFeatures:
     flat_prediction: np.ndarray
     target: np.ndarray | None
     target_mask: np.ndarray
+
+
+@dataclass(frozen=True)
+class WellTablePart:
+    index: int
+    well: str
+    features: pd.DataFrame | None
+    residual: np.ndarray
+    groups: np.ndarray
+    flat: np.ndarray
+    y_true: np.ndarray
+
+    @property
+    def rows(self) -> int:
+        return int(len(self.residual))
+
+
+def _well_features_to_part(index: int, wf: WellFeatures) -> WellTablePart:
+    mask = wf.target_mask
+    if wf.target is None or not mask.any():
+        empty = np.empty(0, dtype="float32")
+        return WellTablePart(
+            index=index,
+            well=wf.well,
+            features=None,
+            residual=empty,
+            groups=np.empty(0, dtype=object),
+            flat=empty,
+            y_true=empty,
+        )
+    true_values = wf.target[mask]
+    flat_values = wf.flat_prediction[mask]
+    return WellTablePart(
+        index=index,
+        well=wf.well,
+        features=wf.features.loc[mask].astype("float32"),
+        residual=(true_values - flat_values).astype("float32"),
+        groups=np.full(mask.sum(), wf.well),
+        flat=flat_values.astype("float32"),
+        y_true=true_values.astype("float32"),
+    )
+
+
+def _init_feature_worker(
+    config: dict[str, Any],
+    top_context: KaggleTopContext | None,
+) -> None:
+    global _WORKER_CONFIG, _WORKER_TOP_CONTEXT
+    _WORKER_CONFIG = config
+    _WORKER_TOP_CONTEXT = top_context
+
+
+def _build_well_features_worker(index: int, path_text: str) -> WellTablePart:
+    if _WORKER_CONFIG is None:
+        raise RuntimeError("Feature worker config is not initialized")
+    path = Path(path_text)
+    try:
+        wf = build_well_features(
+            path,
+            _WORKER_CONFIG,
+            train=True,
+            top_context=_WORKER_TOP_CONTEXT,
+            logger=None,
+        )
+        return _well_features_to_part(index, wf)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to build features for well {well_name(path)}"
+        ) from exc
+
+
+def _cache_relevant_features(config: dict[str, Any]) -> dict[str, Any]:
+    features = dict(config.get("features", {}))
+    for runtime_key in ("cache", "progress_interval", "num_workers", "profile_stages"):
+        features.pop(runtime_key, None)
+    return features
 
 
 def choose_prediction_baseline(
@@ -57,6 +140,7 @@ def feature_cache_path(
     config: dict[str, Any],
     train: bool,
     context_key: str | None = None,
+    layer: str = "full",
 ) -> Path | None:
     cache_cfg = config["features"].get("cache") or {}
     if not cache_cfg.get("enabled", False):
@@ -72,8 +156,9 @@ def feature_cache_path(
         },
         "typewell": None,
         "train": bool(train),
-        "context_key": context_key,
-        "features": config.get("features", {}),
+        "layer": layer,
+        "context_key": None if layer == "context_free" else context_key,
+        "features": _cache_relevant_features(config),
         "target_rows": config.get("data", {}).get("target_rows", "hidden_only"),
     }
     if type_path is not None:
@@ -168,15 +253,22 @@ def build_target_mask(df: pd.DataFrame, target_rows: str) -> np.ndarray:
     return has_target & hidden
 
 
-def build_well_features(
+def _build_well_features_single_layer(
     horizontal_path: Path,
     config: dict[str, Any],
     train: bool,
     top_context: KaggleTopContext | None = None,
     logger: RunLogger | None = None,
+    cache_layer: str = "full",
 ) -> WellFeatures:
     context_key = getattr(top_context, "context_key", None)
-    cache_path = feature_cache_path(horizontal_path, config, train, context_key)
+    cache_path = feature_cache_path(
+        horizontal_path,
+        config,
+        train,
+        context_key,
+        layer=cache_layer,
+    )
     profile_stages = bool(config["features"].get("profile_stages", False))
     if cache_path is not None and cache_path.is_file():
         try:
@@ -444,6 +536,133 @@ def build_well_features(
     return well_features
 
 
+def _context_feature_cache_path(
+    horizontal_path: Path,
+    config: dict[str, Any],
+    train: bool,
+    top_context: KaggleTopContext,
+) -> Path | None:
+    return feature_cache_path(
+        horizontal_path,
+        config,
+        train,
+        getattr(top_context, "context_key", None),
+        layer="context",
+    )
+
+
+def _build_context_feature_frame(
+    horizontal_path: Path,
+    config: dict[str, Any],
+    train: bool,
+    top_context: KaggleTopContext,
+    base_features: pd.DataFrame,
+    logger: RunLogger | None = None,
+) -> pd.DataFrame:
+    cache_path = _context_feature_cache_path(
+        horizontal_path, config, train, top_context
+    )
+    if cache_path is not None and cache_path.is_file():
+        try:
+            with cache_path.open("rb") as file:
+                cached = pickle.load(file)
+            if isinstance(cached, pd.DataFrame):
+                return cached
+        except Exception as exc:
+            if logger is not None:
+                logger.warn(
+                    "Ignoring context feature cache", path=cache_path, error=exc
+                )
+
+    df = pd.read_csv(horizontal_path)
+    n = len(df)
+    md = as_float_array(df.get("MD", pd.Series(np.arange(n))))
+    x = as_float_array(df.get("X", pd.Series(np.zeros(n))))
+    y = as_float_array(df.get("Y", pd.Series(np.zeros(n))))
+    z = as_float_array(df.get("Z", pd.Series(np.zeros(n))))
+    gr = as_float_array(df.get("GR", pd.Series(np.zeros(n))), default=np.nan)
+    tvt_input = as_float_array(
+        df.get("TVT_input", pd.Series(np.full(n, np.nan))), default=np.nan
+    )
+    flat_pred = base_features["flat_tvt"].to_numpy(dtype=float)
+    context_features = build_kaggle_context_signal_features(
+        df,
+        horizontal_path,
+        top_context,
+        md,
+        x,
+        y,
+        z,
+        gr,
+        tvt_input,
+        flat_pred,
+        config,
+        train,
+        base_features,
+        logger,
+    )
+    feature_frame = pd.DataFrame(context_features).replace([np.inf, -np.inf], np.nan)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as file:
+            pickle.dump(feature_frame, file)
+    return feature_frame
+
+
+def build_well_features(
+    horizontal_path: Path,
+    config: dict[str, Any],
+    train: bool,
+    top_context: KaggleTopContext | None = None,
+    logger: RunLogger | None = None,
+) -> WellFeatures:
+    include_top = config["features"].get("include_kaggle_top_signals", False)
+    if not include_top:
+        return _build_well_features_single_layer(
+            horizontal_path,
+            config,
+            train,
+            top_context=None,
+            logger=logger,
+            cache_layer="context_free",
+        )
+
+    base = _build_well_features_single_layer(
+        horizontal_path,
+        config,
+        train,
+        top_context=None,
+        logger=logger,
+        cache_layer="context_free",
+    )
+    if top_context is None:
+        return base
+
+    context_frame = _build_context_feature_frame(
+        horizontal_path,
+        config,
+        train,
+        top_context,
+        base.features,
+        logger,
+    )
+    if context_frame.empty:
+        return base
+    merged_columns = {
+        column: base.features[column].to_numpy() for column in base.features.columns
+    }
+    for column in context_frame.columns:
+        merged_columns[column] = context_frame[column].to_numpy()
+    merged = pd.DataFrame(merged_columns, index=base.features.index)
+    return WellFeatures(
+        well=base.well,
+        features=merged,
+        flat_prediction=base.flat_prediction,
+        target=base.target,
+        target_mask=base.target_mask,
+    )
+
+
 def build_training_table(
     paths: list[Path],
     config: dict[str, Any],
@@ -457,47 +676,110 @@ def build_training_table(
     true_parts: list[np.ndarray] = []
     loaded_rows = 0
     started_at = perf_counter()
-    progress_interval = int(config.get("features", {}).get("progress_interval") or 25)
+    features_cfg = config.get("features", {})
+    progress_interval = int(features_cfg.get("progress_interval") or 25)
     progress_interval = max(1, progress_interval)
+    requested_workers = int(features_cfg.get("num_workers") or 1)
+    profile_stages = bool(features_cfg.get("profile_stages", False))
+    num_workers = 1 if profile_stages else max(1, requested_workers)
+    context_key = getattr(top_context, "context_key", None)
+    cache_enabled = bool((features_cfg.get("cache") or {}).get("enabled", False))
+    include_top = bool(features_cfg.get("include_kaggle_top_signals", False))
+    if cache_enabled and include_top and top_context is not None:
+        cache_layers = "context_free+context"
+    elif cache_enabled:
+        cache_layers = "context_free"
+    else:
+        cache_layers = "disabled"
 
     if logger is not None:
-        logger.info("Feature table progress", current=0, total=len(paths), rows=0)
-
-    for i, path in enumerate(paths, start=1):
-        if logger is not None and (i == 1 or i % progress_interval == 0):
-            logger.info(
-                "Build well features",
-                current=i,
-                total=len(paths),
-                well=well_name(path),
-            )
-        wf = build_well_features(
-            path, config, train=True, top_context=top_context, logger=logger
+        logger.info(
+            "Feature table progress",
+            current=0,
+            total=len(paths),
+            rows=0,
+            workers=num_workers,
+            cache_layers=cache_layers,
+            context_key=context_key,
         )
-        mask = wf.target_mask
-        if wf.target is None or not mask.any():
-            continue
-        feature_parts.append(wf.features.loc[mask].astype("float32"))
-        true_values = wf.target[mask]
-        flat_values = wf.flat_prediction[mask]
-        residual_parts.append((true_values - flat_values).astype("float32"))
-        group_parts.append(np.full(mask.sum(), wf.well))
-        flat_parts.append(flat_values.astype("float32"))
-        true_parts.append(true_values.astype("float32"))
-        loaded_rows += int(mask.sum())
-        if logger is not None and (
-            i == 1 or i % progress_interval == 0 or i == len(paths)
-        ):
-            elapsed = perf_counter() - started_at
-            eta = elapsed / max(i, 1) * max(len(paths) - i, 0)
-            logger.info(
-                "Loaded train wells",
-                current=i,
-                total=len(paths),
-                rows=loaded_rows,
-                elapsed=format_duration(elapsed),
-                eta=format_duration(eta),
+
+    def append_part(part: WellTablePart) -> int:
+        if part.features is None or part.rows == 0:
+            return 0
+        feature_parts.append(part.features)
+        residual_parts.append(part.residual)
+        group_parts.append(part.groups)
+        flat_parts.append(part.flat)
+        true_parts.append(part.y_true)
+        return part.rows
+
+    if num_workers == 1:
+        for i, path in enumerate(paths, start=1):
+            if logger is not None and (i == 1 or i % progress_interval == 0):
+                logger.info(
+                    "Build well features",
+                    current=i,
+                    total=len(paths),
+                    well=well_name(path),
+                )
+            wf = build_well_features(
+                path, config, train=True, top_context=top_context, logger=logger
             )
+            loaded_rows += append_part(_well_features_to_part(i, wf))
+            if logger is not None and (
+                i == 1 or i % progress_interval == 0 or i == len(paths)
+            ):
+                elapsed = perf_counter() - started_at
+                eta = elapsed / max(i, 1) * max(len(paths) - i, 0)
+                rows_per_sec = loaded_rows / max(elapsed, 1e-9)
+                logger.info(
+                    "Loaded train wells",
+                    current=i,
+                    total=len(paths),
+                    rows=loaded_rows,
+                    elapsed=format_duration(elapsed),
+                    eta=format_duration(eta),
+                    rows_per_sec=f"{rows_per_sec:.1f}",
+                )
+    else:
+        completed = 0
+        progress_rows = 0
+        results: list[WellTablePart] = []
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_feature_worker,
+            initargs=(config, top_context),
+        ) as executor:
+            futures = {
+                executor.submit(_build_well_features_worker, i, str(path)): (i, path)
+                for i, path in enumerate(paths, start=1)
+            }
+            for future in as_completed(futures):
+                i, path = futures[future]
+                part = future.result()
+                results.append(part)
+                completed += 1
+                progress_rows += part.rows
+                if logger is not None and (
+                    completed == 1
+                    or completed % progress_interval == 0
+                    or completed == len(paths)
+                ):
+                    elapsed = perf_counter() - started_at
+                    eta = elapsed / max(completed, 1) * max(len(paths) - completed, 0)
+                    rows_per_sec = progress_rows / max(elapsed, 1e-9)
+                    logger.info(
+                        "Loaded train wells",
+                        current=completed,
+                        total=len(paths),
+                        rows=progress_rows,
+                        elapsed=format_duration(elapsed),
+                        eta=format_duration(eta),
+                        rows_per_sec=f"{rows_per_sec:.1f}",
+                        last_well=well_name(path),
+                    )
+        for part in sorted(results, key=lambda item: item.index):
+            loaded_rows += append_part(part)
 
     if not feature_parts:
         raise ValueError(
@@ -509,4 +791,14 @@ def build_training_table(
     groups = np.concatenate(group_parts)
     flat = np.concatenate(flat_parts)
     y_true = np.concatenate(true_parts)
+    if logger is not None:
+        elapsed = perf_counter() - started_at
+        rows_per_sec = loaded_rows / max(elapsed, 1e-9)
+        logger.info(
+            "Feature table ready",
+            wells=len(paths),
+            rows=loaded_rows,
+            duration=format_duration(elapsed),
+            rows_per_sec=f"{rows_per_sec:.1f}",
+        )
     return X, residual, groups, flat, y_true

@@ -1894,3 +1894,327 @@ def build_kaggle_top_signal_features(
         hidden_rows=len(hidden_idx),
     )
     return features
+
+
+def _hidden_column(
+    base_features: pd.DataFrame,
+    column: str,
+    hidden_idx: np.ndarray,
+    default: np.ndarray,
+) -> np.ndarray:
+    if column not in base_features.columns:
+        return np.asarray(default, dtype=float)
+    values = base_features[column].to_numpy(dtype=float)[hidden_idx]
+    if not np.isfinite(values).any():
+        return np.asarray(default, dtype=float)
+    return values
+
+
+def build_kaggle_context_signal_features(
+    df: pd.DataFrame,
+    horizontal_path: Path,
+    context: KaggleTopContext,
+    md: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    gr: np.ndarray,
+    tvt_input: np.ndarray,
+    flat_pred: np.ndarray,
+    config: dict[str, Any],
+    train: bool,
+    base_features: pd.DataFrame,
+    logger: RunLogger | None = None,
+) -> dict[str, np.ndarray | float]:
+    """Build only context-dependent top-solution features.
+
+    The heavy alignment/PF block is cached context-free. This function rebuilds
+    the spatial/dense ANCC block and aggregate signal columns that change when
+    the fold-safe spatial context changes.
+    """
+
+    n = len(df)
+    features: dict[str, np.ndarray | float] = {}
+    top_cfg = config["features"].get("kaggle_top", {})
+    profile_stages = bool(config["features"].get("profile_stages", False))
+
+    known = np.isfinite(tvt_input)
+    hidden_idx = np.flatnonzero(~known)
+    known_idx = np.flatnonzero(known)
+    if len(hidden_idx) == 0 or len(known_idx) < 10:
+        return features
+
+    tw_path = typewell_path(horizontal_path)
+    if tw_path is None:
+        return features
+    typewell = pd.read_csv(tw_path).sort_values("TVT")
+    if "TVT" not in typewell.columns or "GR" not in typewell.columns:
+        return features
+    tw_tvt = as_float_array(typewell["TVT"])
+    tw_gr = as_float_array(typewell["GR"])
+    valid_tw = np.isfinite(tw_tvt) & np.isfinite(tw_gr)
+    tw_tvt = tw_tvt[valid_tw]
+    tw_gr = tw_gr[valid_tw]
+    order = np.argsort(tw_tvt)
+    tw_tvt = tw_tvt[order]
+    tw_gr = tw_gr[order]
+    if len(tw_tvt) < 5:
+        return features
+
+    well = well_name(horizontal_path)
+    self_well = well if train else None
+    last_known_idx = int(known_idx[-1])
+    last_tvt = float(tvt_input[last_known_idx])
+    known_tvt = tvt_input[known_idx]
+
+    beam_mean = _hidden_column(
+        base_features,
+        "kg_beam_mean_tvt",
+        hidden_idx,
+        flat_pred[hidden_idx],
+    )
+    beam_cons = _hidden_column(base_features, "kg_beam_cons_tvt", hidden_idx, beam_mean)
+    beam_sm5 = _hidden_column(base_features, "kg_beam_sm5_tvt", hidden_idx, beam_mean)
+    if (
+        "kg_beam_cons_tvt" in base_features.columns
+        and "kg_beam_sm5_tvt" in base_features.columns
+    ):
+        beam_ref = (beam_cons + beam_sm5) / 2.0
+    else:
+        beam_ref = beam_mean
+
+    signal_stack: list[np.ndarray] = [beam_mean]
+    dtw_hidden = None
+    if top_cfg.get("dtw_enabled", True) and "kg_dtw_tvt" in base_features.columns:
+        dtw_hidden = _hidden_column(
+            base_features,
+            "kg_dtw_tvt",
+            hidden_idx,
+            np.full(len(hidden_idx), last_tvt, dtype=float),
+        )
+        signal_stack.append(dtw_hidden)
+    if top_cfg.get("dwt_enabled", False) and "kg_dwt_tvt" in base_features.columns:
+        signal_stack.append(
+            _hidden_column(
+                base_features,
+                "kg_dwt_tvt",
+                hidden_idx,
+                np.full(len(hidden_idx), last_tvt, dtype=float),
+            )
+        )
+
+    form_ancc_signal = None
+    form_mean = flat_pred[hidden_idx]
+    dense_signal = None
+
+    stage_started_at = perf_counter()
+    formation_started_at = perf_counter()
+    xy_hidden = np.column_stack([x[hidden_idx], y[hidden_idx]])
+    form_hidden, form_dist = context.impute_formations(xy_hidden, self_well)
+    xy_known = np.column_stack([x[known_idx], y[known_idx]])
+    form_known, _ = context.impute_formations(xy_known, self_well)
+    if form_hidden.shape[1] == len(FORMATIONS) and np.isfinite(form_hidden).any():
+        form_signals = []
+        form_rmse: dict[str, float] = {}
+        for formation_idx, formation in enumerate(FORMATIONS):
+            b_full, b_early, b_mid, b_late, b_weighted = segment_biases(
+                known_tvt, z[known_idx], form_known[:, formation_idx]
+            )
+            signal = -z[hidden_idx] + form_hidden[:, formation_idx] + b_full
+            signal_weighted = (
+                -z[hidden_idx] + form_hidden[:, formation_idx] + b_weighted
+            )
+            signal_late = -z[hidden_idx] + form_hidden[:, formation_idx] + b_late
+            form_signals.append(signal)
+            full = np.zeros(n, dtype=float)
+            full[hidden_idx] = signal
+            features[f"kg_form_{formation}_tvt"] = full
+            diff = np.zeros(n, dtype=float)
+            diff[hidden_idx] = signal - flat_pred[hidden_idx]
+            features[f"kg_form_{formation}_minus_flat"] = diff
+            features[f"tvtF_{formation}"] = full_feature(n, hidden_idx, signal)
+            features[f"tvtFw_{formation}"] = full_feature(
+                n, hidden_idx, signal_weighted
+            )
+            features[f"tvtF50_{formation}"] = full_feature(n, hidden_idx, signal_late)
+            features[f"bw_{formation}"] = full_scalar(n, hidden_idx, b_full)
+            features[f"bww_{formation}"] = full_scalar(n, hidden_idx, b_weighted)
+            features[f"bw50_{formation}"] = full_scalar(n, hidden_idx, b_late)
+            features[f"bw_early_{formation}"] = full_scalar(n, hidden_idx, b_early)
+            features[f"bw_mid_{formation}"] = full_scalar(n, hidden_idx, b_mid)
+            known_signal = -z[known_idx] + form_known[:, formation_idx] + b_full
+            form_rmse[formation] = float(
+                np.sqrt(np.nanmean((known_tvt - known_signal) ** 2))
+            )
+        form_matrix = np.vstack(form_signals).T
+        form_mean = np.nanmean(form_matrix, axis=1)
+        form_ancc_signal = form_matrix[:, 0]
+        features["kg_form_ancc_tvt"] = full_feature(n, hidden_idx, form_ancc_signal)
+        features["kg_form_ancc_minus_flat"] = full_feature(
+            n, hidden_idx, form_ancc_signal - flat_pred[hidden_idx]
+        )
+        features["kg_form_ancc_minus_last"] = full_feature(
+            n, hidden_idx, form_ancc_signal - last_tvt
+        )
+        features["kg_form_mean_tvt"] = full_feature(n, hidden_idx, form_mean)
+        features["kg_form_mean_minus_flat"] = full_feature(
+            n, hidden_idx, form_mean - flat_pred[hidden_idx]
+        )
+        features["kg_form_mean_minus_last"] = full_feature(
+            n, hidden_idx, form_mean - last_tvt
+        )
+        features["kg_form_std"] = full_feature(
+            n, hidden_idx, np.nanstd(form_matrix, axis=1)
+        )
+        features["kg_form_range"] = full_feature(
+            n,
+            hidden_idx,
+            np.nanmax(form_matrix, axis=1) - np.nanmin(form_matrix, axis=1),
+        )
+        features["kg_form_knn_dist"] = full_feature(n, hidden_idx, form_dist)
+        features["form_mean_d"] = full_feature(n, hidden_idx, form_mean - last_tvt)
+        features["form_std_d"] = full_feature(
+            n, hidden_idx, np.nanstd(form_matrix, axis=1)
+        )
+        features["form_rng_d"] = full_feature(
+            n,
+            hidden_idx,
+            np.nanmax(form_matrix, axis=1) - np.nanmin(form_matrix, axis=1),
+        )
+        features["spatial_ancc_d"] = full_feature(
+            n, hidden_idx, form_hidden[:, 0] - np.interp(last_tvt, tw_tvt, tw_gr)
+        )
+        features["spatial_knn_dist"] = full_feature(n, hidden_idx, form_dist)
+        for formation, score in form_rmse.items():
+            features[f"frm_rmse_{formation}"] = full_scalar(n, hidden_idx, score)
+        signal_stack.append(form_mean)
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.spatial.formations",
+        formation_started_at,
+        hidden_rows=len(hidden_idx),
+    )
+
+    dense_started_at = perf_counter()
+    dense_ancc, dense_std, dense_dist = context.impute_dense_ancc(xy_hidden, self_well)
+    dense_known, _, _ = context.impute_dense_ancc(xy_known, self_well)
+    dense_b, _, _, dense_b_late, dense_b_weighted = segment_biases(
+        known_tvt, z[known_idx], dense_known
+    )
+    dense_signal = -z[hidden_idx] + dense_ancc + dense_b
+    dense_signal_weighted = -z[hidden_idx] + dense_ancc + dense_b_weighted
+    dense_signal_late = -z[hidden_idx] + dense_ancc + dense_b_late
+    dense_known_residual = known_tvt + z[known_idx] - dense_known
+    dense_rmse = (
+        float(np.sqrt(np.nanmean(dense_known_residual**2)))
+        if np.isfinite(dense_known_residual).any()
+        else np.nan
+    )
+    dense_bias = (
+        float(np.nanmean(dense_known_residual))
+        if np.isfinite(dense_known_residual).any()
+        else np.nan
+    )
+    dense_nb_std = (
+        float(np.nanmean(dense_std)) if np.isfinite(dense_std).any() else np.nan
+    )
+    features["kg_dense_ancc_tvt"] = full_feature(n, hidden_idx, dense_signal)
+    features["kg_dense_ancc_minus_flat"] = full_feature(
+        n, hidden_idx, dense_signal - flat_pred[hidden_idx]
+    )
+    features["kg_dense_ancc_minus_last"] = full_feature(
+        n, hidden_idx, dense_signal - last_tvt
+    )
+    features["kg_dense_ancc_std"] = full_feature(n, hidden_idx, dense_std)
+    features["kg_dense_ancc_dist"] = full_feature(n, hidden_idx, dense_dist)
+    features["kg_dense_vs_form"] = full_feature(n, hidden_idx, dense_signal - form_mean)
+    features["dense_ancc"] = full_feature(n, hidden_idx, dense_ancc)
+    features["dense_std"] = full_feature(n, hidden_idx, dense_std)
+    features["dense_dist"] = full_feature(n, hidden_idx, dense_dist)
+    features["tvt_dense_d"] = full_feature(n, hidden_idx, dense_signal - last_tvt)
+    features["tvt_densew_d"] = full_feature(
+        n, hidden_idx, dense_signal_weighted - last_tvt
+    )
+    features["tvt_dense50_d"] = full_feature(
+        n, hidden_idx, dense_signal_late - last_tvt
+    )
+    features["dense_rmse"] = full_scalar(n, hidden_idx, dense_rmse)
+    features["dense_bias"] = full_scalar(n, hidden_idx, dense_bias)
+    features["dense_nb_std"] = full_scalar(n, hidden_idx, dense_nb_std)
+    if form_ancc_signal is not None:
+        features["spatial_vs_dense"] = full_feature(
+            n, hidden_idx, form_ancc_signal - dense_signal
+        )
+        features["beam_vs_spatial"] = full_feature(
+            n, hidden_idx, beam_ref - form_ancc_signal
+        )
+    signal_stack.append(dense_signal)
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.spatial.dense",
+        dense_started_at,
+        hidden_rows=len(hidden_idx),
+    )
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.spatial",
+        stage_started_at,
+        enabled=True,
+        hidden_rows=len(hidden_idx),
+    )
+
+    if top_cfg.get("particle_enabled", False) and "pf_ancc" in base_features.columns:
+        pf_ancc_signal = _hidden_column(
+            base_features,
+            "pf_ancc",
+            hidden_idx,
+            np.full(len(hidden_idx), last_tvt, dtype=float),
+        )
+        features["kg_pf_ancc_vs_dense"] = full_feature(
+            n, hidden_idx, pf_ancc_signal - dense_signal
+        )
+        features["pf_vs_dense"] = full_feature(
+            n, hidden_idx, pf_ancc_signal - dense_signal
+        )
+        if form_ancc_signal is not None:
+            features["pf_vs_spatial"] = full_feature(
+                n, hidden_idx, pf_ancc_signal - form_ancc_signal
+            )
+        signal_stack.append(pf_ancc_signal)
+
+    ncc_ens = (
+        _hidden_column(
+            base_features,
+            "sc_ens_d",
+            hidden_idx,
+            np.zeros(len(hidden_idx), dtype=float),
+        )
+        + last_tvt
+    )
+    hybrid_ref = (
+        _hidden_column(
+            base_features,
+            "hyb_d",
+            hidden_idx,
+            np.zeros(len(hidden_idx), dtype=float),
+        )
+        + last_tvt
+    )
+    signal_stack.extend([ncc_ens, hybrid_ref])
+    signal_matrix = np.vstack(signal_stack).T
+    signal_mean = np.nanmean(signal_matrix, axis=1)
+    signal_std = np.nanstd(signal_matrix, axis=1)
+    features["sig_std"] = full_feature(n, hidden_idx, signal_std)
+    features["sig_mean_d"] = full_feature(n, hidden_idx, signal_mean - last_tvt)
+    features["kg_signal_mean_tvt"] = full_feature(n, hidden_idx, signal_mean)
+    features["kg_signal_mean_minus_flat"] = full_feature(
+        n, hidden_idx, signal_mean - flat_pred[hidden_idx]
+    )
+    features["kg_signal_mean_minus_last"] = full_feature(
+        n, hidden_idx, signal_mean - last_tvt
+    )
+    features["kg_signal_std"] = full_feature(n, hidden_idx, signal_std)
+    return features

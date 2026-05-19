@@ -1,5 +1,8 @@
 inherits: stack.yml
 
+features:
+  num_workers: 8
+
 model:
   base_models:
     - id: cat_lr025

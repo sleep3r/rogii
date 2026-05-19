@@ -112,8 +112,10 @@ packing local `data/` into the image. The Docker context excludes `.venv`,
 `artifacts`, mining output, and `data/`.
 
 For GPU server runs, pass `CONFIG=configs/stack_gpu.yml` explicitly. It is the
-same stack as `configs/stack.yml`, but with explicit GPU model params:
+same stack as `configs/stack.yml`, but with parallel feature prep and explicit
+GPU model params:
 
+- features: `num_workers: 8`;
 - CatBoost: `task_type=GPU`, `devices=0`;
 - LightGBM: `device_type=gpu`, `gpu_device_id=0`, `max_bin=63`.
 
@@ -168,9 +170,13 @@ planes, dense ANCC calibration, and offset GR residuals (`tda*`, `tdbc*`,
 `tdsc*`, `tdpf*`, `tddtw*`). After feature changes, old `artifacts/stack`
 models are invalid; run `make train-local` again before `make submit`.
 
-Feature cache keys include a schema version and the `KaggleTopContext` key, so
-fold-safe OOF features and full-context inference features cannot reuse the same
-pickle by accident.
+Feature cache has two layers. Context-free alignment/PF/typewell/GR features are
+cached once per well and reused across fold-safe contexts. Context-dependent
+spatial/dense ANCC and aggregate signal features include the
+`KaggleTopContext` key, so fold-safe OOF and full-context inference cannot reuse
+the wrong pickle by accident. `features.num_workers` controls per-well
+process-based feature preparation; keep it at `1` for stage-level profiling and
+raise it on the server when memory allows.
 
 Spatial distance features `kg_form_knn_dist` and `kg_dense_ancc_dist` are
 stored in normalized KD-tree units, not feet. They are meant as relative

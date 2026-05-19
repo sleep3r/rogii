@@ -33,6 +33,23 @@ make profile-features PROFILE_NAME=features_valid_50 FEATURE_PROFILE_CONTEXT=fol
 make profile-features PROFILE_NAME=features_cached_50 FEATURE_PROFILE_DISABLE_CACHE=false FEATURE_PROFILE_WELLS=50
 ```
 
+Feature prep now has two cache layers:
+
+- `context_free`: geometry, GR rolls/lags, typewell, beam/NCC/DTW/DWT, PF, and
+  offset residuals. This layer does not include `KaggleTopContext.context_key`,
+  so fold-safe contexts can reuse it.
+- `context`: spatial formation, dense ANCC, and aggregate signals that depend
+  on the current fold/full context. This layer includes `context_key`.
+
+`features.num_workers` enables process-based per-well parallel feature building.
+`configs/stack.yml` stays serial by default for local debugging; `configs/stack_gpu.yml`
+sets `features.num_workers: 8` for server runs. Stage-level profiling forces the
+serial path so per-stage logs remain readable. To measure worker throughput:
+
+```bash
+make profile-features CONFIG=configs/stack_gpu.yml FEATURE_PROFILE_WELLS=50 FEATURE_PROFILE_STAGE=false
+```
+
 When `feature_profile` runs, it enables per-stage feature logs for
 `well.read_horizontal`, `well.typewell`, `top.beam`, `top.ncc`, `top.dtw`,
 `top.dwt`, `top.spatial.formations`, `top.spatial.dense`, `top.spatial`,
