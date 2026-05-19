@@ -93,7 +93,7 @@ model:
 validation:
   n_splits: 3
   fold_safe_context: true
-  final_model_strategy: fold_average
+  final_model_strategy: full_context
 
 postprocess:
   progress_interval: 10

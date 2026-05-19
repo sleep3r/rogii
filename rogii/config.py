@@ -101,7 +101,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "validation": {
         "n_splits": 5,
         "fold_safe_context": True,
-        "final_model_strategy": "fold_average",
+        "final_model_strategy": "full_context",
     },
     "postprocess": {
         "progress_interval": 200,

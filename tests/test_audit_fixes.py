@@ -550,6 +550,7 @@ def test_feature_schema_keeps_only_canonical_last_known_offsets(tmp_path) -> Non
     assert "dy" not in wf.features.columns
     assert "dz" not in wf.features.columns
     assert "dxy" not in wf.features.columns
+    assert "tvt_input_isna" not in wf.features.columns
 
 
 def test_training_target_is_last_known_residual(tmp_path) -> None:
@@ -984,6 +985,55 @@ def test_configs_use_canonical_pf_postprocess_column() -> None:
     for path in [Path("configs/quick.yml"), Path("configs/stack.yml")]:
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert config["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
+
+
+def test_notebook_postprocess_requires_explicit_pf_column() -> None:
+    config = minimal_config()
+    config["postprocess"]["notebook_blend"] = {
+        "enabled": True,
+        "alpha": 1.0,
+        "tau": 0.0,
+        "w_pf": 0.0,
+    }
+    features = pd.DataFrame(
+        {
+            "last_known_tvt": [10.0],
+            "md_from_last_known": [0.0],
+            "pf_ancc": [11.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="pf_column"):
+        apply_postprocess(
+            flat=np.array([10.0]),
+            residual=np.array([1.0]),
+            config=config,
+            features=features,
+        )
+
+
+def test_notebook_postprocess_noops_when_pf_feature_missing() -> None:
+    config = minimal_config()
+    config["postprocess"]["notebook_blend"] = {
+        "enabled": True,
+        "pf_column": "pf_ancc",
+        "alpha": 1.0,
+        "tau": 0.0,
+        "w_pf": 0.5,
+    }
+    pred = apply_postprocess(
+        flat=np.array([10.0]),
+        residual=np.array([2.0]),
+        config=config,
+        features=pd.DataFrame(
+            {
+                "last_known_tvt": [10.0],
+                "md_from_last_known": [0.0],
+            }
+        ),
+    )
+
+    assert np.allclose(pred, [12.0])
 
 
 def test_predict_test_keeps_missing_features_as_nan(tmp_path) -> None:

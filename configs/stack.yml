@@ -152,7 +152,7 @@ model:
 validation:
   n_splits: 5
   fold_safe_context: true
-  final_model_strategy: fold_average
+  final_model_strategy: full_context
 
 postprocess:
   progress_interval: 50000
@@ -162,9 +162,9 @@ postprocess:
   notebook_blend:
     enabled: true
     pf_column: pf_ancc
-    alpha_range: [0.50, 1.10, 0.01]
-    tau_range: [0, 500, 5]
-    w_pf_range: [0, 0.50, 0.01]
+    alpha_range: [0.95, 1.05, 0.01]
+    tau_range: [40, 120, 5]
+    w_pf_range: [0, 0.15, 0.01]
   smoothing:
     enabled: true
     candidates:

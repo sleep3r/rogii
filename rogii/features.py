@@ -29,7 +29,7 @@ from .top_signals import (
     build_kaggle_top_signal_features,
 )
 
-FEATURE_CACHE_SCHEMA_VERSION = 8
+FEATURE_CACHE_SCHEMA_VERSION = 9
 
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_TOP_CONTEXT: KaggleTopContext | None = None
@@ -375,7 +375,6 @@ def _build_well_features_single_layer(
         "flat_tvt": flat_pred,
         "baseline_tvt": base_pred,
         "baseline_minus_flat": base_pred - flat_pred,
-        "tvt_input_isna": (~known).astype(float),
         "first_known_idx": float(first_known),
         "last_known_idx": float(last_known),
         "first_known_tvt": first_tvt,

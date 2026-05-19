@@ -683,6 +683,16 @@ def smoothing_candidates(config: dict[str, Any]) -> list[dict[str, float] | None
     return parsed
 
 
+def required_notebook_pf_column(config: dict[str, Any]) -> str:
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    if not blend_cfg.get("enabled", False):
+        return ""
+    pf_column = blend_cfg.get("pf_column")
+    if pf_column in (None, ""):
+        raise ValueError("postprocess.notebook_blend.pf_column is required.")
+    return str(pf_column)
+
+
 def apply_notebook_blend(
     pred: np.ndarray,
     config: dict[str, Any],
@@ -699,7 +709,7 @@ def apply_notebook_blend(
             "w_pf": float(blend_cfg.get("w_pf", 0.0)),
         }
 
-    pf_column = str(blend_cfg.get("pf_column", "kg_pf_ancc_tvt"))
+    pf_column = required_notebook_pf_column(config)
     required = {"last_known_tvt", "md_from_last_known", pf_column}
     if not required.issubset(features.columns):
         return pred
@@ -782,7 +792,7 @@ def postprocess_basis_matrix(
     if not blend_cfg.get("enabled", False):
         return np.column_stack([flat, residual])
 
-    pf_column = str(blend_cfg.get("pf_column", "kg_pf_ancc_tvt"))
+    pf_column = required_notebook_pf_column(config)
     required = {"last_known_tvt", "md_from_last_known", pf_column}
     if not required.issubset(features.columns):
         return np.column_stack([flat, residual])

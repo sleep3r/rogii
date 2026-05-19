@@ -20,6 +20,48 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Validation Anchor Hardening Pass
+
+- Switched the default final model strategy back to `full_context`:
+  - `DEFAULT_CONFIG.validation.final_model_strategy`;
+  - `configs/stack.yml`;
+  - `configs/quick.yml`;
+  - `configs/stack_gpu.yml` now makes the same server-side choice explicit
+    instead of relying only on inheritance.
+- Rationale: fold-average inference is fast, but fold models are trained on
+  fold-safe context features and then applied to full-context inference
+  features. Until an A/B proves that mismatch is harmless, the main submit path
+  should pay the extra final fit and produce a cleaner LB anchor.
+- Reduced the main `stack.yml` notebook postprocess search from the very wide
+  exploratory grid to a conservative band around the previous useful optimum:
+  - `alpha_range: [0.95, 1.05, 0.01]`;
+  - `tau_range: [40, 120, 5]`;
+  - `w_pf_range: [0, 0.15, 0.01]`.
+  `configs/stack_gpu.yml` repeats these values explicitly for remote runs.
+- Made `postprocess.notebook_blend.pf_column` explicit and required whenever
+  notebook blend is enabled. This removes the hidden default to
+  `kg_pf_ancc_tvt` and avoids silently switching PF columns between configs.
+- Removed the constant `tvt_input_isna` training feature. With
+  `target_rows: hidden_only`, train and inference rows are always hidden rows,
+  so the column carried no signal.
+- Bumped `FEATURE_CACHE_SCHEMA_VERSION` to 9. Old schema-v8 feature caches and
+  artifacts are invalid for the next clean train.
+- Added tests for:
+  - missing explicit PF postprocess column raising a clear error;
+  - missing PF feature column no-oping the notebook blend safely;
+  - `tvt_input_isna` staying out of the feature schema.
+- Validation:
+  - `uv run pytest -q`: 33 passed;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `make quick-train`: passed, final strategy `full_context`, 14,151 rows,
+    379 features, OOF+PP RMSE 10.05721.
+- Next:
+  - clear stale `artifacts/feature_cache` and `artifacts/stack`;
+  - run one honest full-context, fold-safe server train;
+  - submit it as the new clean LB anchor before changing feature families again;
+  - run a separate fold-average A/B later if we want the speedup back.
+
 ### Split-Cache + Parallel Feature Preparation
 
 - Bumped `FEATURE_CACHE_SCHEMA_VERSION` to 8.
