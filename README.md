@@ -91,7 +91,7 @@ Server training through spacebridge:
 cp portainer.yml.example portainer.yml
 # edit portainer.yml: ClearML config path, Registry username, Portainer instance, GPU ids
 make check-server-env
-make train-server INSTANCE=gpu
+make train-server INSTANCE=gpu CONFIG=configs/stack_gpu.yml
 ```
 
 With Colima, make sure Docker has the Buildx CLI plugin. If `docker buildx
@@ -111,13 +111,25 @@ it passes `config=$(CONFIG)`, enables ClearML tracking, and enables
 packing local `data/` into the image. The Docker context excludes `.venv`,
 `artifacts`, mining output, and `data/`.
 
+For GPU server runs, pass `CONFIG=configs/stack_gpu.yml` explicitly. It is the
+same stack as `configs/stack.yml`, but with explicit GPU model params:
+
+- CatBoost: `task_type=GPU`, `devices=0`;
+- LightGBM: `device_type=gpu`, `gpu_device_id=0`, `max_bin=63`.
+
+Training logs print `Model backend config` before every model fit. If LightGBM
+is not actually GPU-capable inside the image, the run should fail loudly there
+instead of silently falling back to CPU. The Docker image installs the OpenCL
+ICD loader needed by LightGBM's GPU backend; CatBoost uses CUDA directly.
+
 The command intentionally does not pass `--image-name`; spacebridge reads
 `portainer.yml` and handles Harbor naming/tagging from `REGISTRY_USERNAME`.
 
 Useful overrides:
 
 ```bash
-make train-server INSTANCE=gpu CONFIG=configs/stack.yml SERVER_NOTES=fold_avg_v1
+make train-server INSTANCE=gpu CONFIG=configs/stack_gpu.yml SERVER_NOTES=fold_avg_v1
+make train-server INSTANCE=gpu CONFIG=configs/stack.yml SERVER_NOTES=cpu_models
 make train-server INSTANCE=gpu CLEARML_TASK_NAME=rogii_fold_avg
 ```
 

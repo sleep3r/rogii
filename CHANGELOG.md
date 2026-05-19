@@ -89,6 +89,24 @@ run here with command, data, CV, LB, runtime, and the next decision.
   features in `10.69s`.
 - Added spatial sub-stage logs:
   `top.spatial.formations` and `top.spatial.dense`.
+- Added fold-level validation metrics to long OOF runs:
+  - baseline RMSE per validation fold before model training;
+  - per-model fold RMSE with delta vs baseline and fitted iteration count;
+  - per-fold summary with best single model and equal-weight ensemble RMSE;
+  - post-hill-climb weighted ensemble RMSE per fold;
+  - the same fold details are stored under `metrics.json -> model.folds` and
+    `metrics.json -> model.base_models[].folds`, so ClearML records them too.
+- Added explicit server GPU model config:
+  - `configs/stack_gpu.yml` inherits `stack.yml` and sets CatBoost
+    `task_type=GPU, devices=0`;
+  - LightGBM gets `device_type=gpu, gpu_device_id=0, gpu_use_dp=false,
+    max_bin=63`;
+  - server runs use the normal `CONFIG=...` Make variable, so GPU training is
+    launched explicitly as `make train-server INSTANCE=... CONFIG=configs/stack_gpu.yml`;
+  - model fits log `Model backend config`, so GPU params are visible before
+    the expensive fold starts;
+  - the Docker runtime installs the OpenCL ICD loader required by LightGBM's
+    GPU backend.
 - Removed the obsolete `features.kaggle_top.mode` switch and its proxy/fallback
   branches. The top-solution signal block now has one path: numba-backed beam,
   DTW/DWT, PF_Z, and PF_ANCC.

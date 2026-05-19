@@ -1,0 +1,104 @@
+inherits: stack.yml
+
+model:
+  base_models:
+    - id: cat_lr025
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr020
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr030
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: lgb_lr025
+      name: lightgbm
+      params:
+        device_type: gpu
+        gpu_device_id: 0
+        gpu_use_dp: false
+        max_bin: 63
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr020
+      name: lightgbm
+      params:
+        device_type: gpu
+        gpu_device_id: 0
+        gpu_use_dp: false
+        max_bin: 63
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr030
+      name: lightgbm
+      params:
+        device_type: gpu
+        gpu_device_id: 0
+        gpu_use_dp: false
+        max_bin: 63
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+
+tracking:
+  clearml:
+    tags: [rogii, kaggle, stack, dwt, gpu]

@@ -148,6 +148,14 @@ class EnsembleRegressor(ResidualModel):
                     spec,
                     self.seed + 1000 * (model_idx + 1) + fold_id,
                 )
+                backend = model_backend_summary(model)
+                if logger is not None and backend:
+                    logger.info(
+                        "Model backend config",
+                        model=name,
+                        fold=fold_id,
+                        **backend,
+                    )
                 context = (
                     logger.step(
                         "OOF model fold",
@@ -168,7 +176,21 @@ class EnsembleRegressor(ResidualModel):
                     )
                     pred = model.predict(X.loc[valid_idx])
                 oof_stack[valid_idx, model_idx] = pred
-                fold_scores.append(rmse(pred, y[valid_idx]))
+                score = rmse(pred, y[valid_idx])
+                fold_scores.append(score)
+                if logger is not None:
+                    fold_baseline_rmse = rmse(
+                        np.zeros_like(y[valid_idx], dtype=float),
+                        y[valid_idx],
+                    )
+                    logger.metric(
+                        "OOF fold RMSE",
+                        model=name,
+                        fold=fold_id,
+                        rmse=score,
+                        baseline_rmse=fold_baseline_rmse,
+                        delta_vs_baseline=score - fold_baseline_rmse,
+                    )
                 fold_models.append(model)
 
             self.fold_models.append(fold_models)
@@ -482,6 +504,26 @@ def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:
     if name in {"catboost", "cat"}:
         return make_catboost(params, seed)
     raise ValueError(f"Unsupported base model: {name!r}.")
+
+
+def model_backend_summary(model: ResidualModel) -> dict[str, Any]:
+    estimator = getattr(model, "estimator", None)
+    if estimator is None or not hasattr(estimator, "get_params"):
+        return {}
+    params = estimator.get_params()
+    keys = (
+        "task_type",
+        "devices",
+        "device_type",
+        "device",
+        "gpu_platform_id",
+        "gpu_device_id",
+        "gpu_use_dp",
+        "tree_method",
+        "max_bin",
+        "n_jobs",
+    )
+    return {key: params.get(key) for key in keys if params.get(key) is not None}
 
 
 def fitted_iteration_count(model: ResidualModel, model_name: str) -> int | None:

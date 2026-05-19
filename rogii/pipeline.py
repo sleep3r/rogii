@@ -28,6 +28,7 @@ from .modeling import (
     evaluate_oof_predictions,
     fitted_iteration_count,
     make_single_model,
+    model_backend_summary,
     model_spec_name,
     rmse,
 )
@@ -214,6 +215,7 @@ def train_fold_safe_oof(
     flat_parts: list[np.ndarray] = []
     true_parts: list[np.ndarray] = []
     stack_parts: list[np.ndarray] = []
+    fold_summaries: list[dict[str, Any]] = []
     final_strategy = str(
         config["validation"].get("final_model_strategy", "full_context")
     ).lower()
@@ -248,6 +250,15 @@ def train_fold_safe_oof(
             )
         X_valid_model = align_valid_features(X_train, X_valid)
         fold_stack = np.zeros((len(X_valid_model), len(base_specs)), dtype=float)
+        fold_baseline_rmse = rmse(np.zeros_like(y_valid, dtype=float), y_valid)
+        fold_base_rmse: dict[str, float] = {}
+        logger.metric(
+            "OOF fold baseline RMSE",
+            fold=fold_id,
+            valid_wells=len(fold_valid_paths),
+            valid_rows=len(X_valid_model),
+            rmse=fold_baseline_rmse,
+        )
 
         for model_idx, spec in enumerate(base_specs):
             name = base_names[model_idx]
@@ -256,6 +267,9 @@ def train_fold_safe_oof(
                 seed + 1000 * (model_idx + 1) + fold_id,
             )
             model_name = str(spec.get("name", "lightgbm")).lower()
+            backend = model_backend_summary(base_model)
+            if backend:
+                logger.info("Model backend config", model=name, fold=fold_id, **backend)
             with logger.step(
                 "OOF model fold",
                 model=name,
@@ -278,7 +292,52 @@ def train_fold_safe_oof(
                 iteration_counts[name].append(iteration_count)
             if store_fold_models:
                 fold_models_by_base[model_idx].append(base_model)
-            logger.metric("OOF fold RMSE", model=name, fold=fold_id, rmse=score)
+            fold_base_rmse[name] = float(score)
+            base_metrics[model_idx].setdefault("folds", []).append(
+                {
+                    "fold": int(fold_id),
+                    "rmse": float(score),
+                    "baseline_rmse": float(fold_baseline_rmse),
+                    "delta_vs_baseline": float(score - fold_baseline_rmse),
+                    "iterations": (
+                        int(iteration_count) if iteration_count is not None else None
+                    ),
+                }
+            )
+            logger.metric(
+                "OOF fold RMSE",
+                model=name,
+                fold=fold_id,
+                rmse=score,
+                baseline_rmse=fold_baseline_rmse,
+                delta_vs_baseline=score - fold_baseline_rmse,
+                iterations=iteration_count,
+            )
+
+        best_model = min(fold_base_rmse, key=fold_base_rmse.get)
+        equal_weight_pred = fold_stack.mean(axis=1)
+        equal_weight_rmse = rmse(equal_weight_pred, y_valid)
+        fold_summary = {
+            "fold": int(fold_id),
+            "train_wells": int(len(fold_train_paths)),
+            "valid_wells": int(len(fold_valid_paths)),
+            "train_rows": int(len(X_train)),
+            "valid_rows": int(len(X_valid_model)),
+            "baseline_rmse": float(fold_baseline_rmse),
+            "best_single_model": best_model,
+            "best_single_rmse": float(fold_base_rmse[best_model]),
+            "equal_weight_rmse": float(equal_weight_rmse),
+            "base_rmse": fold_base_rmse,
+        }
+        fold_summaries.append(fold_summary)
+        logger.metric(
+            "OOF fold summary",
+            fold=fold_id,
+            baseline_rmse=fold_baseline_rmse,
+            best_model=best_model,
+            best_single_rmse=fold_base_rmse[best_model],
+            equal_weight_rmse=equal_weight_rmse,
+        )
 
         valid_features.append(X_valid_model)
         residual_parts.append(y_valid.astype("float32"))
@@ -311,6 +370,21 @@ def train_fold_safe_oof(
         iteration_counts,
         logger,
     )
+    if model.weights is not None:
+        for summary, fold_stack_part, fold_y in zip(
+            fold_summaries, stack_parts, residual_parts, strict=True
+        ):
+            weighted_rmse = rmse(fold_stack_part @ model.weights, fold_y)
+            summary["weighted_ensemble_rmse"] = float(weighted_rmse)
+            logger.metric(
+                "OOF ensemble fold RMSE",
+                fold=summary["fold"],
+                rmse=weighted_rmse,
+                baseline_rmse=summary["baseline_rmse"],
+                best_single_rmse=summary["best_single_rmse"],
+                equal_weight_rmse=summary["equal_weight_rmse"],
+            )
+    model.metrics_["folds"] = fold_summaries
     if store_fold_models:
         model.fold_models = fold_models_by_base
     return X_oof, residual_oof, groups_oof, flat_oof, true_oof
