@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -127,6 +128,23 @@ def upload_dataset(
     return dataset_id
 
 
+def _dataset_get_local_copy(
+    dataset: Any, cache_dir: Path | None, logger: RunLogger | None = None
+) -> str:
+    kwargs: dict[str, Any] = {}
+    if cache_dir is not None:
+        cache_dir = cache_dir.expanduser()
+        signature = inspect.signature(dataset.get_local_copy)
+        if "local_cache_path" in signature.parameters:
+            kwargs["local_cache_path"] = str(cache_dir)
+        elif logger is not None:
+            logger.warn(
+                "ClearML Dataset.get_local_copy does not support custom cache dir",
+                cache_dir=cache_dir,
+            )
+    return str(dataset.get_local_copy(**kwargs))
+
+
 def get_dataset_local_path(
     project: str,
     name: str,
@@ -155,9 +173,7 @@ def get_dataset_local_path(
         alias=alias or None,
         only_completed=True,
     )
-    local_path = dataset.get_local_copy(
-        local_cache_path=str(cache_dir.expanduser()) if cache_dir is not None else None
-    )
+    local_path = _dataset_get_local_copy(dataset, cache_dir=cache_dir, logger=logger)
     if not local_path:
         raise RuntimeError("ClearML returned an empty dataset local path.")
     path = Path(local_path)

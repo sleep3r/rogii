@@ -2,10 +2,8 @@
 
 CLEAR_ML_CONF_PATH: ~/clearml.conf
 
-# REGISTRY_USERNAME is used by spacebridge to generate an image tag when
-# IMAGE_NAME has no explicit tag.
+# REGISTRY_USERNAME is used by spacebridge for Harbor auth and auto-tagging.
 REGISTRY_USERNAME: <service-account-or-username>
-IMAGE_NAME: harbor.wildberries.ru/tns-backoffice-security/rogii/train
 
 INSTANCES:
   gpu:

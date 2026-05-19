@@ -89,8 +89,19 @@ Server training through spacebridge:
 
 ```bash
 cp portainer.yml.example portainer.yml
-# edit portainer.yml: ClearML config path, image name, Portainer instance, GPU ids
+# edit portainer.yml: ClearML config path, Registry username, Portainer instance, GPU ids
+make check-server-env
 make train-server INSTANCE=gpu
+```
+
+With Colima, make sure Docker has the Buildx CLI plugin. If `docker buildx
+version` fails, install and link it:
+
+```bash
+brew install docker-buildx
+mkdir -p ~/.docker/cli-plugins
+ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+docker buildx version
 ```
 
 `make train-server` builds the Docker image, injects `~/clearml.conf` as a
@@ -99,6 +110,9 @@ it passes `config=$(CONFIG)`, enables ClearML tracking, and enables
 `data.clearml`, so the container downloads the ClearML Dataset instead of
 packing local `data/` into the image. The Docker context excludes `.venv`,
 `artifacts`, mining output, and `data/`.
+
+The command intentionally does not pass `--image-name`; spacebridge reads
+`portainer.yml` and handles Harbor naming/tagging from `REGISTRY_USERNAME`.
 
 Useful overrides:
 
@@ -118,9 +132,9 @@ ROGII_CLEARML_ENABLED=true make train-local
 ```
 
 The ClearML task records the resolved config, scalar metrics, `metrics.json`,
-`features.json`, `config.yml`, `submission.csv`, `artifacts/runs.csv`, and every
-file under the run output directory. On server runs `CLEARML_LOG_MODEL=true` by
-default, so `model.pkl` is uploaded as well. All of this uses the task
+`features.json`, `config.yml`, `submission.csv`, and every file under the run
+output directory. On server runs `CLEARML_LOG_MODEL=true` by default, so
+`model.pkl` is uploaded as well. All of this uses the task
 `output_uri`, which defaults to `s3://s3-basket-cold.wb.ru/ds-experiments`.
 
 The main `stack.yml` pipeline is the local, reproducible version of the public
@@ -135,7 +149,6 @@ DWT-style baseline:
    Savitzky-Golay smoothing on OOF.
 6. Rebuild full-train context, fit final full-context models on all train wells,
    and save an inference artifact under `artifacts/stack`.
-7. Append a machine-readable row to `artifacts/runs.csv`.
 
 The feature table includes PF_ANCC/PF_Z, beam paths, multi-scale NCC,
 multi-radius DTW, stochastic DTW uncertainty, DWT-lowpass DTW, spatial formation
@@ -164,8 +177,7 @@ artifacts/stack/
 
 `metrics.json` includes OOF model scores, blend weights, selected postprocess
 parameters, per-well diagnostics, hidden-length slices, and feature schema
-metadata. `artifacts/runs.csv` is the compact experiment registry for comparing
-serious runs.
+metadata. ClearML is the experiment registry for comparing serious runs.
 
 ## Kaggle
 

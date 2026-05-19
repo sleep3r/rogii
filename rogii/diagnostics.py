@@ -1,34 +1,11 @@
 from __future__ import annotations
 
-import csv
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-RUN_REGISTRY_COLUMNS = [
-    "run_id",
-    "git_hash",
-    "config",
-    "schema_version",
-    "rows",
-    "wells",
-    "features",
-    "global_rmse",
-    "mean_well_rmse",
-    "p90_well_rmse",
-    "worst_well_rmse",
-    "no_typewell_rmse",
-    "long_hidden_rmse",
-    "short_hidden_rmse",
-    "postprocess",
-    "public_lb",
-    "runtime_min",
-    "notes",
-]
 
 
 def finite_float(value: Any) -> float | None:
@@ -130,51 +107,3 @@ def git_hash(repo: Path) -> str:
     except Exception:
         return ""
     return completed.stdout.strip()
-
-
-def append_run_registry(
-    registry_path: Path,
-    metrics: dict[str, Any],
-    config_path: Path,
-    run_id: str,
-    public_lb: float | None,
-    runtime_seconds: float,
-    notes: str,
-) -> None:
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    diagnostics = metrics.get("diagnostics") or {}
-    train = metrics.get("train") or {}
-    features = metrics.get("features") or {}
-    cv = metrics.get("cv") or {}
-    postprocess = {
-        "weight": cv.get("best_residual_weight"),
-        "notebook_blend": cv.get("best_notebook_blend"),
-        "smoothing": cv.get("best_smoothing"),
-    }
-    row = {
-        "run_id": run_id,
-        "git_hash": git_hash(Path(".")),
-        "config": str(config_path),
-        "schema_version": features.get("schema_version"),
-        "rows": train.get("rows"),
-        "wells": train.get("wells"),
-        "features": features.get("count"),
-        "global_rmse": diagnostics.get("global_rmse") or cv.get("rmse"),
-        "mean_well_rmse": diagnostics.get("mean_well_rmse"),
-        "p90_well_rmse": diagnostics.get("p90_well_rmse"),
-        "worst_well_rmse": diagnostics.get("worst_well_rmse"),
-        "no_typewell_rmse": diagnostics.get("no_typewell_rmse"),
-        "long_hidden_rmse": diagnostics.get("long_hidden_rmse"),
-        "short_hidden_rmse": diagnostics.get("short_hidden_rmse"),
-        "postprocess": json.dumps(postprocess, sort_keys=True),
-        "public_lb": public_lb,
-        "runtime_min": runtime_seconds / 60.0,
-        "notes": notes,
-    }
-
-    exists = registry_path.exists()
-    with registry_path.open("a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=RUN_REGISTRY_COLUMNS)
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)

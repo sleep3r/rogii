@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,14 +9,16 @@ import pytest
 import yaml
 
 from rogii.best_public_solution import Source, claimed_score, select_best_source
-from rogii.clearml_data import apply_data_clearml_overrides, selected_top_level_paths
+from rogii.clearml_data import (
+    _dataset_get_local_copy,
+    apply_data_clearml_overrides,
+    selected_top_level_paths,
+)
 from rogii.clearml_data import upload_dataset as clearml_upload_dataset
 from rogii.clearml_tracking import apply_clearml_overrides
 from rogii.config import DEFAULT_CONFIG
 from rogii.constants import FORMATIONS
-from rogii.diagnostics import append_run_registry
 from rogii.features import (
-    FEATURE_CACHE_SCHEMA_VERSION,
     build_target_mask,
     build_training_table,
     build_well_features,
@@ -203,6 +204,45 @@ def test_clearml_data_upload_requires_s3_before_clearml_import(tmp_path: Path) -
             s3_only=True,
             logger=SimpleNamespace(info=lambda *args, **kwargs: None),
         )
+
+
+def test_clearml_dataset_get_local_copy_supports_new_cache_arg(tmp_path: Path) -> None:
+    class DatasetWithCacheArg:
+        def __init__(self) -> None:
+            self.local_cache_path = None
+
+        def get_local_copy(self, local_cache_path: str | None = None) -> str:
+            self.local_cache_path = local_cache_path
+            return "/tmp/clearml-data"
+
+    dataset = DatasetWithCacheArg()
+    path = _dataset_get_local_copy(dataset, cache_dir=tmp_path)
+
+    assert path == "/tmp/clearml-data"
+    assert dataset.local_cache_path == str(tmp_path)
+
+
+def test_clearml_dataset_get_local_copy_supports_legacy_signature(
+    tmp_path: Path,
+) -> None:
+    class DatasetWithoutCacheArg:
+        def __init__(self) -> None:
+            self.called = False
+
+        def get_local_copy(self) -> str:
+            self.called = True
+            return "/tmp/legacy-clearml-data"
+
+    warnings = []
+    logger = SimpleNamespace(warn=lambda message, **fields: warnings.append(message))
+    dataset = DatasetWithoutCacheArg()
+    path = _dataset_get_local_copy(dataset, cache_dir=tmp_path, logger=logger)
+
+    assert path == "/tmp/legacy-clearml-data"
+    assert dataset.called is True
+    assert warnings == [
+        "ClearML Dataset.get_local_copy does not support custom cache dir"
+    ]
 
 
 def write_dwt_synthetic_well(tmp_path, name: str = "abc12345") -> tuple:
@@ -701,46 +741,6 @@ def test_notebook_blend_candidates_support_ranges() -> None:
     assert len(candidates) == 27
     assert candidates[0] == {"alpha": 0.5, "tau": 0.0, "w_pf": 0.0}
     assert candidates[-1] == {"alpha": 0.7, "tau": 10.0, "w_pf": 0.2}
-
-
-def test_run_registry_appends_required_columns(tmp_path) -> None:
-    path = tmp_path / "runs.csv"
-    metrics = {
-        "train": {"rows": 10, "wells": 2},
-        "features": {"count": 5, "schema_version": FEATURE_CACHE_SCHEMA_VERSION},
-        "cv": {
-            "rmse": 1.23,
-            "best_residual_weight": 1.0,
-            "best_notebook_blend": {"alpha": 0.98, "tau": 50.0, "w_pf": 0.05},
-            "best_smoothing": None,
-        },
-        "diagnostics": {
-            "global_rmse": 1.23,
-            "mean_well_rmse": 1.1,
-            "p90_well_rmse": 1.4,
-            "worst_well_rmse": 1.5,
-            "no_typewell_rmse": None,
-            "long_hidden_rmse": 1.2,
-            "short_hidden_rmse": 1.0,
-        },
-    }
-
-    append_run_registry(
-        path,
-        metrics,
-        tmp_path / "config.yml",
-        "test_run",
-        public_lb=None,
-        runtime_seconds=90.0,
-        notes="unit",
-    )
-
-    with path.open(newline="", encoding="utf-8") as file:
-        rows = list(csv.DictReader(file))
-    assert len(rows) == 1
-    assert rows[0]["run_id"] == "test_run"
-    assert rows[0]["schema_version"] == str(FEATURE_CACHE_SCHEMA_VERSION)
-    assert rows[0]["notes"] == "unit"
 
 
 def test_notebook_postprocess_uses_md_from_last_known() -> None:

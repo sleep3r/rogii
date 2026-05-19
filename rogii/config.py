@@ -127,9 +127,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "output_dir": "artifacts/stack",
         "submission_path": "submission.csv",
     },
-    "runs": {
-        "registry_path": "artifacts/runs.csv",
-    },
     "tracking": {
         "clearml": {
             "enabled": False,

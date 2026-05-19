@@ -51,20 +51,29 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Added Make targets:
   - `make train-server INSTANCE=...`;
   - alias `make train-spacebridge INSTANCE=...`;
-  - configurable `SPACEBRIDGE_CMD_ARGS`, `CLEARML_*`, `SERVER_NOTES`, and
-    `SPACEBRIDGE_IMAGE`;
+  - configurable `SPACEBRIDGE_CMD_ARGS`, `CLEARML_*`, and `SERVER_NOTES`;
+  - `make check-server-env` validates Docker/Buildx plus local `portainer.yml`
+    without requiring `IMAGE_NAME`; spacebridge owns Harbor image naming and
+    auto-tagging from `REGISTRY_USERNAME`;
   - by default, spacebridge passes `data_clearml_enabled=true` and the ClearML
     Dataset project/name/version.
 - Added optional ClearML tracking:
   - `tracking.clearml` config block in defaults, `stack.yml`, and `quick.yml`;
   - CLI/env overrides such as `--clearml_enabled=true` and
     `ROGII_CLEARML_ENABLED=true`;
-  - resolved config, scalar metrics, submission, run registry, and every file
-    under the run output directory are logged when enabled;
+  - resolved config, scalar metrics, submission, and every file under the run
+    output directory are logged when enabled;
   - `model.pkl` upload is enabled for server runs by default via
     `CLEARML_LOG_MODEL=true`;
   - because the task `output_uri` points to S3, model/artifact uploads land in
     `s3://s3-basket-cold.wb.ru/ds-experiments`.
+- Fixed ClearML Dataset download compatibility with server ClearML versions
+  where `Dataset.get_local_copy()` does not accept `local_cache_path`; those
+  runs now fall back to ClearML's default cache instead of failing before
+  training.
+- Removed the local `artifacts/runs.csv` registry from the training path; ClearML
+  is now the single experiment registry, while per-run details stay in
+  `metrics.json` and ClearML scalars/artifacts.
 - Added `rogii/train.py` as a thin entrypoint for tools expecting a train module.
 - Validation:
   - `uv lock`: passed with `spacebridge` from nexus;
@@ -169,7 +178,7 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Next: rerun clean schema v7 fold-safe full training after clearing
   `artifacts/feature_cache` and `artifacts/stack`.
 
-### Fold-Safe Validation + Run Registry
+### Fold-Safe Validation
 
 - Reworked the main trainer so OOF features are built fold-by-fold with
   `KaggleTopContext` constructed only from train-fold wells.
@@ -177,13 +186,11 @@ run here with command, data, CV, LB, runtime, and the next decision.
   wells after OOF weights/postprocess are selected.
 - `FEATURE_CACHE_SCHEMA_VERSION` bumped to 6; feature cache keys now include the
   `KaggleTopContext` key, so fold-safe and full-context features cannot collide.
-- Added run diagnostics and `artifacts/runs.csv` registry with global RMSE,
-  per-well RMSE, P90/worst well RMSE, typewell/no-typewell slices, hidden-length
-  slices, selected postprocess, runtime, notes, and optional public LB.
+- Added run diagnostics with global RMSE, per-well RMSE, P90/worst well RMSE,
+  typewell/no-typewell slices, and hidden-length slices.
 - Public config additions:
   - `validation.fold_safe_context: true`;
-  - `validation.final_model_strategy: full_context`;
-  - `runs.registry_path: artifacts/runs.csv`.
+  - `validation.final_model_strategy: full_context`.
 - Validation:
   - `uv run pytest -q`: 13 passed;
   - `make check`: passed;

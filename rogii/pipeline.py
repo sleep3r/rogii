@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 from pathlib import Path
-from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -13,7 +12,7 @@ import yaml
 from .clearml_data import apply_data_clearml_overrides, prepare_clearml_data_if_needed
 from .clearml_tracking import ClearMLTracker, apply_clearml_overrides
 from .config import load_config
-from .diagnostics import append_run_registry, git_hash, regression_diagnostics
+from .diagnostics import git_hash, regression_diagnostics
 from .features import FEATURE_CACHE_SCHEMA_VERSION, build_training_table
 from .io import (
     horizontal_files,
@@ -318,7 +317,6 @@ def train_fold_safe_oof(
 
 
 def main() -> None:
-    run_started_at = perf_counter()
     args = parse_args()
     run_id = args.run_id or default_run_id()
     logger = RunLogger()
@@ -512,25 +510,11 @@ def main() -> None:
 
     with logger.step("Save artifacts", output_dir=config["outputs"]["output_dir"]):
         save_outputs(model, feature_names, config, metrics, args.config)
-    registry_path = Path(
-        config.get("runs", {}).get("registry_path", "artifacts/runs.csv")
-    )
-    with logger.step("Append run registry", path=registry_path, run_id=run_id):
-        append_run_registry(
-            registry_path,
-            metrics,
-            args.config,
-            run_id,
-            args.public_lb,
-            perf_counter() - run_started_at,
-            args.notes,
-        )
     with logger.step("Report ClearML artifacts"):
         clearml_tracker.report_metrics(metrics)
         clearml_tracker.upload_artifacts(
             Path(config["outputs"]["output_dir"]),
             submission_path,
-            registry_path,
         )
         clearml_tracker.close()
     logger.log("DONE", "Training run complete", total_duration=logger.elapsed())

@@ -231,14 +231,12 @@ class ClearMLTracker:
         self,
         output_dir: Path,
         submission_path: Path,
-        registry_path: Path,
     ) -> None:
         if not self.log_artifacts_enabled:
             return
 
         artifacts = {
             "submission.csv": submission_path,
-            "runs.csv": registry_path,
         }
         if output_dir.is_dir():
             for path in sorted(output_dir.rglob("*")):

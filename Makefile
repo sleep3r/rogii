@@ -41,7 +41,6 @@ MODEL_DATASET_DIR ?= artifacts/kaggle_model_dataset
 
 INSTANCE ?=
 SPACEBRIDGE_TASK ?= rogii
-SPACEBRIDGE_IMAGE ?= sleep3r/wb_training:rogii
 SERVER_NOTES ?= spacebridge_train
 CLEARML_ENABLED ?= true
 CLEARML_PROJECT ?= $(PROJECT_NAME)
@@ -79,7 +78,7 @@ BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file 
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -102,14 +101,20 @@ upload-clearml-data: ensure-data
 clearml-data-local-path:
 	$(PYTHON) -m rogii.clearml_data download --project "$(CLEARML_DATA_PROJECT)" --name "$(CLEARML_DATA_NAME)" --version "$(CLEARML_DATA_VERSION)" --cache-dir "$(CLEARML_DATA_CACHE_DIR)"
 
+check-server-env:
+	docker version
+	docker context show
+	docker buildx version
+	$(PYTHON) -m rogii.spacebridge_preflight $(if $(INSTANCE),--instance "$(INSTANCE)",)
+
 train-local: ensure-data
 	$(PYTHON) -m rogii --config $(CONFIG)
 
 train: train-local
 
-train-server train-spacebridge:
+train-server train-spacebridge: check-server-env
 	@test -n "$(INSTANCE)" || (echo "Set INSTANCE=<portainer instance from portainer.yml>" && exit 1)
-	$(UV) run spacebridge train $(SPACEBRIDGE_TASK) --instance $(INSTANCE) $(if $(SPACEBRIDGE_IMAGE),--image-name $(SPACEBRIDGE_IMAGE),) --cmd-args "$(SPACEBRIDGE_CMD_ARGS)"
+	$(UV) run spacebridge train $(SPACEBRIDGE_TASK) --instance $(INSTANCE) --cmd-args "$(SPACEBRIDGE_CMD_ARGS)"
 
 quick-train:
 	$(PYTHON) -m rogii --config configs/quick.yml

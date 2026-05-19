@@ -174,9 +174,6 @@ outputs:
   output_dir: artifacts/stack
   submission_path: submission.csv
 
-runs:
-  registry_path: artifacts/runs.csv
-
 tracking:
   clearml:
     enabled: false

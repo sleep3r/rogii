@@ -115,9 +115,6 @@ outputs:
   output_dir: artifacts/quick
   submission_path: submission.csv
 
-runs:
-  registry_path: artifacts/runs.csv
-
 tracking:
   clearml:
     enabled: false
