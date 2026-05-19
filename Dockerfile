@@ -25,16 +25,23 @@ RUN uv sync --locked --no-cache --no-dev
 FROM nvidia/cuda:12.6.0-base-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/root/.local/bin:$PATH"
+ENV PATH="/app/.venv/bin:/root/.local/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    clinfo \
     curl \
     git \
     libgomp1 \
     ocl-icd-libopencl1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/OpenCL/vendors \
+    && printf "libnvidia-opencl.so.1\n" > /etc/OpenCL/vendors/nvidia.icd
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 WORKDIR /app
 
@@ -48,5 +55,6 @@ COPY . .
 
 ARG CMD_ARGS=""
 ENV CMD_ARGS=$CMD_ARGS
+ENV ROGII_GPU_PREFLIGHT=auto
 
-CMD ["sh", "-c", "uv run python -m rogii $CMD_ARGS"]
+CMD ["sh", "-c", "python -m rogii.gpu_preflight $CMD_ARGS && python -m rogii $CMD_ARGS"]

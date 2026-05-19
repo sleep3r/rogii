@@ -49,6 +49,20 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Rust remains deferred until the next profiling pass shows a stable kernel-level
   bottleneck after split-cache and workers.
 
+### GPU Container Build Hardening
+
+- Restored LightGBM GPU params in `configs/stack_gpu.yml`.
+- Added Docker OpenCL runtime pieces:
+  - `clinfo`;
+  - `ocl-icd-libopencl1`;
+  - `/etc/OpenCL/vendors/nvidia.icd` pointing at `libnvidia-opencl.so.1`;
+  - `NVIDIA_VISIBLE_DEVICES=all`;
+  - `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.
+- Added `rogii.gpu_preflight` and wired it into Docker `CMD` before training.
+  It detects GPU models from the resolved config, runs `nvidia-smi -L`, prints
+  `clinfo -l`, and performs a one-tree LightGBM GPU smoke fit. A broken
+  OpenCL/LightGBM runtime now fails immediately instead of after feature prep.
+
 ### Spacebridge + ClearML Server Training Pass
 
 - Added top-level experiment destination config:

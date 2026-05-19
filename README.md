@@ -117,12 +117,15 @@ GPU model params:
 
 - features: `num_workers: 8`;
 - CatBoost: `task_type=GPU`, `devices=0`;
-- LightGBM: `device_type=gpu`, `gpu_device_id=0`, `max_bin=63`.
+- LightGBM: `device_type=gpu`, `gpu_device_id=0`, `gpu_use_dp=false`,
+  `max_bin=63`.
 
-Training logs print `Model backend config` before every model fit. If LightGBM
-is not actually GPU-capable inside the image, the run should fail loudly there
-instead of silently falling back to CPU. The Docker image installs the OpenCL
-ICD loader needed by LightGBM's GPU backend; CatBoost uses CUDA directly.
+Training logs print `Model backend config` before every model fit, so the actual
+backend is visible in ClearML/Portainer logs. The Docker image installs
+`clinfo`, writes an NVIDIA OpenCL ICD file, and runs `rogii.gpu_preflight`
+before training. If CUDA/OpenCL is not visible to the container, the job fails in
+the first seconds with `nvidia-smi`, `clinfo`, or LightGBM smoke-test output
+instead of dying after feature preparation.
 
 The command intentionally does not pass `--image-name`; spacebridge reads
 `portainer.yml` and handles Harbor naming/tagging from `REGISTRY_USERNAME`.
