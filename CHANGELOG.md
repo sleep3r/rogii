@@ -20,6 +20,61 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### PF/Beam Robust Expert Pack
+
+- Added schema v11 feature pack focused on the expert-report finding that
+  `PF_ANCC` is the strongest standalone path while blind `kg_signal_mean_*`
+  is polluted by weak DTW/DWT/NCC/spatial candidates.
+- New features:
+  - `kg_signal_robust_tvt`;
+  - `kg_signal_robust_minus_last`;
+  - `kg_signal_robust_minus_flat`;
+  - `kg_signal_robust_std`;
+  - `kg_signal_robust_range`;
+  - `kg_signal_robust_vs_pf`;
+  - `kg_signal_robust_vs_beam`;
+  - `pf_ancc_conf`, `beam_conf`;
+  - `pf_beam_gap`, `pf_beam_abs_gap`, `pf_dtw_gap`, `pf_dwt_gap`.
+- The old `kg_signal_mean_*` columns are intentionally kept unchanged for
+  compatibility and ablation safety.
+- Implemented the same formula in full feature building and split-cache
+  context rebuilding, so fold-safe OOF and inference stay aligned.
+- Validation:
+  - `uv run ruff check .`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run pytest -q`: 38 passed;
+  - `make check`: passed;
+  - `make quick-train`: passed, quick OOF ensemble RMSE `10.35219`,
+    OOF+postprocess RMSE `10.02730`, features `397`;
+  - `make expert-report CONFIG=configs/quick.yml ...`: robust candidate RMSE
+    `10.78672` vs `kg_signal_mean_*` RMSE `90.37376`;
+  - `make expert-report CONFIG=configs/stack_gpu.yml EXPERT_REPORT_MAX_WELLS=100 ...`:
+    `kg_signal_robust_minus_flat__as_tvt` became the best standalone expert
+    with RMSE `12.86215`, ahead of `PF_ANCC` RMSE `13.81448` and old
+    `kg_signal_mean_*` RMSE `70.01170`.
+- Full train/LB result: pending after the current running baseline finishes.
+
+### Candidate Expert Report
+
+- Added `rogii.expert_report` and `make expert-report`.
+- Purpose: rank absolute TVT candidate paths before training another GBM stack,
+  so the next full experiment can target weak experts instead of chasing small
+  LB noise.
+- Default report uses fold-safe contexts:
+  - for each fold, context is built from train-fold wells;
+  - only validation-fold rows are scored;
+  - this avoids optimistic spatial/dense/formation diagnostics.
+- Outputs:
+  - `artifacts/expert_report.md`;
+  - `artifacts/expert_report.csv`;
+  - `artifacts/expert_report.json`.
+- Supports `EXPERT_REPORT_CONTEXT=full` for faster full-context diagnostics and
+  `EXPERT_REPORT_MAX_WELLS=<n>` for quick checks.
+- Smoke:
+  - `make expert-report CONFIG=configs/quick.yml ...`: passed;
+  - quick best candidate was `kg_pf_ancc_minus_last__as_tvt` with RMSE
+    `10.32416`.
+
 ### Ravaghi-Style Blend/Postprocess Quick Wins
 
 - Enabled negative hill-climb weights in the main blend config:

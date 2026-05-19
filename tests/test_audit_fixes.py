@@ -615,6 +615,18 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         "tvt_dense_d",
         "beam_cons_d",
         "sc_cons_d",
+        "kg_signal_robust_tvt",
+        "kg_signal_robust_minus_last",
+        "kg_signal_robust_minus_flat",
+        "kg_signal_robust_std",
+        "kg_signal_robust_range",
+        "kg_signal_robust_vs_pf",
+        "kg_signal_robust_vs_beam",
+        "pf_ancc_conf",
+        "beam_conf",
+        "pf_beam_abs_gap",
+        "pf_dtw_gap",
+        "pf_dwt_gap",
     ]
 
     for column in required:

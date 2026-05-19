@@ -1058,6 +1058,130 @@ def full_scalar(n: int, hidden_idx: np.ndarray, value: float) -> np.ndarray:
     return full
 
 
+def add_pf_beam_robust_features(
+    features: dict[str, np.ndarray | float],
+    n: int,
+    hidden_idx: np.ndarray,
+    flat_pred: np.ndarray,
+    last_tvt: float,
+    pf_ancc_signal: np.ndarray | None,
+    pf_ancc_std: np.ndarray | None,
+    beam_mean: np.ndarray,
+    beam_ref: np.ndarray,
+    beam_matrix: np.ndarray | None,
+    dtw_signal: np.ndarray | None = None,
+    dwt_signal: np.ndarray | None = None,
+) -> None:
+    """Add robust PF/beam candidate features.
+
+    PF_ANCC is the anchor because it is the strongest standalone expert in
+    fold-safe diagnostics. Beam candidates are allowed to smooth it only when
+    they agree locally; disagreement becomes confidence/gating signal.
+    """
+
+    hidden_len = len(hidden_idx)
+    candidates: list[np.ndarray] = []
+    base_weights: list[float] = []
+
+    pf = None
+    if pf_ancc_signal is not None:
+        pf = np.asarray(pf_ancc_signal, dtype=float)
+        candidates.append(pf)
+        base_weights.append(4.0)
+
+    beam_values = np.asarray(beam_mean, dtype=float)
+    candidates.append(beam_values)
+    base_weights.append(1.5)
+    candidates.append(np.asarray(beam_ref, dtype=float))
+    base_weights.append(1.5)
+
+    if beam_matrix is not None and beam_matrix.size:
+        matrix = np.asarray(beam_matrix, dtype=float)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(-1, 1)
+        for column_idx in range(matrix.shape[1]):
+            candidates.append(matrix[:, column_idx])
+            base_weights.append(0.75)
+
+    candidate_matrix = np.vstack(candidates).T
+    base_weight_array = np.asarray(base_weights, dtype=float)
+    if pf is not None and np.isfinite(pf).any():
+        center = pf
+    else:
+        center = np.nanmedian(candidate_matrix, axis=1)
+
+    distances = np.abs(candidate_matrix - center[:, None])
+    finite = np.isfinite(candidate_matrix) & np.isfinite(center[:, None])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        row_median = np.nanmedian(np.where(finite, distances, np.nan), axis=1)
+        row_mad = np.nanmedian(
+            np.abs(distances - row_median[:, None]),
+            axis=1,
+        )
+    row_median = np.where(np.isfinite(row_median), row_median, 0.0)
+    row_mad = np.where(np.isfinite(row_mad), row_mad, 0.0)
+    cutoff = np.maximum(30.0, row_median + 2.0 * row_mad + 15.0)
+    kept = finite & (distances <= cutoff[:, None])
+    if pf is not None:
+        kept[:, 0] = np.isfinite(candidate_matrix[:, 0])
+
+    weights = base_weight_array[None, :] / (1.0 + distances / 25.0)
+    weights = np.where(kept & np.isfinite(weights), weights, 0.0)
+    weight_sum = weights.sum(axis=1)
+    weighted_values = np.where(kept, candidate_matrix, 0.0)
+    robust = np.divide(
+        (weighted_values * weights).sum(axis=1),
+        weight_sum,
+        out=np.where(np.isfinite(center), center, np.nanmean(candidate_matrix, axis=1)),
+        where=weight_sum > 1e-12,
+    )
+
+    kept_values = np.where(kept, candidate_matrix, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        robust_range = np.nanmax(kept_values, axis=1) - np.nanmin(kept_values, axis=1)
+        robust_std = np.nanstd(kept_values, axis=1)
+    robust_range = np.where(np.isfinite(robust_range), robust_range, 0.0)
+    robust_std = np.where(np.isfinite(robust_std), robust_std, 0.0)
+
+    if beam_matrix is not None and np.asarray(beam_matrix).size:
+        beam_std = np.nanstd(np.asarray(beam_matrix, dtype=float), axis=1)
+    else:
+        beam_std = np.zeros(hidden_len, dtype=float)
+    if pf_ancc_std is not None:
+        pf_std = np.asarray(pf_ancc_std, dtype=float)
+    else:
+        pf_std = np.full(hidden_len, np.nan, dtype=float)
+
+    features["kg_signal_robust_tvt"] = full_feature(n, hidden_idx, robust)
+    features["kg_signal_robust_minus_flat"] = full_feature(
+        n, hidden_idx, robust - flat_pred[hidden_idx]
+    )
+    features["kg_signal_robust_minus_last"] = full_feature(
+        n, hidden_idx, robust - last_tvt
+    )
+    features["kg_signal_robust_std"] = full_feature(n, hidden_idx, robust_std)
+    features["kg_signal_robust_range"] = full_feature(n, hidden_idx, robust_range)
+    if pf is not None:
+        features["kg_signal_robust_vs_pf"] = full_feature(n, hidden_idx, robust - pf)
+        features["pf_beam_gap"] = full_feature(n, hidden_idx, pf - beam_values)
+        features["pf_beam_abs_gap"] = full_feature(
+            n, hidden_idx, np.abs(pf - beam_values)
+        )
+        if dtw_signal is not None:
+            features["pf_dtw_gap"] = full_feature(
+                n, hidden_idx, pf - np.asarray(dtw_signal, dtype=float)
+            )
+        if dwt_signal is not None:
+            features["pf_dwt_gap"] = full_feature(
+                n, hidden_idx, pf - np.asarray(dwt_signal, dtype=float)
+            )
+    features["kg_signal_robust_vs_beam"] = full_feature(
+        n, hidden_idx, robust - beam_values
+    )
+    features["pf_ancc_conf"] = full_feature(n, hidden_idx, 1.0 / (1.0 + pf_std))
+    features["beam_conf"] = full_feature(n, hidden_idx, 1.0 / (1.0 + beam_std))
+
+
 def add_offset_residuals(
     features: dict[str, np.ndarray | float],
     prefix: str,
@@ -1101,6 +1225,19 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_signal_mean_minus_flat",
         "kg_signal_mean_minus_last",
         "kg_signal_std",
+        "kg_signal_robust_tvt",
+        "kg_signal_robust_minus_flat",
+        "kg_signal_robust_minus_last",
+        "kg_signal_robust_std",
+        "kg_signal_robust_range",
+        "kg_signal_robust_vs_pf",
+        "kg_signal_robust_vs_beam",
+        "pf_ancc_conf",
+        "beam_conf",
+        "pf_beam_gap",
+        "pf_beam_abs_gap",
+        "pf_dtw_gap",
+        "pf_dwt_gap",
         "kg_form_ancc_tvt",
         "kg_form_ancc_minus_flat",
         "kg_form_ancc_minus_last",
@@ -1219,13 +1356,16 @@ def build_kaggle_top_signal_features(
     known_gr = gr_full[known_idx]
     known_tvt = tvt_input[known_idx]
     dwt_signal = None
+    dwt_hidden_signal = None
     dense_signal = None
     form_ancc_signal = None
     pf_ancc_signal = None
+    pf_ancc_std_signal = None
 
     stage_started_at = perf_counter()
     beam_signals: list[np.ndarray] = []
     beam_by_tag: dict[str, np.ndarray] = {}
+    beam_matrix = None
     for beam_cfg in top_cfg.get("beam_configs", []):
         beam_width, move_cost, emit_scale, smooth_radius, tag = parse_beam_config(
             beam_cfg
@@ -1532,6 +1672,7 @@ def build_kaggle_top_signal_features(
             )
         dwt_matrix = np.vstack(dwt_hidden_signals).T
         dwt_hidden = np.nanmean(dwt_matrix, axis=1)
+        dwt_hidden_signal = dwt_hidden
         dwt_signal = np.full(n, np.nan, dtype=float)
         dwt_signal[hidden_idx] = dwt_hidden
         features["kg_dwt_tvt"][hidden_idx] = dwt_signal[hidden_idx]
@@ -1752,6 +1893,7 @@ def build_kaggle_top_signal_features(
         features["kg_pf_ancc_minus_last"][hidden_idx] = pf_ancc - last_tvt
         features["kg_pf_ancc_std"][hidden_idx] = pf_ancc_std
         pf_ancc_signal = pf_ancc
+        pf_ancc_std_signal = pf_ancc_std
         features["pf_ancc"] = full_feature(n, hidden_idx, pf_ancc)
         features["pf_ancc_std"] = full_feature(n, hidden_idx, pf_ancc_std)
         features["pf_ancc_delta"] = full_feature(n, hidden_idx, pf_ancc - last_tvt)
@@ -1877,6 +2019,21 @@ def build_kaggle_top_signal_features(
             DTW_OFFSETS,
         )
 
+    add_pf_beam_robust_features(
+        features,
+        n,
+        hidden_idx,
+        flat_pred,
+        last_tvt,
+        pf_ancc_signal,
+        pf_ancc_std_signal,
+        beam_mean,
+        beam_ref,
+        beam_matrix,
+        dtw_signal[hidden_idx] if dtw_signal is not None else None,
+        dwt_hidden_signal,
+    )
+
     signal_matrix = np.vstack(signal_stack).T
     features["sig_std"] = full_feature(n, hidden_idx, np.nanstd(signal_matrix, axis=1))
     features["sig_mean_d"] = full_feature(
@@ -1989,11 +2146,14 @@ def build_kaggle_context_signal_features(
         beam_ref = beam_mean
 
     signal_stack: list[np.ndarray] = []
+    beam_signal_stack: list[np.ndarray] = []
+    beam_candidates_found = False
     for beam_cfg in top_cfg.get("beam_configs", []):
         _, _, _, _, tag = parse_beam_config(beam_cfg)
         column = f"beam_{tag}_d"
         if column in base_features.columns:
-            signal_stack.append(
+            beam_candidates_found = True
+            signal = (
                 _hidden_column(
                     base_features,
                     column,
@@ -2002,8 +2162,11 @@ def build_kaggle_context_signal_features(
                 )
                 + last_tvt
             )
+            signal_stack.append(signal)
+            beam_signal_stack.append(signal)
     if not signal_stack:
         signal_stack.append(beam_mean)
+        beam_signal_stack.append(beam_mean)
 
     ncc_windows = [int(item) for item in top_cfg.get("ncc_windows", [8, 15, 25])]
     for window in ncc_windows:
@@ -2038,15 +2201,15 @@ def build_kaggle_context_signal_features(
             np.full(len(hidden_idx), last_tvt, dtype=float),
         )
         signal_stack.append(dtw_hidden)
+    dwt_hidden = None
     if top_cfg.get("dwt_enabled", False) and "kg_dwt_tvt" in base_features.columns:
-        signal_stack.append(
-            _hidden_column(
-                base_features,
-                "kg_dwt_tvt",
-                hidden_idx,
-                np.full(len(hidden_idx), last_tvt, dtype=float),
-            )
+        dwt_hidden = _hidden_column(
+            base_features,
+            "kg_dwt_tvt",
+            hidden_idx,
+            np.full(len(hidden_idx), last_tvt, dtype=float),
         )
+        signal_stack.append(dwt_hidden)
 
     form_ancc_signal = None
     form_mean = flat_pred[hidden_idx]
@@ -2211,12 +2374,20 @@ def build_kaggle_context_signal_features(
         hidden_rows=len(hidden_idx),
     )
 
+    pf_ancc_signal = None
+    pf_ancc_std_signal = None
     if top_cfg.get("particle_enabled", False) and "pf_ancc" in base_features.columns:
         pf_ancc_signal = _hidden_column(
             base_features,
             "pf_ancc",
             hidden_idx,
             np.full(len(hidden_idx), last_tvt, dtype=float),
+        )
+        pf_ancc_std_signal = _hidden_column(
+            base_features,
+            "pf_ancc_std",
+            hidden_idx,
+            np.full(len(hidden_idx), np.nan, dtype=float),
         )
         features["kg_pf_ancc_vs_dense"] = full_feature(
             n, hidden_idx, pf_ancc_signal - dense_signal
@@ -2229,6 +2400,26 @@ def build_kaggle_context_signal_features(
                 n, hidden_idx, pf_ancc_signal - form_ancc_signal
             )
         signal_stack.append(pf_ancc_signal)
+
+    beam_matrix = (
+        np.vstack(beam_signal_stack).T
+        if beam_signal_stack and beam_candidates_found
+        else None
+    )
+    add_pf_beam_robust_features(
+        features,
+        n,
+        hidden_idx,
+        flat_pred,
+        last_tvt,
+        pf_ancc_signal,
+        pf_ancc_std_signal,
+        beam_mean,
+        beam_ref,
+        beam_matrix,
+        dtw_hidden,
+        dwt_hidden,
+    )
 
     signal_matrix = np.vstack(signal_stack).T
     signal_mean = np.nanmean(signal_matrix, axis=1)

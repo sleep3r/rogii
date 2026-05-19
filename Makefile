@@ -24,6 +24,14 @@ FEATURE_PROFILE_DISABLE_CACHE ?= true
 FEATURE_PROFILE_CACHE_ARG := $(if $(filter true 1 yes,$(FEATURE_PROFILE_DISABLE_CACHE)),--disable-cache,)
 FEATURE_PROFILE_STAGE ?= true
 FEATURE_PROFILE_STAGE_ARG := $(if $(filter false 0 no,$(FEATURE_PROFILE_STAGE)),--no-stage-profile,)
+EXPERT_REPORT ?= artifacts/expert_report.md
+EXPERT_REPORT_CSV ?= artifacts/expert_report.csv
+EXPERT_REPORT_JSON ?= artifacts/expert_report.json
+EXPERT_REPORT_TOP_N ?= 40
+EXPERT_REPORT_MAX_WELLS ?=
+EXPERT_REPORT_CONTEXT ?= fold-safe
+EXPERT_REPORT_CONTEXT_ARG := $(if $(filter full full-context,$(EXPERT_REPORT_CONTEXT)),--full-context,)
+EXPERT_REPORT_MAX_WELLS_ARG := $(if $(EXPERT_REPORT_MAX_WELLS),--max-wells $(EXPERT_REPORT_MAX_WELLS),)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -83,12 +91,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -132,6 +140,9 @@ train-server train-spacebridge: check-server-env
 
 quick-train:
 	$(PYTHON) -m rogii --config configs/quick.yml
+
+expert-report: ensure-data
+	$(PYTHON) -m rogii.expert_report --config $(CONFIG) --output $(EXPERT_REPORT) --csv $(EXPERT_REPORT_CSV) --json $(EXPERT_REPORT_JSON) --top-n $(EXPERT_REPORT_TOP_N) $(EXPERT_REPORT_MAX_WELLS_ARG) $(EXPERT_REPORT_CONTEXT_ARG)
 
 profile: ensure-data
 	mkdir -p $(PROFILE_DIR)
