@@ -16,7 +16,7 @@ from rogii.clearml_data import (
 )
 from rogii.clearml_data import upload_dataset as clearml_upload_dataset
 from rogii.clearml_tracking import apply_clearml_overrides
-from rogii.config import DEFAULT_CONFIG
+from rogii.config import DEFAULT_CONFIG, load_config
 from rogii.constants import FORMATIONS
 from rogii.features import (
     _build_well_features_single_layer,
@@ -26,6 +26,11 @@ from rogii.features import (
     feature_cache_path,
 )
 from rogii.filter_model_bundle import filter_lines
+from rogii.gpu_preflight import (
+    catboost_gpu_models,
+    lightgbm_gpu_models,
+    xgboost_gpu_models,
+)
 from rogii.modeling import (
     EnsembleRegressor,
     ResidualModel,
@@ -985,6 +990,22 @@ def test_configs_use_canonical_pf_postprocess_column() -> None:
     for path in [Path("configs/quick.yml"), Path("configs/stack.yml")]:
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert config["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
+
+
+def test_stack_gpu_uses_catboost_and_xgboost_gpu_without_lightgbm_gpu() -> None:
+    config = load_config(Path("configs/stack_gpu.yml"))
+
+    assert [model["id"] for model in catboost_gpu_models(config)] == [
+        "cat_lr025",
+        "cat_lr020",
+        "cat_lr030",
+    ]
+    assert [model["id"] for model in xgboost_gpu_models(config)] == [
+        "xgb_lr025",
+        "xgb_lr020",
+        "xgb_lr030",
+    ]
+    assert lightgbm_gpu_models(config) == []
 
 
 def test_notebook_postprocess_requires_explicit_pf_column() -> None:

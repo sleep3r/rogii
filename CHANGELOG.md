@@ -22,6 +22,17 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ### Validation Anchor Hardening Pass
 
+- Updated `configs/stack_gpu.yml` to be a hybrid server config:
+  - CatBoost stays on GPU;
+  - LightGBM is removed from the server stack;
+  - XGBoost CUDA variants `xgb_lr025`, `xgb_lr020`, and `xgb_lr030` replace the
+    LightGBM variants.
+- Rationale: the Portainer run showed CatBoost GPU folds finishing in under a
+  minute, while LightGBM spent 40+ minutes on the first fold both through
+  OpenCL/GPU and CPU. The server config now avoids LightGBM entirely until we
+  have a separate reason to debug/tune it.
+- Added XGBoost CUDA detection and a one-tree smoke fit to `rogii.gpu_preflight`
+  so a broken XGBoost/CUDA runtime fails before feature preparation starts.
 - Switched the default final model strategy back to `full_context`:
   - `DEFAULT_CONFIG.validation.final_model_strategy`;
   - `configs/stack.yml`;

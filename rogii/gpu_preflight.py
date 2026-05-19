@@ -50,6 +50,19 @@ def catboost_gpu_models(config: dict[str, Any]) -> list[dict[str, Any]]:
     return models
 
 
+def xgboost_gpu_models(config: dict[str, Any]) -> list[dict[str, Any]]:
+    models = []
+    for model in base_models(config):
+        if str(model.get("name", "")).lower() not in {"xgboost", "xgb"}:
+            continue
+        params = model.get("params") or {}
+        device = str(params.get("device", "cpu")).lower()
+        tree_method = str(params.get("tree_method", "")).lower()
+        if device.startswith("cuda") or device == "gpu" or tree_method == "gpu_hist":
+            models.append(model)
+    return models
+
+
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     if shutil.which(command[0]) is None:
         raise RuntimeError(f"Required command not found in container: {command[0]}")
@@ -100,6 +113,43 @@ def run_lightgbm_opencl_smoke(model: dict[str, Any]) -> None:
     LGBMRegressor(**smoke_params).fit(X, y)
 
 
+def run_xgboost_cuda_smoke(model: dict[str, Any]) -> None:
+    from xgboost import XGBRegressor
+
+    params = dict(model.get("params") or {})
+    smoke_params = {
+        "device": params.get("device", "cuda"),
+        "tree_method": params.get("tree_method", "hist"),
+        "max_bin": int(params.get("max_bin", 256)),
+        "n_estimators": 1,
+        "learning_rate": 0.1,
+        "max_depth": 2,
+        "min_child_weight": 1,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "objective": "reg:squarederror",
+        "verbosity": 0,
+        "random_state": 42,
+    }
+    if "sampling_method" in params:
+        smoke_params["sampling_method"] = params["sampling_method"]
+    X = np.array(
+        [
+            [0.0, 1.0, 0.2],
+            [1.0, 0.0, 0.3],
+            [2.0, 1.0, 0.4],
+            [3.0, 0.0, 0.5],
+            [4.0, 1.0, 0.6],
+            [5.0, 0.0, 0.7],
+            [6.0, 1.0, 0.8],
+            [7.0, 0.0, 0.9],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array([0.0, 0.2, 0.4, 0.8, 1.0, 1.2, 1.4, 1.8], dtype=np.float32)
+    XGBRegressor(**smoke_params).fit(X, y)
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     mode = os.getenv("ROGII_GPU_PREFLIGHT", "auto").lower()
@@ -111,13 +161,16 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(args.config)
     lgb_gpu = lightgbm_gpu_models(config)
     cat_gpu = catboost_gpu_models(config)
-    if not lgb_gpu and not cat_gpu:
+    xgb_gpu = xgboost_gpu_models(config)
+    if not lgb_gpu and not cat_gpu and not xgb_gpu:
         print("GPU preflight: no GPU models requested", flush=True)
         return
 
     print(
         "GPU preflight: requested "
-        f"catboost_gpu={len(cat_gpu)} lightgbm_gpu={len(lgb_gpu)}",
+        f"catboost_gpu={len(cat_gpu)} "
+        f"lightgbm_gpu={len(lgb_gpu)} "
+        f"xgboost_gpu={len(xgb_gpu)}",
         flush=True,
     )
     nvidia_smi = require_command(["nvidia-smi", "-L"], "nvidia-smi -L")
@@ -133,6 +186,10 @@ def main(argv: list[str] | None = None) -> None:
             raise RuntimeError(f"OpenCL has no visible device:\n{clinfo}")
         run_lightgbm_opencl_smoke(lgb_gpu[0])
         print("GPU preflight: LightGBM OpenCL smoke passed", flush=True)
+
+    if xgb_gpu:
+        run_xgboost_cuda_smoke(xgb_gpu[0])
+        print("GPU preflight: XGBoost CUDA smoke passed", flush=True)
 
 
 if __name__ == "__main__":

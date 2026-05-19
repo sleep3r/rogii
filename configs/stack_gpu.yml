@@ -50,54 +50,51 @@ model:
         random_strength: 0.2
         bootstrap_type: Bernoulli
         subsample: 0.8
-    - id: lgb_lr025
-      name: lightgbm
+    - id: xgb_lr025
+      name: xgboost
       params:
-        device_type: gpu
-        gpu_device_id: 0
-        gpu_use_dp: false
-        max_bin: 63
         n_estimators: 8000
         early_stopping_rounds: 300
         learning_rate: 0.025
-        num_leaves: 255
-        min_child_samples: 15
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
         subsample: 0.8
-        subsample_freq: 1
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
-    - id: lgb_lr020
-      name: lightgbm
+    - id: xgb_lr020
+      name: xgboost
       params:
-        device_type: gpu
-        gpu_device_id: 0
-        gpu_use_dp: false
-        max_bin: 63
         n_estimators: 8000
         early_stopping_rounds: 300
         learning_rate: 0.020
-        num_leaves: 255
-        min_child_samples: 15
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
         subsample: 0.8
-        subsample_freq: 1
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
-    - id: lgb_lr030
-      name: lightgbm
+    - id: xgb_lr030
+      name: xgboost
       params:
-        device_type: gpu
-        gpu_device_id: 0
-        gpu_use_dp: false
-        max_bin: 63
         n_estimators: 8000
         early_stopping_rounds: 300
         learning_rate: 0.030
-        num_leaves: 255
-        min_child_samples: 15
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
         subsample: 0.8
-        subsample_freq: 1
         colsample_bytree: 0.8
         reg_alpha: 0.05
         reg_lambda: 3.0
