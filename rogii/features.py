@@ -5,6 +5,7 @@ import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -20,7 +21,7 @@ from .numeric import (
     tail_slope,
     tail_stat,
 )
-from .runlog import RunLogger
+from .runlog import RunLogger, format_duration
 from .spatial import KaggleTopContext
 from .top_signals import build_kaggle_top_signal_features
 
@@ -420,8 +421,21 @@ def build_training_table(
     flat_parts: list[np.ndarray] = []
     true_parts: list[np.ndarray] = []
     loaded_rows = 0
+    started_at = perf_counter()
+    progress_interval = int(config.get("features", {}).get("progress_interval") or 25)
+    progress_interval = max(1, progress_interval)
+
+    if logger is not None:
+        logger.info("Feature table progress", current=0, total=len(paths), rows=0)
 
     for i, path in enumerate(paths, start=1):
+        if logger is not None and (i == 1 or i % progress_interval == 0):
+            logger.info(
+                "Build well features",
+                current=i,
+                total=len(paths),
+                well=well_name(path),
+            )
         wf = build_well_features(
             path, config, train=True, top_context=top_context, logger=logger
         )
@@ -436,11 +450,19 @@ def build_training_table(
         flat_parts.append(flat_values.astype("float32"))
         true_parts.append(true_values.astype("float32"))
         loaded_rows += int(mask.sum())
-        if i % 100 == 0 or i == len(paths):
-            if logger is not None:
-                logger.info(
-                    "Loaded train wells", current=i, total=len(paths), rows=loaded_rows
-                )
+        if logger is not None and (
+            i == 1 or i % progress_interval == 0 or i == len(paths)
+        ):
+            elapsed = perf_counter() - started_at
+            eta = elapsed / max(i, 1) * max(len(paths) - i, 0)
+            logger.info(
+                "Loaded train wells",
+                current=i,
+                total=len(paths),
+                rows=loaded_rows,
+                elapsed=format_duration(elapsed),
+                eta=format_duration(eta),
+            )
 
     if not feature_parts:
         raise ValueError(

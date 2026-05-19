@@ -23,6 +23,7 @@ features:
   tail_windows: [25, 100]
   rolling_windows: [5, 25]
   prediction_baseline: last_known_tvt
+  progress_interval: 1
   cache:
     enabled: false
     dir: artifacts/feature_cache_quick

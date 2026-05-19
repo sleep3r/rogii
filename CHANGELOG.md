@@ -74,6 +74,9 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Removed the local `artifacts/runs.csv` registry from the training path; ClearML
   is now the single experiment registry, while per-run details stay in
   `metrics.json` and ClearML scalars/artifacts.
+- Added feature-table heartbeat logging with ETA via `features.progress_interval`
+  so cold fold-safe server runs do not look stuck while the first 100 wells are
+  still building.
 - Added `rogii/train.py` as a thin entrypoint for tools expecting a train module.
 - Validation:
   - `uv lock`: passed with `spacebridge` from nexus;

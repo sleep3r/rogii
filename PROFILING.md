@@ -139,6 +139,9 @@ Top self-time functions:
    - Fold-safe OOF intentionally rebuilds features under different context keys.
    - The expensive design question: cache/reuse context-independent features once,
      then append fold-specific spatial/context features.
+   - `features.progress_interval` controls feature-table heartbeat logs. Full
+     `stack.yml` logs every 25 wells so cold server runs show progress/ETA
+     before the old 100-well checkpoint.
 
 4. **Model training**
    - CatBoost dominates the old full OOF model time, but it also gives the best
