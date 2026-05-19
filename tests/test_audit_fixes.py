@@ -31,6 +31,7 @@ from rogii.gpu_preflight import (
     lightgbm_gpu_models,
     xgboost_gpu_models,
 )
+from rogii.kaggle_submit import download_clearml_artifacts_from_task
 from rogii.modeling import (
     EnsembleRegressor,
     ResidualModel,
@@ -1006,6 +1007,48 @@ def test_stack_gpu_uses_catboost_and_xgboost_gpu_without_lightgbm_gpu() -> None:
         "xgb_lr030",
     ]
     assert lightgbm_gpu_models(config) == []
+
+
+def test_download_clearml_artifacts_from_task(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    artifact_names = (
+        "model.pkl",
+        "features.json",
+        "metrics.json",
+        "config.yml",
+        "source_config.yml",
+    )
+    for name in artifact_names:
+        (source_dir / name).write_text(f"{name}\n", encoding="utf-8")
+
+    class FakeArtifact:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def get_local_copy(self) -> str:
+            return str(self.path)
+
+    task = SimpleNamespace(
+        id="task123",
+        name="clearml-run",
+        artifacts={
+            f"output/{path.name}": FakeArtifact(path)
+            for path in sorted(source_dir.iterdir())
+        },
+    )
+    model_dir = tmp_path / "model"
+
+    download_clearml_artifacts_from_task(task=task, model_dir=model_dir)
+
+    assert sorted(path.name for path in model_dir.iterdir()) == [
+        "config.yml",
+        "features.json",
+        "metrics.json",
+        "model.pkl",
+        "source_config.yml",
+    ]
+    assert (model_dir / "model.pkl").read_text(encoding="utf-8") == "model.pkl\n"
 
 
 def test_notebook_postprocess_requires_explicit_pf_column() -> None:

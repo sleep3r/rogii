@@ -20,6 +20,26 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### ClearML Artifact Submit Path
+
+- Added ClearML-task based submit artifacts:
+  - `CML_ID` defaults to `2b77f48a1a294304bf859ea798666d65`;
+  - `INFER_MODEL_DIR` defaults to `artifacts/clearml/$(CML_ID)`;
+  - `make submit` now passes `--clearml-task-id $(CML_ID)` to
+    `rogii.kaggle_submit`.
+- Added `rogii.kaggle_submit fetch-clearml` and `make fetch-clearml-model`.
+  The downloader pulls `output/model.pkl`, `output/features.json`,
+  `output/metrics.json`, `output/config.yml`, and `output/source_config.yml`
+  from the ClearML task into the model dir.
+- `make submit` now performs:
+  ClearML task artifact download -> local model dir -> private Kaggle model
+  dataset -> inference kernel.
+- Validated with task `2b77f48a1a294304bf859ea798666d65`:
+  - downloaded `model.pkl` (`238M`), `features.json`, `metrics.json`,
+    `config.yml`, and `source_config.yml`;
+  - `make submit-dry MESSAGE="cml 2b77 dry"` prepared the Kaggle inference
+    kernel successfully.
+
 ### Validation Anchor Hardening Pass
 
 - Updated `configs/stack_gpu.yml` to be a hybrid server config:
@@ -27,6 +47,9 @@ run here with command, data, CV, LB, runtime, and the next decision.
   - LightGBM is removed from the server stack;
   - XGBoost CUDA variants `xgb_lr025`, `xgb_lr020`, and `xgb_lr030` replace the
     LightGBM variants.
+- `configs/stack_gpu.yml` now uses `validation.final_model_strategy:
+  fold_average` to keep the server run practical after OOF; the main
+  `stack.yml` stays `full_context` for the stricter local/anchor path.
 - Rationale: the Portainer run showed CatBoost GPU folds finishing in under a
   minute, while LightGBM spent 40+ minutes on the first fold both through
   OpenCL/GPU and CPU. The server config now avoids LightGBM entirely until we

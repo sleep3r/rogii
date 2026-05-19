@@ -211,16 +211,30 @@ make train-kaggle
 The full `stack.yml` train run exceeds Kaggle's 9-hour CPU notebook limit. The
 working path is local training followed by an inference-only Kaggle run.
 
-Inference-only Kaggle run from a local artifact:
+Inference-only Kaggle run from a ClearML artifact:
 
 ```bash
-make submit MESSAGE="baseline infer"
+make submit MESSAGE="cml 2b77 infer"
 ```
 
-That command publishes the trained local artifact as a private Kaggle dataset,
-pushes a private Kaggle script, waits for `submission.csv`, validates it, and
-also stops before the competition submit API call. Submit the notebook version
-manually from the Kaggle UI when you are happy with it.
+By default, `make submit` downloads model artifacts from ClearML task
+`2b77f48a1a294304bf859ea798666d65` into
+`artifacts/clearml/<CML_ID>/`, publishes that directory as a private Kaggle
+dataset, pushes a private Kaggle script, waits for `submission.csv`, validates
+it, and stops before the competition submit API call. Submit the notebook
+version manually from the Kaggle UI when you are happy with it.
+
+Use another ClearML run:
+
+```bash
+make submit CML_ID=<clearml_task_id> MESSAGE="new run infer"
+```
+
+Fetch the model without touching Kaggle:
+
+```bash
+make fetch-clearml-model CML_ID=<clearml_task_id>
+```
 
 Dry runs:
 

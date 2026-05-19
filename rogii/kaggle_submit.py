@@ -29,6 +29,13 @@ DEFAULT_ARTIFACT_DIR = Path("artifacts/stack")
 DEFAULT_MODEL_DIR = Path("artifacts/stack")
 DEFAULT_MODEL_DATASET_DIR = Path("artifacts/kaggle_model_dataset")
 DEFAULT_SUBMISSION = "submission.csv"
+CLEARML_MODEL_ARTIFACTS = (
+    "model.pkl",
+    "features.json",
+    "metrics.json",
+    "config.yml",
+    "source_config.yml",
+)
 TERMINAL_ERROR_STATUSES = {
     "ERROR",
     "CANCEL_REQUESTED",
@@ -621,6 +628,99 @@ def validate_submission(path: Path) -> None:
     log(f"Submission rows: {len(frame):,}")
 
 
+def clearml_artifact_candidates(name: str, prefix: str) -> list[str]:
+    normalized = prefix.strip("/")
+    candidates = []
+    if normalized:
+        candidates.append(f"{normalized}/{name}")
+    candidates.append(name)
+    return candidates
+
+
+def find_clearml_artifact(
+    artifacts: dict[str, object],
+    name: str,
+    prefix: str,
+) -> tuple[str, object]:
+    for key in clearml_artifact_candidates(name, prefix):
+        if key in artifacts:
+            return key, artifacts[key]
+    available = ", ".join(sorted(artifacts)) or "<none>"
+    raise FileNotFoundError(
+        f"ClearML artifact {name!r} was not found. Available artifacts: {available}"
+    )
+
+
+def copy_clearml_artifact(artifact: object, destination: Path) -> None:
+    if not hasattr(artifact, "get_local_copy"):
+        raise TypeError(f"ClearML artifact has no get_local_copy(): {artifact!r}")
+    local_copy = Path(artifact.get_local_copy())  # type: ignore[attr-defined]
+    if local_copy.is_dir():
+        candidates = sorted(path for path in local_copy.rglob(destination.name))
+        if not candidates:
+            raise FileNotFoundError(
+                f"Downloaded ClearML artifact directory has no {destination.name}: "
+                f"{local_copy}"
+            )
+        local_copy = candidates[0]
+    if not local_copy.is_file():
+        raise FileNotFoundError(
+            f"Downloaded ClearML artifact is not a file: {local_copy}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if local_copy.resolve() != destination.resolve():
+        shutil.copyfile(local_copy, destination)
+
+
+def download_clearml_artifacts_from_task(
+    *,
+    task: object,
+    model_dir: Path,
+    artifact_prefix: str = "output",
+    names: tuple[str, ...] = CLEARML_MODEL_ARTIFACTS,
+) -> Path:
+    artifacts = getattr(task, "artifacts", None)
+    if artifacts is None:
+        raise AttributeError("ClearML task has no artifacts attribute.")
+    artifacts = dict(artifacts)
+    task_id = getattr(task, "id", "")
+    task_name = getattr(task, "name", "")
+    log(f"Fetching ClearML model artifacts: task_id={task_id} task_name={task_name}")
+    log(f"ClearML artifact keys: {', '.join(sorted(artifacts))}")
+
+    if model_dir.exists():
+        for name in names:
+            path = model_dir / name
+            if path.exists():
+                path.unlink()
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    for name in names:
+        key, artifact = find_clearml_artifact(artifacts, name, artifact_prefix)
+        destination = model_dir / name
+        log(f"Downloading ClearML artifact: {key} -> {destination}")
+        copy_clearml_artifact(artifact, destination)
+
+    return model_dir
+
+
+def download_clearml_model_artifacts(
+    task_id: str,
+    model_dir: Path,
+    artifact_prefix: str = "output",
+) -> Path:
+    if not task_id:
+        raise ValueError("ClearML task id is required.")
+    from clearml import Task  # type: ignore
+
+    task = Task.get_task(task_id=task_id)
+    return download_clearml_artifacts_from_task(
+        task=task,
+        model_dir=model_dir,
+        artifact_prefix=artifact_prefix,
+    )
+
+
 def submit_code(api: KaggleApi, args: argparse.Namespace, version: int) -> None:
     ref = kernel_ref(args.user, args.kernel)
     log(f"Submitting code output: kernel={ref} version={version}")
@@ -638,6 +738,13 @@ def submit_code(api: KaggleApi, args: argparse.Namespace, version: int) -> None:
 
 
 def run_end_to_end(args: argparse.Namespace) -> None:
+    if args.mode == "infer" and args.clearml_task_id:
+        download_clearml_model_artifacts(
+            args.clearml_task_id,
+            Path(args.model_dir),
+            artifact_prefix=args.clearml_artifact_prefix,
+        )
+
     api = None
     if args.mode == "infer" and args.publish_model_dataset and not args.dry_run:
         api = make_api()
@@ -680,6 +787,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model-dataset-dir", type=Path, default=DEFAULT_MODEL_DATASET_DIR
     )
+    parser.add_argument("--clearml-task-id", "--cml-id", default="")
+    parser.add_argument("--clearml-artifact-prefix", default="output")
     parser.add_argument("--publish-model-dataset", action="store_true")
     parser.add_argument("--mode", choices=["train", "infer"], default="train")
     parser.add_argument("--submission-file", default=DEFAULT_SUBMISSION)
@@ -719,10 +828,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--skip-competition-submit", action="store_true")
     run.add_argument("--download-all-output", action="store_true")
 
+    fetch_clearml = subparsers.add_parser(
+        "fetch-clearml", help="Download trained model artifacts from a ClearML task."
+    )
+    fetch_clearml.add_argument("--clearml-task-id", "--cml-id", required=True)
+    fetch_clearml.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
+    fetch_clearml.add_argument("--clearml-artifact-prefix", default="output")
+
     return parser.parse_args(argv)
 
 
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    if not hasattr(args, "kernel"):
+        return args
     kernel_slug = args.kernel.split("/")[-1]
     if args.title == DEFAULT_TITLE and kernel_slug != DEFAULT_KERNEL:
         args.title = kernel_slug
@@ -735,6 +853,12 @@ def main(argv: list[str] | None = None) -> None:
         prepare_kernel(args)
     elif args.command == "run":
         run_end_to_end(args)
+    elif args.command == "fetch-clearml":
+        download_clearml_model_artifacts(
+            args.clearml_task_id,
+            Path(args.model_dir),
+            artifact_prefix=args.clearml_artifact_prefix,
+        )
     else:
         raise ValueError(f"Unknown command: {args.command}")
 

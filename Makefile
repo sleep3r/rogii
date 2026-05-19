@@ -42,7 +42,10 @@ SUBMIT_KERNEL_DIR ?= artifacts/kaggle_submit_kernel
 SUBMIT_OUTPUT_DIR ?= artifacts/kaggle_submit_output
 SUBMIT_ARTIFACT_DIR ?= artifacts/kaggle_submit
 
-INFER_MODEL_DIR ?= artifacts/stack
+CML_ID ?= 2b77f48a1a294304bf859ea798666d65
+CML_MODEL_DIR ?= artifacts/clearml/$(CML_ID)
+CML_ARG := $(if $(CML_ID),--clearml-task-id $(CML_ID),)
+INFER_MODEL_DIR ?= $(CML_MODEL_DIR)
 MODEL_DATASET ?= $(KAGGLE_USER)/rogii-baseline-artifacts
 MODEL_DATASET_DIR ?= artifacts/kaggle_model_dataset
 
@@ -85,7 +88,7 @@ BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file 
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -107,6 +110,10 @@ upload-clearml-data: ensure-data
 
 clearml-data-local-path:
 	$(PYTHON) -m rogii.clearml_data download --project "$(CLEARML_DATA_PROJECT)" --name "$(CLEARML_DATA_NAME)" --version "$(CLEARML_DATA_VERSION)" --cache-dir "$(CLEARML_DATA_CACHE_DIR)"
+
+fetch-clearml-model:
+	@test -n "$(CML_ID)" || (echo "Set CML_ID=<ClearML task id>" && exit 1)
+	$(PYTHON) -m rogii.kaggle_submit fetch-clearml --cml-id $(CML_ID) --model-dir $(INFER_MODEL_DIR)
 
 check-server-env:
 	docker version
@@ -155,10 +162,10 @@ train-kaggle-dry:
 	@echo "Kaggle CPU full training is disabled. Dry run skipped."
 
 submit:
-	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(SUBMIT_KERNEL) --title "$(SUBMIT_TITLE)" --config $(CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --publish-model-dataset --kernel-dir $(SUBMIT_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(SUBMIT_ARTIFACT_DIR) --output-dir $(SUBMIT_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output
+	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(SUBMIT_KERNEL) --title "$(SUBMIT_TITLE)" --config $(CONFIG) --model-dir $(INFER_MODEL_DIR) $(CML_ARG) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --publish-model-dataset --kernel-dir $(SUBMIT_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(SUBMIT_ARTIFACT_DIR) --output-dir $(SUBMIT_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output
 
 submit-dry:
-	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(SUBMIT_KERNEL) --title "$(SUBMIT_TITLE)" --config $(CONFIG) --model-dir $(INFER_MODEL_DIR) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --kernel-dir $(SUBMIT_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(SUBMIT_ARTIFACT_DIR) --output-dir $(SUBMIT_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output --dry-run
+	$(PYTHON) -m rogii.kaggle_submit run --mode infer --competition $(COMPETITION) --user $(KAGGLE_USER) --kernel $(SUBMIT_KERNEL) --title "$(SUBMIT_TITLE)" --config $(CONFIG) --model-dir $(INFER_MODEL_DIR) $(CML_ARG) --model-dataset $(MODEL_DATASET) --model-dataset-dir $(MODEL_DATASET_DIR) --kernel-dir $(SUBMIT_KERNEL_DIR) --data-dir $(KAGGLE_DATA_DIR) --artifact-dir $(SUBMIT_ARTIFACT_DIR) --output-dir $(SUBMIT_OUTPUT_DIR) --submission-file $(SUBMISSION) --kernel-timeout $(KERNEL_TIMEOUT) --wait-timeout $(KERNEL_WAIT_TIMEOUT) --poll-interval $(KERNEL_POLL_INTERVAL) --message "$(MESSAGE)" --skip-competition-submit --download-all-output --dry-run
 
 status-train:
 	$(KAGGLE) kernels status $(KAGGLE_USER)/$(TRAIN_KERNEL)
