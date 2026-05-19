@@ -529,7 +529,7 @@ def test_build_target_mask_always_returns_bool_array() -> None:
     ]
 
 
-def test_feature_schema_keeps_only_canonical_last_known_offsets(tmp_path) -> None:
+def test_feature_schema_includes_public_dwt_last_known_offsets(tmp_path) -> None:
     path = tmp_path / "abc12345__horizontal_well.csv"
     pd.DataFrame(
         {
@@ -550,12 +550,32 @@ def test_feature_schema_keeps_only_canonical_last_known_offsets(tmp_path) -> Non
     assert "y_from_last_known" in wf.features.columns
     assert "z_from_last_known" in wf.features.columns
     assert "xy_dist_from_last_known" in wf.features.columns
+    assert "md_since" in wf.features.columns
+    assert "dx" in wf.features.columns
+    assert "dy" in wf.features.columns
+    assert "dz" in wf.features.columns
+    assert "dxy" in wf.features.columns
+    assert np.allclose(
+        wf.features["md_since"].to_numpy(dtype=float),
+        wf.features["md_from_last_known"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        wf.features["dx"].to_numpy(dtype=float),
+        wf.features["x_from_last_known"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        wf.features["dy"].to_numpy(dtype=float),
+        wf.features["y_from_last_known"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        wf.features["dz"].to_numpy(dtype=float),
+        wf.features["z_from_last_known"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        wf.features["dxy"].to_numpy(dtype=float),
+        wf.features["xy_dist_from_last_known"].to_numpy(dtype=float),
+    )
     assert "idx_since" not in wf.features.columns
-    assert "md_since" not in wf.features.columns
-    assert "dx" not in wf.features.columns
-    assert "dy" not in wf.features.columns
-    assert "dz" not in wf.features.columns
-    assert "dxy" not in wf.features.columns
     assert "tvt_input_isna" not in wf.features.columns
 
 

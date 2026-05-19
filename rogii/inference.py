@@ -193,7 +193,9 @@ def main() -> None:
     config = load_artifact_config(config_path)
 
     if args.data_dir is not None:
+        config.setdefault("data", {})
         config["data"]["data_dir"] = str(args.data_dir)
+        config["data"].setdefault("clearml", {})["enabled"] = False
     if args.output_dir is not None:
         config["outputs"]["output_dir"] = str(args.output_dir)
     if args.submission is not None:

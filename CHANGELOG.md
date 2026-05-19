@@ -20,6 +20,30 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Public DWT Feature Schema Parity
+
+- Compared the local feature builder against the visible Roman/Ravaghi/DWT
+  notebook code without downloading the large `ravaghi/.../train.csv` artifact.
+- Confirmed the heavy public blocks are already in our pipeline:
+  PF_ANCC/PF_Z, beam paths, multi-scale NCC, multi-radius DTW, DWT-lowpass DTW,
+  formation-plane KNN, dense ANCC, segment biases, and
+  `tda*`/`tdbc*`/`tdsc*`/`tdpf*`/`tddtw*` offset residual features.
+- Restored public-compatible geometry aliases used by those notebooks:
+  `md_since`, `dx`, `dy`, `dz`, and `dxy`.
+  These duplicate the canonical `*_from_last_known` columns, but they make the
+  schema closer to the public DWT baseline and can matter for sampled tree
+  models.
+- Matched the public aggregate signal construction more closely:
+  `sig_mean_d`, `sig_std`, and `kg_signal_*` now aggregate individual beam
+  paths, NCC window paths, NCC ensemble, ANCC formation, dense ANCC, PF_ANCC,
+  DTW, and DWT-lowpass signals instead of the coarser
+  `beam_mean`/`form_mean`/hybrid mix. The split-cache context builder uses the
+  same aggregate recipe as the full builder.
+- Kept `idx_since` and `tvt_input_isna` out of the schema.
+- Bumped `FEATURE_CACHE_SCHEMA_VERSION` to 10. Old schema-v9 feature caches and
+  artifacts are invalid for the next train.
+- Added a unit test that the aliases match the canonical columns exactly.
+
 ### ClearML Artifact Submit Path
 
 - Added ClearML-task based submit artifacts:

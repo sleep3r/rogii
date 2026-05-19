@@ -29,7 +29,7 @@ from .top_signals import (
     build_kaggle_top_signal_features,
 )
 
-FEATURE_CACHE_SCHEMA_VERSION = 9
+FEATURE_CACHE_SCHEMA_VERSION = 10
 
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_TOP_CONTEXT: KaggleTopContext | None = None
@@ -386,12 +386,20 @@ def _build_well_features_single_layer(
         "z_from_last_known": z - z[last_known],
         "x_from_last_known": x - x[last_known],
         "y_from_last_known": y - y[last_known],
+        # Public DWT/Ravaghi notebooks use these short names.  They duplicate
+        # the canonical *_from_last_known columns, but keeping the aliases gives
+        # the tree stack the same feature schema family as the public baseline.
+        "md_since": md - md[last_known],
+        "dx": x - x[last_known],
+        "dy": y - y[last_known],
+        "dz": z - z[last_known],
         "frac": hidden_frac,
         "frac2": hidden_frac**2,
         "sqrt_frac": np.sqrt(hidden_frac),
         "xy_dist_from_last_known": np.sqrt(
             (x - x[last_known]) ** 2 + (y - y[last_known]) ** 2
         ),
+        "dxy": np.sqrt((x - x[last_known]) ** 2 + (y - y[last_known]) ** 2),
         "dzdmd": dzdmd.to_numpy(dtype=float),
         "dxdmd": dxdmd.to_numpy(dtype=float),
         "dydmd": dydmd.to_numpy(dtype=float),

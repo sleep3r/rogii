@@ -1463,10 +1463,17 @@ def build_kaggle_top_signal_features(
                 n, hidden_idx, stoch_std[hidden_idx]
             )
             features["dtw_stoch_cv"] = full_feature(n, hidden_idx, stoch_cv[hidden_idx])
-        signal_stack = [beam_mean, dtw_signal[hidden_idx]]
     else:
         dtw_signal = None
-        signal_stack = [beam_mean]
+    signal_stack: list[np.ndarray] = []
+    if beam_by_tag:
+        signal_stack.extend(beam_by_tag.values())
+    else:
+        signal_stack.append(beam_mean)
+    signal_stack.extend(ncc_tvt_by_window.values())
+    signal_stack.append(ncc_ens)
+    if dtw_signal is not None:
+        signal_stack.append(dtw_signal[hidden_idx])
     log_profile_stage(
         logger,
         profile_stages,
@@ -1628,7 +1635,7 @@ def build_kaggle_top_signal_features(
             features["spatial_knn_dist"] = full_feature(n, hidden_idx, form_dist)
             for formation, score in form_rmse.items():
                 features[f"frm_rmse_{formation}"] = full_scalar(n, hidden_idx, score)
-            signal_stack.append(form_mean)
+            signal_stack.append(form_ancc_signal)
         else:
             form_mean = flat_pred[hidden_idx]
         log_profile_stage(
@@ -1776,8 +1783,6 @@ def build_kaggle_top_signal_features(
     stage_started_at = perf_counter()
     if pf_ancc_signal is not None:
         signal_stack.append(pf_ancc_signal)
-    signal_stack.extend([ncc_ens, hybrid_ref])
-
     typewell_gr_at_known = np.interp(known_tvt, tw_tvt, tw_gr)
     cal_a, cal_b = affine_calibration(known_gr, typewell_gr_at_known)
     pfx_rmse = float(np.sqrt(np.nanmean((known_gr - typewell_gr_at_known) ** 2)))
@@ -1983,7 +1988,47 @@ def build_kaggle_context_signal_features(
     else:
         beam_ref = beam_mean
 
-    signal_stack: list[np.ndarray] = [beam_mean]
+    signal_stack: list[np.ndarray] = []
+    for beam_cfg in top_cfg.get("beam_configs", []):
+        _, _, _, _, tag = parse_beam_config(beam_cfg)
+        column = f"beam_{tag}_d"
+        if column in base_features.columns:
+            signal_stack.append(
+                _hidden_column(
+                    base_features,
+                    column,
+                    hidden_idx,
+                    np.zeros(len(hidden_idx), dtype=float),
+                )
+                + last_tvt
+            )
+    if not signal_stack:
+        signal_stack.append(beam_mean)
+
+    ncc_windows = [int(item) for item in top_cfg.get("ncc_windows", [8, 15, 25])]
+    for window in ncc_windows:
+        column = f"sc{window}_d"
+        if column in base_features.columns:
+            signal_stack.append(
+                _hidden_column(
+                    base_features,
+                    column,
+                    hidden_idx,
+                    np.zeros(len(hidden_idx), dtype=float),
+                )
+                + last_tvt
+            )
+    ncc_ens = (
+        _hidden_column(
+            base_features,
+            "sc_ens_d",
+            hidden_idx,
+            np.zeros(len(hidden_idx), dtype=float),
+        )
+        + last_tvt
+    )
+    signal_stack.append(ncc_ens)
+
     dtw_hidden = None
     if top_cfg.get("dtw_enabled", True) and "kg_dtw_tvt" in base_features.columns:
         dtw_hidden = _hidden_column(
@@ -2087,7 +2132,7 @@ def build_kaggle_context_signal_features(
         features["spatial_knn_dist"] = full_feature(n, hidden_idx, form_dist)
         for formation, score in form_rmse.items():
             features[f"frm_rmse_{formation}"] = full_scalar(n, hidden_idx, score)
-        signal_stack.append(form_mean)
+        signal_stack.append(form_ancc_signal)
     log_profile_stage(
         logger,
         profile_stages,
@@ -2185,25 +2230,6 @@ def build_kaggle_context_signal_features(
             )
         signal_stack.append(pf_ancc_signal)
 
-    ncc_ens = (
-        _hidden_column(
-            base_features,
-            "sc_ens_d",
-            hidden_idx,
-            np.zeros(len(hidden_idx), dtype=float),
-        )
-        + last_tvt
-    )
-    hybrid_ref = (
-        _hidden_column(
-            base_features,
-            "hyb_d",
-            hidden_idx,
-            np.zeros(len(hidden_idx), dtype=float),
-        )
-        + last_tvt
-    )
-    signal_stack.extend([ncc_ens, hybrid_ref])
     signal_matrix = np.vstack(signal_stack).T
     signal_mean = np.nanmean(signal_matrix, axis=1)
     signal_std = np.nanstd(signal_matrix, axis=1)
