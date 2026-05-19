@@ -63,6 +63,7 @@ features:
     dense_fetch: 5000
     dense_query_chunk: 512
     dense_samples_per_well: 60
+    robust_expert_enabled: false
 
 model:
   base_models:
@@ -148,7 +149,7 @@ model:
     method: hill_climb
     alpha_grid: [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
     iterations: 1000
-    allow_negative_weights: true
+    allow_negative_weights: false
 
 validation:
   n_splits: 5
@@ -166,9 +167,12 @@ postprocess:
   notebook_blend:
     enabled: true
     pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
     alpha_range: [0.95, 1.05, 0.01]
     tau_range: [40, 120, 5]
-    w_pf_range: [0, 0.15, 0.01]
+    w_pf_ancc_range: [0, 0.20, 0.01]
+    w_pf_z_range: [0, 0.10, 0.01]
+    w_pf_total_max: 0.30
   smoothing:
     enabled: true
     window: 17

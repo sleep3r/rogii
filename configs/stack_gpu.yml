@@ -2,6 +2,8 @@ inherits: stack.yml
 
 features:
   num_workers: 8
+  kaggle_top:
+    robust_expert_enabled: false
 
 model:
   base_models:
@@ -111,9 +113,12 @@ postprocess:
   residual_weight_grid: []
   notebook_blend:
     pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
     alpha_range: [0.95, 1.05, 0.01]
     tau_range: [40, 120, 5]
-    w_pf_range: [0, 0.15, 0.01]
+    w_pf_ancc_range: [0, 0.20, 0.01]
+    w_pf_z_range: [0, 0.10, 0.01]
+    w_pf_total_max: 0.30
   smoothing:
     enabled: true
     window: 17

@@ -29,7 +29,7 @@ from .top_signals import (
     build_kaggle_top_signal_features,
 )
 
-FEATURE_CACHE_SCHEMA_VERSION = 11
+FEATURE_CACHE_SCHEMA_VERSION = 10
 
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_TOP_CONTEXT: KaggleTopContext | None = None

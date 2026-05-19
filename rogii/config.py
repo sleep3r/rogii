@@ -72,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "particle_enabled": True,
             "particle_count": 192,
             "ancc_particle_count": 192,
+            "robust_expert_enabled": False,
         },
     },
     "model": {
@@ -96,7 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "method": "hill_climb",
             "alpha_grid": [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001],
             "iterations": 1000,
-            "allow_negative_weights": True,
+            "allow_negative_weights": False,
         },
     },
     "validation": {

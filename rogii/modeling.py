@@ -629,6 +629,7 @@ def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] |
     blend_cfg = config["postprocess"].get("notebook_blend") or {}
     if not blend_cfg.get("enabled", False):
         return [None]
+    pf_columns = notebook_pf_columns(config)
 
     candidates = blend_cfg.get("candidates") or []
     if candidates:
@@ -637,17 +638,48 @@ def notebook_blend_candidates(config: dict[str, Any]) -> list[dict[str, float] |
             if candidate is None or candidate.get("enabled", True) is False:
                 parsed.append(None)
                 continue
-            parsed.append(
-                {
-                    "alpha": float(candidate.get("alpha", 1.0)),
-                    "tau": float(candidate.get("tau", 0.0)),
-                    "w_pf": float(candidate.get("w_pf", 0.0)),
-                }
-            )
+            parsed_candidate = {
+                "alpha": float(candidate.get("alpha", 1.0)),
+                "tau": float(candidate.get("tau", 0.0)),
+            }
+            if has_multi_pf_blend(blend_cfg):
+                for column in pf_columns:
+                    key = pf_weight_key(column)
+                    parsed_candidate[key] = float(candidate.get(key, 0.0))
+            else:
+                parsed_candidate["w_pf"] = float(candidate.get("w_pf", 0.0))
+            if notebook_pf_weight_sum(parsed_candidate, blend_cfg, pf_columns) <= (
+                notebook_pf_total_max(blend_cfg) + 1e-12
+            ):
+                parsed.append(parsed_candidate)
         return parsed
 
     alpha_grid = grid_values(blend_cfg, "alpha", blend_cfg.get("alpha", 1.0))
     tau_grid = grid_values(blend_cfg, "tau", blend_cfg.get("tau", 0.0))
+    if has_multi_pf_blend(blend_cfg):
+        weight_grids = [
+            (
+                pf_weight_key(column),
+                grid_values(blend_cfg, pf_weight_key(column), 0.0),
+            )
+            for column in pf_columns
+        ]
+        blend_options: list[dict[str, float]] = []
+        for alpha, tau in product(alpha_grid, tau_grid):
+            for weights in product(*(values for _, values in weight_grids)):
+                option = {"alpha": float(alpha), "tau": float(tau)}
+                option.update(
+                    {
+                        key: float(value)
+                        for (key, _values), value in zip(weight_grids, weights)
+                    }
+                )
+                if notebook_pf_weight_sum(option, blend_cfg, pf_columns) <= (
+                    notebook_pf_total_max(blend_cfg) + 1e-12
+                ):
+                    blend_options.append(option)
+        return blend_options
+
     w_pf_grid = grid_values(blend_cfg, "w_pf", blend_cfg.get("w_pf", 0.0))
     return [
         {"alpha": float(alpha), "tau": float(tau), "w_pf": float(w_pf)}
@@ -720,6 +752,64 @@ def required_notebook_pf_column(config: dict[str, Any]) -> str:
     return str(pf_column)
 
 
+def has_multi_pf_blend(blend_cfg: dict[str, Any]) -> bool:
+    return bool(blend_cfg.get("pf_columns"))
+
+
+def notebook_pf_columns(config: dict[str, Any]) -> list[str]:
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    if not blend_cfg.get("enabled", False):
+        return []
+    columns = blend_cfg.get("pf_columns")
+    if columns:
+        parsed = [str(column) for column in columns if str(column)]
+        if not parsed:
+            raise ValueError("postprocess.notebook_blend.pf_columns must not be empty.")
+        return parsed
+    return [required_notebook_pf_column(config)]
+
+
+def pf_weight_key(column: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() else "_" for ch in str(column)).strip("_")
+    return f"w_{sanitized}"
+
+
+def notebook_pf_total_max(blend_cfg: dict[str, Any]) -> float:
+    return float(blend_cfg.get("w_pf_total_max", 1.0))
+
+
+def notebook_pf_weight_sum(
+    params: dict[str, float],
+    blend_cfg: dict[str, Any],
+    pf_columns: list[str],
+) -> float:
+    if has_multi_pf_blend(blend_cfg):
+        return float(sum(max(0.0, float(params.get(pf_weight_key(column), 0.0))) for column in pf_columns))
+    return float(max(0.0, float(params.get("w_pf", 0.0))))
+
+
+def notebook_pf_weights(
+    params: dict[str, float],
+    blend_cfg: dict[str, Any],
+    pf_columns: list[str],
+) -> np.ndarray:
+    if has_multi_pf_blend(blend_cfg):
+        weights = np.array(
+            [
+                max(0.0, float(params.get(pf_weight_key(column), 0.0)))
+                for column in pf_columns
+            ],
+            dtype=float,
+        )
+    else:
+        weights = np.array([max(0.0, float(params.get("w_pf", 0.0)))], dtype=float)
+    total = float(weights.sum())
+    total_max = notebook_pf_total_max(blend_cfg)
+    if total > total_max and total > 0.0:
+        weights *= total_max / total
+    return weights
+
+
 def apply_notebook_blend(
     pred: np.ndarray,
     config: dict[str, Any],
@@ -733,27 +823,39 @@ def apply_notebook_blend(
         params = {
             "alpha": float(blend_cfg.get("alpha", 1.0)),
             "tau": float(blend_cfg.get("tau", 0.0)),
-            "w_pf": float(blend_cfg.get("w_pf", 0.0)),
         }
+        if has_multi_pf_blend(blend_cfg):
+            for column in notebook_pf_columns(config):
+                key = pf_weight_key(column)
+                params[key] = float(blend_cfg.get(key, 0.0))
+        else:
+            params["w_pf"] = float(blend_cfg.get("w_pf", 0.0))
 
-    pf_column = required_notebook_pf_column(config)
-    required = {"last_known_tvt", "md_from_last_known", pf_column}
+    pf_columns = notebook_pf_columns(config)
+    required = {"last_known_tvt", "md_from_last_known", *pf_columns}
     if not required.issubset(features.columns):
         return pred
 
     last = features["last_known_tvt"].to_numpy(dtype=float)
     md_from_last_known = features["md_from_last_known"].to_numpy(dtype=float)
-    pf_tvt = features[pf_column].to_numpy(dtype=float)
-    valid = np.isfinite(last) & np.isfinite(md_from_last_known) & np.isfinite(pf_tvt)
+    pf_tvt_matrix = np.column_stack(
+        [features[column].to_numpy(dtype=float) for column in pf_columns]
+    )
+    valid = (
+        np.isfinite(last)
+        & np.isfinite(md_from_last_known)
+        & np.isfinite(pf_tvt_matrix).all(axis=1)
+    )
     if not valid.any():
         return pred
 
     alpha = float(params.get("alpha", 1.0))
     tau = float(params.get("tau", 0.0))
-    w_pf = float(np.clip(params.get("w_pf", 0.0), 0.0, 1.0))
+    pf_weights = notebook_pf_weights(params, blend_cfg, pf_columns)
+    w_pf_total = float(pf_weights.sum())
     model_delta = pred - last
-    pf_delta = pf_tvt - last
-    delta = (1.0 - w_pf) * model_delta + w_pf * pf_delta
+    pf_delta = pf_tvt_matrix - last[:, None]
+    delta = (1.0 - w_pf_total) * model_delta + pf_delta @ pf_weights
     if tau > 0:
         delta = delta * (1.0 - np.exp(-np.maximum(md_from_last_known, 0.0) / tau))
 
@@ -819,15 +921,21 @@ def postprocess_basis_matrix(
     if not blend_cfg.get("enabled", False):
         return np.column_stack([flat, residual])
 
-    pf_column = required_notebook_pf_column(config)
-    required = {"last_known_tvt", "md_from_last_known", pf_column}
+    pf_columns = notebook_pf_columns(config)
+    required = {"last_known_tvt", "md_from_last_known", *pf_columns}
     if not required.issubset(features.columns):
         return np.column_stack([flat, residual])
 
     last = features["last_known_tvt"].to_numpy(dtype=float)
     md_from_last_known = features["md_from_last_known"].to_numpy(dtype=float)
-    pf_tvt = features[pf_column].to_numpy(dtype=float)
-    valid = np.isfinite(last) & np.isfinite(md_from_last_known) & np.isfinite(pf_tvt)
+    pf_tvt_matrix = np.column_stack(
+        [features[column].to_numpy(dtype=float) for column in pf_columns]
+    )
+    valid = (
+        np.isfinite(last)
+        & np.isfinite(md_from_last_known)
+        & np.isfinite(pf_tvt_matrix).all(axis=1)
+    )
     if not valid.any():
         return np.column_stack([flat, residual])
 
@@ -842,20 +950,22 @@ def postprocess_basis_matrix(
     residual_outside_valid = np.asarray(residual, dtype=float).copy()
     model_delta = np.zeros_like(flat, dtype=float)
     residual_inside_valid = np.zeros_like(flat, dtype=float)
-    pf_delta = np.zeros_like(flat, dtype=float)
+    pf_deltas = np.zeros((len(flat), len(pf_columns)), dtype=float)
 
     intercept[valid] = last[valid]
     residual_outside_valid[valid] = 0.0
     model_delta[valid] = decay[valid] * (flat[valid] - last[valid])
     residual_inside_valid[valid] = decay[valid] * residual[valid]
-    pf_delta[valid] = decay[valid] * (pf_tvt[valid] - last[valid])
+    pf_deltas[valid, :] = decay[valid, None] * (
+        pf_tvt_matrix[valid, :] - last[valid, None]
+    )
     return np.column_stack(
         [
             intercept,
             residual_outside_valid,
             model_delta,
             residual_inside_valid,
-            pf_delta,
+            pf_deltas,
         ]
     )
 
@@ -864,18 +974,35 @@ def postprocess_coefficients(
     weight: float,
     blend: dict[str, float] | None,
     basis_width: int,
+    config: dict[str, Any] | None = None,
 ) -> np.ndarray:
     if blend is None or basis_width == 2:
         return np.array([1.0, float(weight)], dtype=float)
     alpha = float(blend.get("alpha", 1.0))
-    w_pf = float(np.clip(blend.get("w_pf", 0.0), 0.0, 1.0))
+    if config is None:
+        w_pf = float(np.clip(blend.get("w_pf", 0.0), 0.0, 1.0))
+        return np.array(
+            [
+                1.0,
+                float(weight),
+                alpha * (1.0 - w_pf),
+                alpha * float(weight) * (1.0 - w_pf),
+                alpha * w_pf,
+            ],
+            dtype=float,
+        )
+
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    pf_columns = notebook_pf_columns(config)
+    pf_weights = notebook_pf_weights(blend, blend_cfg, pf_columns)
+    w_pf_total = float(pf_weights.sum())
     return np.array(
         [
             1.0,
             float(weight),
-            alpha * (1.0 - w_pf),
-            alpha * float(weight) * (1.0 - w_pf),
-            alpha * w_pf,
+            alpha * (1.0 - w_pf_total),
+            alpha * float(weight) * (1.0 - w_pf_total),
+            *[alpha * value for value in pf_weights],
         ],
         dtype=float,
     )
@@ -1006,11 +1133,7 @@ def _tune_postprocess_grid(
                 smoothing,
             )
             stats_cache[basis_key] = stats
-        coeffs = postprocess_coefficients(
-            weight,
-            blend,
-            len(stats.target_dot),
-        )
+        coeffs = postprocess_coefficients(weight, blend, len(stats.target_dot), config)
         score = {"weight": weight, "rmse": rmse_from_basis_stats(stats, coeffs)}
         if blend is not None:
             score.update({f"blend_{key}": float(value) for key, value in blend.items()})
@@ -1032,9 +1155,9 @@ def _tune_postprocess_grid(
             rate = candidate_idx / max(elapsed, 1e-9)
             remaining = (total_candidates - candidate_idx) / max(rate, 1e-9)
             best_blend = {
-                key.replace("blend_", ""): best[key]
-                for key in ("blend_alpha", "blend_tau", "blend_w_pf")
-                if best is not None and key in best
+                key.replace("blend_", ""): value
+                for key, value in (best or {}).items()
+                if key.startswith("blend_")
             }
             best_smooth = {
                 key.replace("smooth_", ""): best[key]
@@ -1057,9 +1180,9 @@ def _tune_postprocess_grid(
     if best is None:
         best = min(scores, key=lambda item: item["rmse"])
     best_blend = {
-        key.replace("blend_", ""): best[key]
-        for key in ("blend_alpha", "blend_tau", "blend_w_pf")
-        if key in best
+        key.replace("blend_", ""): value
+        for key, value in best.items()
+        if key.startswith("blend_")
     }
     best_smoothing = {
         key.replace("smooth_", ""): best[key]
@@ -1123,6 +1246,7 @@ def _tune_postprocess_optuna(
     smoothing_options = smoothing_candidates(config)
     blend_cfg = config["postprocess"].get("notebook_blend") or {}
     blend_enabled = bool(blend_cfg.get("enabled", False))
+    pf_columns = notebook_pf_columns(config) if blend_enabled else []
 
     flat = np.asarray(flat, dtype=float)
     residual_pred = np.asarray(residual_pred, dtype=float)
@@ -1162,13 +1286,22 @@ def _tune_postprocess_optuna(
                     "tau",
                     float(blend_cfg.get("tau", 0.0)),
                 ),
-                "w_pf": optuna_suggest_grid_or_range(
+            }
+            if has_multi_pf_blend(blend_cfg):
+                for column in pf_columns:
+                    key = pf_weight_key(column)
+                    blend[key] = optuna_suggest_grid_or_range(trial, blend_cfg, key, 0.0)
+            else:
+                blend["w_pf"] = optuna_suggest_grid_or_range(
                     trial,
                     blend_cfg,
                     "w_pf",
                     float(blend_cfg.get("w_pf", 0.0)),
-                ),
-            }
+                )
+            if notebook_pf_weight_sum(blend, blend_cfg, pf_columns) > (
+                notebook_pf_total_max(blend_cfg) + 1e-12
+            ):
+                return 1e12
 
         if len(smoothing_options) == 1:
             smoothing = smoothing_options[0]
@@ -1192,7 +1325,7 @@ def _tune_postprocess_optuna(
                 smoothing,
             )
             stats_cache[basis_key] = stats
-        coeffs = postprocess_coefficients(weight, blend, len(stats.target_dot))
+        coeffs = postprocess_coefficients(weight, blend, len(stats.target_dot), config)
         score = {"weight": weight, "rmse": rmse_from_basis_stats(stats, coeffs)}
         if blend is not None:
             score.update({f"blend_{key}": float(value) for key, value in blend.items()})
@@ -1216,9 +1349,9 @@ def _tune_postprocess_optuna(
         rate = trial_idx / max(elapsed, 1e-9)
         remaining = (trials - trial_idx) / max(rate, 1e-9)
         best_blend = {
-            key.replace("blend_", ""): best[key]
-            for key in ("blend_alpha", "blend_tau", "blend_w_pf")
-            if best is not None and key in best
+            key.replace("blend_", ""): value
+            for key, value in (best or {}).items()
+            if key.startswith("blend_")
         }
         best_smooth = {
             key.replace("smooth_", ""): best[key]
@@ -1245,9 +1378,9 @@ def _tune_postprocess_optuna(
     if best is None:
         best = min(scores, key=lambda item: item["rmse"])
     best_blend = {
-        key.replace("blend_", ""): best[key]
-        for key in ("blend_alpha", "blend_tau", "blend_w_pf")
-        if key in best
+        key.replace("blend_", ""): value
+        for key, value in best.items()
+        if key.startswith("blend_")
     }
     best_smoothing = {
         key.replace("smooth_", ""): best[key]

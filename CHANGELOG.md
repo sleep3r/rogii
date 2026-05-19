@@ -20,6 +20,51 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-20
 
+### EXP-20260520-2 - Conservative schema10 default plus PF_Z postprocess candidate
+
+- Context:
+  - after EXP-20260520-1, robust schema-v11 features were proven harmful on
+    public LB despite better OOF;
+  - the next safe step was to prevent accidental full-runs with schema-v11 as
+    the default and add a cheap `pf_z` postprocess candidate without touching
+    the heavy feature/model stack.
+- What changed:
+  - `FEATURE_CACHE_SCHEMA_VERSION` set back to `10`;
+  - `features.kaggle_top.robust_expert_enabled: false` added to default,
+    `stack.yml`, `stack_gpu.yml`, and `quick.yml`;
+  - robust PF/beam columns are now emitted only when
+    `robust_expert_enabled: true`;
+  - `model.blend.allow_negative_weights` set back to `false` in default,
+    `stack.yml`, and `quick.yml`;
+  - notebook postprocess now supports multiple PF columns through:
+    - `pf_columns: [pf_ancc, pf_z]`;
+    - `w_pf_ancc_*`;
+    - `w_pf_z_*`;
+    - `w_pf_total_max`;
+  - both grid and Optuna postprocess scoring use the same multi-PF basis scorer.
+- Config defaults:
+  - `stack.yml` and `stack_gpu.yml` search:
+    - `w_pf_ancc_range: [0, 0.20, 0.01]`;
+    - `w_pf_z_range: [0, 0.10, 0.01]`;
+    - `w_pf_total_max: 0.30`;
+  - `quick.yml` uses compact grids for the same parameters.
+- Validation:
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run pytest -q`: `41 passed`;
+  - `make quick-train`: passed in `09.18s`;
+  - quick result:
+    - features: `384` (robust columns absent);
+    - raw OOF ensemble RMSE: `10.43919`;
+    - OOF+postprocess RMSE: `10.13017`;
+    - best postprocess: `alpha=1.05`, `tau=100`,
+      `w_pf_ancc=0.20`, `w_pf_z=0.00`, Savitzky-Golay `(17, 3)`.
+- Takeaway:
+  - this restores the submit default to the clean schema-v10 family;
+  - `pf_z` is now available in postprocess, but quick smoke did not select it;
+  - no new full-run is justified from this alone until the public-notebook gap
+    analysis points at a stronger change.
+
 ### EXP-20260520-1 - Clean Schema v10 vs Robust Schema v11 CML Audit
 
 - Context:

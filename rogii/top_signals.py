@@ -1199,7 +1199,9 @@ def add_offset_residuals(
         features[name] = full_feature(n, hidden_idx, hidden_gr - expected_gr)
 
 
-def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
+def empty_top_signal_features(
+    n: int, robust_expert_enabled: bool = False
+) -> dict[str, np.ndarray | float]:
     keys = [
         "kg_hidden_row",
         "kg_beam_mean_tvt",
@@ -1225,19 +1227,6 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_signal_mean_minus_flat",
         "kg_signal_mean_minus_last",
         "kg_signal_std",
-        "kg_signal_robust_tvt",
-        "kg_signal_robust_minus_flat",
-        "kg_signal_robust_minus_last",
-        "kg_signal_robust_std",
-        "kg_signal_robust_range",
-        "kg_signal_robust_vs_pf",
-        "kg_signal_robust_vs_beam",
-        "pf_ancc_conf",
-        "beam_conf",
-        "pf_beam_gap",
-        "pf_beam_abs_gap",
-        "pf_dtw_gap",
-        "pf_dwt_gap",
         "kg_form_ancc_tvt",
         "kg_form_ancc_minus_flat",
         "kg_form_ancc_minus_last",
@@ -1264,6 +1253,24 @@ def empty_top_signal_features(n: int) -> dict[str, np.ndarray | float]:
         "kg_pf_ancc_std",
         "kg_pf_ancc_vs_dense",
     ]
+    if robust_expert_enabled:
+        keys.extend(
+            [
+                "kg_signal_robust_tvt",
+                "kg_signal_robust_minus_flat",
+                "kg_signal_robust_minus_last",
+                "kg_signal_robust_std",
+                "kg_signal_robust_range",
+                "kg_signal_robust_vs_pf",
+                "kg_signal_robust_vs_beam",
+                "pf_ancc_conf",
+                "beam_conf",
+                "pf_beam_gap",
+                "pf_beam_abs_gap",
+                "pf_dtw_gap",
+                "pf_dwt_gap",
+            ]
+        )
     return {key: np.zeros(n, dtype=float) for key in keys}
 
 
@@ -1283,8 +1290,10 @@ def build_kaggle_top_signal_features(
     logger: RunLogger | None = None,
 ) -> dict[str, np.ndarray | float]:
     n = len(df)
-    features = empty_top_signal_features(n)
     top_cfg = config["features"].get("kaggle_top", {})
+    features = empty_top_signal_features(
+        n, robust_expert_enabled=bool(top_cfg.get("robust_expert_enabled", False))
+    )
     profile_stages = bool(config["features"].get("profile_stages", False))
     require_numba_for_top_signals()
 
@@ -2019,20 +2028,21 @@ def build_kaggle_top_signal_features(
             DTW_OFFSETS,
         )
 
-    add_pf_beam_robust_features(
-        features,
-        n,
-        hidden_idx,
-        flat_pred,
-        last_tvt,
-        pf_ancc_signal,
-        pf_ancc_std_signal,
-        beam_mean,
-        beam_ref,
-        beam_matrix,
-        dtw_signal[hidden_idx] if dtw_signal is not None else None,
-        dwt_hidden_signal,
-    )
+    if top_cfg.get("robust_expert_enabled", False):
+        add_pf_beam_robust_features(
+            features,
+            n,
+            hidden_idx,
+            flat_pred,
+            last_tvt,
+            pf_ancc_signal,
+            pf_ancc_std_signal,
+            beam_mean,
+            beam_ref,
+            beam_matrix,
+            dtw_signal[hidden_idx] if dtw_signal is not None else None,
+            dwt_hidden_signal,
+        )
 
     signal_matrix = np.vstack(signal_stack).T
     features["sig_std"] = full_feature(n, hidden_idx, np.nanstd(signal_matrix, axis=1))
@@ -2406,20 +2416,21 @@ def build_kaggle_context_signal_features(
         if beam_signal_stack and beam_candidates_found
         else None
     )
-    add_pf_beam_robust_features(
-        features,
-        n,
-        hidden_idx,
-        flat_pred,
-        last_tvt,
-        pf_ancc_signal,
-        pf_ancc_std_signal,
-        beam_mean,
-        beam_ref,
-        beam_matrix,
-        dtw_hidden,
-        dwt_hidden,
-    )
+    if top_cfg.get("robust_expert_enabled", False):
+        add_pf_beam_robust_features(
+            features,
+            n,
+            hidden_idx,
+            flat_pred,
+            last_tvt,
+            pf_ancc_signal,
+            pf_ancc_std_signal,
+            beam_mean,
+            beam_ref,
+            beam_matrix,
+            dtw_hidden,
+            dwt_hidden,
+        )
 
     signal_matrix = np.vstack(signal_stack).T
     signal_mean = np.nanmean(signal_matrix, axis=1)

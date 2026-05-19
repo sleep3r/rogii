@@ -57,6 +57,7 @@ features:
     spatial_k: 2
     dense_k: 10
     dense_samples_per_well: 30
+    robust_expert_enabled: false
 
 model:
   base_models:
@@ -89,7 +90,7 @@ model:
     method: hill_climb
     alpha_grid: [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
     iterations: 200
-    allow_negative_weights: true
+    allow_negative_weights: false
 
 validation:
   n_splits: 3
@@ -105,9 +106,12 @@ postprocess:
   notebook_blend:
     enabled: true
     pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
     alpha_grid: [0.95, 1.00, 1.05]
     tau_grid: [0, 50, 100]
-    w_pf_grid: [0, 0.10, 0.25]
+    w_pf_ancc_grid: [0, 0.10, 0.20]
+    w_pf_z_grid: [0, 0.05, 0.10]
+    w_pf_total_max: 0.30
   smoothing:
     enabled: true
     window: 17

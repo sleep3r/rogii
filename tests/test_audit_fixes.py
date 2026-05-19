@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
-import yaml
 
 from rogii.best_public_solution import Source, claimed_score, select_best_source
 from rogii.clearml_data import (
@@ -615,6 +614,24 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         "tvt_dense_d",
         "beam_cons_d",
         "sc_cons_d",
+    ]
+
+    for column in required:
+        assert column in wf.features.columns
+        values = wf.features.loc[hidden, column].to_numpy(dtype=float)
+        assert np.isfinite(values).all()
+    assert "kg_signal_robust_tvt" not in wf.features.columns
+
+
+def test_robust_expert_pack_is_optional(tmp_path) -> None:
+    path, _frame = write_dwt_synthetic_well(tmp_path)
+    config = dwt_config()
+    config["features"]["kaggle_top"]["robust_expert_enabled"] = True
+    context = KaggleTopContext([path], config)
+
+    wf = build_well_features(path, config, train=True, top_context=context)
+    hidden = wf.target_mask
+    required = [
         "kg_signal_robust_tvt",
         "kg_signal_robust_minus_last",
         "kg_signal_robust_minus_flat",
@@ -882,6 +899,7 @@ def test_notebook_blend_candidates_support_ranges() -> None:
     config = minimal_config()
     config["postprocess"]["notebook_blend"] = {
         "enabled": True,
+        "pf_column": "kg_pf_ancc_tvt",
         "alpha_range": [0.5, 0.7, 0.1],
         "tau_range": [0, 10, 5],
         "w_pf_range": [0, 0.2, 0.1],
@@ -890,6 +908,28 @@ def test_notebook_blend_candidates_support_ranges() -> None:
     assert len(candidates) == 27
     assert candidates[0] == {"alpha": 0.5, "tau": 0.0, "w_pf": 0.0}
     assert candidates[-1] == {"alpha": 0.7, "tau": 10.0, "w_pf": 0.2}
+
+
+def test_notebook_blend_candidates_support_multiple_pf_columns() -> None:
+    config = minimal_config()
+    config["postprocess"]["notebook_blend"] = {
+        "enabled": True,
+        "pf_column": "pf_ancc",
+        "pf_columns": ["pf_ancc", "pf_z"],
+        "alpha_grid": [1.0],
+        "tau_grid": [0.0],
+        "w_pf_ancc_grid": [0.0, 0.2],
+        "w_pf_z_grid": [0.0, 0.2],
+        "w_pf_total_max": 0.3,
+    }
+
+    candidates = notebook_blend_candidates(config)
+
+    assert candidates == [
+        {"alpha": 1.0, "tau": 0.0, "w_pf_ancc": 0.0, "w_pf_z": 0.0},
+        {"alpha": 1.0, "tau": 0.0, "w_pf_ancc": 0.0, "w_pf_z": 0.2},
+        {"alpha": 1.0, "tau": 0.0, "w_pf_ancc": 0.2, "w_pf_z": 0.0},
+    ]
 
 
 def test_notebook_postprocess_uses_md_from_last_known() -> None:
@@ -915,6 +955,37 @@ def test_notebook_postprocess_uses_md_from_last_known() -> None:
         features=features,
     )
     assert np.allclose(pred, [10.0, 10.0 + 2.0 * (1.0 - np.exp(-1.0))])
+
+
+def test_notebook_postprocess_can_blend_pf_ancc_and_pf_z() -> None:
+    config = minimal_config()
+    config["postprocess"]["notebook_blend"] = {
+        "enabled": True,
+        "pf_column": "pf_ancc",
+        "pf_columns": ["pf_ancc", "pf_z"],
+        "alpha": 1.0,
+        "tau": 0.0,
+        "w_pf_ancc": 0.2,
+        "w_pf_z": 0.1,
+        "w_pf_total_max": 0.3,
+    }
+    features = pd.DataFrame(
+        {
+            "last_known_tvt": [10.0, 10.0],
+            "md_from_last_known": [0.0, 100.0],
+            "pf_ancc": [13.0, 13.0],
+            "pf_z": [20.0, 15.0],
+        }
+    )
+
+    pred = apply_postprocess(
+        flat=np.array([10.0, 10.0]),
+        residual=np.array([2.0, 2.0]),
+        config=config,
+        features=features,
+    )
+
+    assert np.allclose(pred, [13.0, 12.5])
 
 
 def test_fast_postprocess_tuning_matches_bruteforce() -> None:
@@ -1114,9 +1185,15 @@ def test_make_xgboost_keeps_early_stopping_rounds_in_estimator_params() -> None:
 
 def test_configs_use_canonical_pf_postprocess_column() -> None:
     assert DEFAULT_CONFIG["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
-    for path in [Path("configs/quick.yml"), Path("configs/stack.yml")]:
-        config = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert config["postprocess"]["notebook_blend"]["pf_column"] == "pf_ancc"
+    for path in [
+        Path("configs/quick.yml"),
+        Path("configs/stack.yml"),
+        Path("configs/stack_gpu.yml"),
+    ]:
+        config = load_config(path)
+        blend = config["postprocess"]["notebook_blend"]
+        assert blend["pf_column"] == "pf_ancc"
+        assert blend["pf_columns"] == ["pf_ancc", "pf_z"]
 
 
 def test_stack_gpu_uses_catboost_and_xgboost_gpu_without_lightgbm_gpu() -> None:
