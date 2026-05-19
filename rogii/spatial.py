@@ -109,15 +109,31 @@ class KaggleTopContext:
             self.dense_xy = np.empty((0, 2), dtype=float)
             self.dense_ancc = np.empty(0, dtype=float)
             self.dense_wells = np.array([], dtype=object)
+            self.dense_well_counts: dict[str, int] = {}
             self.dense_scale = np.ones(2, dtype=float)
             return
 
         self.dense_xy = np.vstack(xy_parts)
         self.dense_ancc = np.concatenate(ancc_parts)
         self.dense_wells = np.concatenate(well_parts)
+        unique_wells, well_counts = np.unique(self.dense_wells, return_counts=True)
+        self.dense_well_counts = {
+            str(well): int(count) for well, count in zip(unique_wells, well_counts)
+        }
         scale = np.nanstd(self.dense_xy, axis=0)
         self.dense_scale = np.where(scale < 1e-6, 1.0, scale)
         self.dense_tree = cKDTree(self.dense_xy / self.dense_scale)
+
+    def _dense_fetch_count(self, self_well: str | None) -> int:
+        if len(self.dense_ancc) == 0:
+            return 0
+        self_count = (
+            self.dense_well_counts.get(self_well, 0) if self_well is not None else 0
+        )
+        needed_for_exact_self_exclusion = self.dense_k + self_count + 8
+        return min(
+            len(self.dense_ancc), max(self.dense_k, needed_for_exact_self_exclusion)
+        )
 
     def impute_formations(
         self, xy: np.ndarray, self_well: str | None
@@ -219,7 +235,7 @@ class KaggleTopContext:
                 np.full(len(xy), np.nan, dtype=float),
                 np.full(len(xy), np.nan, dtype=float),
             )
-        k_fetch = min(len(self.dense_ancc), max(self.dense_fetch, self.dense_k))
+        k_fetch = self._dense_fetch_count(self_well)
         pred = np.empty(len(xy), dtype=float)
         std = np.empty(len(xy), dtype=float)
         nearest_dist = np.empty(len(xy), dtype=float)

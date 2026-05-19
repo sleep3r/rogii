@@ -177,6 +177,7 @@ def build_well_features(
 ) -> WellFeatures:
     context_key = getattr(top_context, "context_key", None)
     cache_path = feature_cache_path(horizontal_path, config, train, context_key)
+    profile_stages = bool(config["features"].get("profile_stages", False))
     if cache_path is not None and cache_path.is_file():
         try:
             with cache_path.open("rb") as file:
@@ -187,7 +188,15 @@ def build_well_features(
             if logger is not None:
                 logger.warn("Ignoring feature cache", path=cache_path, error=exc)
 
+    stage_started_at = perf_counter()
     df = pd.read_csv(horizontal_path)
+    if logger is not None and profile_stages:
+        logger.info(
+            "Feature stage",
+            stage="well.read_horizontal",
+            well=well_name(horizontal_path),
+            duration_sec=perf_counter() - stage_started_at,
+        )
     n = len(df)
     well = well_name(horizontal_path)
     idx = np.arange(n, dtype=float)
@@ -362,11 +371,20 @@ def build_well_features(
     )
 
     if config["features"].get("include_typewell", True):
+        stage_started_at = perf_counter()
         features.update(
             read_typewell_features(typewell_path(horizontal_path), gr, flat_pred)
         )
+        if logger is not None and profile_stages:
+            logger.info(
+                "Feature stage",
+                stage="well.typewell",
+                well=well,
+                duration_sec=perf_counter() - stage_started_at,
+            )
 
     if config["features"].get("include_kaggle_top_signals", False):
+        stage_started_at = perf_counter()
         features.update(
             build_kaggle_top_signal_features(
                 df,
@@ -381,10 +399,27 @@ def build_well_features(
                 flat_pred,
                 config,
                 train,
+                logger,
             )
         )
+        if logger is not None and profile_stages:
+            logger.info(
+                "Feature stage",
+                stage="well.top_signals_total",
+                well=well,
+                duration_sec=perf_counter() - stage_started_at,
+            )
 
+    stage_started_at = perf_counter()
     feature_frame = pd.DataFrame(features).replace([np.inf, -np.inf], np.nan)
+    if logger is not None and profile_stages:
+        logger.info(
+            "Feature stage",
+            stage="well.materialize_frame",
+            well=well,
+            columns=len(feature_frame.columns),
+            duration_sec=perf_counter() - stage_started_at,
+        )
     target_mask = (
         build_target_mask(df, config["data"].get("target_rows", "hidden_only"))
         if train

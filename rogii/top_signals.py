@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,7 @@ import pandas as pd
 from .constants import FORMATIONS
 from .io import typewell_path, well_name
 from .numeric import as_float_array, fill_numeric, nearest_index, smooth_for_alignment
+from .runlog import RunLogger
 from .spatial import KaggleTopContext
 
 try:
@@ -474,35 +476,26 @@ if NUMBA_AVAILABLE:
         return points, std
 
 
-def greedy_beam_signal(
-    gr_query: np.ndarray,
-    tw_tvt: np.ndarray,
-    tw_gr: np.ndarray,
-    start_tvt: float,
-    move_cost: float,
-    emit_scale: float,
-    smooth_radius: int,
-) -> np.ndarray:
-    """Fast deterministic proxy for the public top-solution beam-search signal."""
-    if len(gr_query) == 0:
-        return np.array([], dtype=float)
-    smoothed_gr = smooth_for_alignment(
-        gr_query, smooth_radius, float(np.nanmean(tw_gr))
+def require_numba_for_top_signals() -> None:
+    if not NUMBA_AVAILABLE:
+        raise ImportError("ROGII top-solution signals require numba.")
+
+
+def log_profile_stage(
+    logger: RunLogger | None,
+    profile_enabled: bool,
+    stage: str,
+    started_at: float,
+    **fields: Any,
+) -> None:
+    if logger is None or not profile_enabled:
+        return
+    logger.info(
+        "Feature stage",
+        stage=stage,
+        duration_sec=perf_counter() - started_at,
+        **fields,
     )
-    idx = nearest_index(tw_tvt, start_tvt)
-    path = np.empty(len(smoothed_gr), dtype=int)
-    for i, gr_value in enumerate(smoothed_gr):
-        candidates = np.arange(max(0, idx - 2), min(len(tw_gr), idx + 3))
-        costs = ((gr_value - tw_gr[candidates]) ** 2) / max(float(emit_scale), 1e-6)
-        costs += float(move_cost) * np.abs(candidates - idx)
-        idx = int(candidates[int(np.argmin(costs))])
-        path[i] = idx
-    return tw_tvt[path].astype(float)
-
-
-def require_numba_for_notebook_mode(top_cfg: dict[str, Any]) -> None:
-    if str(top_cfg.get("mode", "")).lower() == "notebook" and not NUMBA_AVAILABLE:
-        raise ImportError("features.kaggle_top.mode=notebook requires numba.")
 
 
 def parse_beam_config(
@@ -532,7 +525,6 @@ def beam_search_signal(
     move_cost: float,
     emit_scale: float,
     smooth_radius: int,
-    require_numba: bool,
 ) -> np.ndarray:
     if len(gr_query) == 0:
         return np.array([], dtype=float)
@@ -550,11 +542,7 @@ def beam_search_signal(
             max(float(emit_scale), 1e-6),
         )
         return tw_tvt[path].astype(float)
-    if require_numba:
-        raise ImportError("Notebook beam search requires numba.")
-    return greedy_beam_signal(
-        gr_query, tw_tvt, tw_gr, start_tvt, move_cost, emit_scale, smooth_radius
-    )
+    raise ImportError("ROGII beam search requires numba.")
 
 
 def gr_sigma_from_known(
@@ -1011,71 +999,6 @@ def deterministic_seed(text: str) -> int:
     return int(seed)
 
 
-def particle_filter_signal(
-    candidate_matrix: np.ndarray,
-    seed: int,
-    n_particles: int,
-    process_noise: float,
-    observation_scale: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    candidates = np.asarray(candidate_matrix, dtype=float)
-    if candidates.ndim != 2 or candidates.shape[0] == 0:
-        return np.array([], dtype=float), np.array([], dtype=float)
-
-    row_median = np.nanmedian(candidates, axis=1)
-    global_median = (
-        float(np.nanmedian(row_median)) if np.isfinite(row_median).any() else 0.0
-    )
-    row_median = np.where(np.isfinite(row_median), row_median, global_median)
-    candidates = np.where(np.isfinite(candidates), candidates, row_median[:, None])
-
-    n_steps = candidates.shape[0]
-    n_particles = max(32, int(n_particles))
-    process_noise = max(float(process_noise), 1e-3)
-    observation_scale = max(float(observation_scale), 1e-3)
-    rng = np.random.default_rng(seed)
-
-    first_candidates = candidates[0]
-    base = rng.choice(first_candidates, size=n_particles, replace=True)
-    particles = base + rng.normal(0.0, process_noise, size=n_particles)
-    weights = np.full(n_particles, 1.0 / n_particles, dtype=float)
-    means = np.empty(n_steps, dtype=float)
-    stds = np.empty(n_steps, dtype=float)
-
-    for step in range(n_steps):
-        if step > 0:
-            delta = float(np.nanmedian(candidates[step] - candidates[step - 1]))
-            particles = (
-                particles + delta + rng.normal(0.0, process_noise, size=n_particles)
-            )
-
-        residual = particles[:, None] - candidates[step][None, :]
-        likelihood = np.exp(
-            -0.5 * np.nanmin((residual / observation_scale) ** 2, axis=1)
-        )
-        weights *= likelihood + 1e-12
-        weight_sum = float(weights.sum())
-        if not np.isfinite(weight_sum) or weight_sum <= 0:
-            weights.fill(1.0 / n_particles)
-        else:
-            weights /= weight_sum
-
-        mean = float(weights @ particles)
-        variance = float(weights @ ((particles - mean) ** 2))
-        means[step] = mean
-        stds[step] = np.sqrt(max(variance, 0.0))
-
-        effective_size = 1.0 / float(np.sum(weights**2))
-        if effective_size < n_particles * 0.5:
-            positions = (rng.random() + np.arange(n_particles)) / n_particles
-            cumulative = np.cumsum(weights)
-            indexes = np.searchsorted(cumulative, positions, side="left")
-            particles = particles[np.clip(indexes, 0, n_particles - 1)]
-            weights.fill(1.0 / n_particles)
-
-    return means, stds
-
-
 def robust_slope(x: np.ndarray, y: np.ndarray) -> float:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -1220,12 +1143,13 @@ def build_kaggle_top_signal_features(
     flat_pred: np.ndarray,
     config: dict[str, Any],
     train: bool,
+    logger: RunLogger | None = None,
 ) -> dict[str, np.ndarray | float]:
     n = len(df)
     features = empty_top_signal_features(n)
     top_cfg = config["features"].get("kaggle_top", {})
-    require_numba_for_notebook_mode(top_cfg)
-    notebook_mode = str(top_cfg.get("mode", "")).lower() == "notebook"
+    profile_stages = bool(config["features"].get("profile_stages", False))
+    require_numba_for_top_signals()
 
     # Pre-initialize all dynamic config-driven features with NaN so the
     # feature schema is stable regardless of typewell presence.  During
@@ -1299,6 +1223,7 @@ def build_kaggle_top_signal_features(
     form_ancc_signal = None
     pf_ancc_signal = None
 
+    stage_started_at = perf_counter()
     beam_signals: list[np.ndarray] = []
     beam_by_tag: dict[str, np.ndarray] = {}
     for beam_cfg in top_cfg.get("beam_configs", []):
@@ -1314,7 +1239,6 @@ def build_kaggle_top_signal_features(
             float(move_cost),
             float(emit_scale),
             int(smooth_radius),
-            notebook_mode,
         )
         beam_signals.append(signal)
         beam_by_tag[tag] = signal
@@ -1354,7 +1278,16 @@ def build_kaggle_top_signal_features(
         np.nanstd(beam_matrix, axis=1) if beam_signals else np.zeros(len(hidden_idx)),
     )
     features["beam_med_d"] = full_feature(n, hidden_idx, beam_median - last_tvt)
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.beam",
+        stage_started_at,
+        signals=len(beam_signals),
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     ncc = multi_scale_ncc(
         known_gr,
         known_tvt,
@@ -1439,7 +1372,16 @@ def build_kaggle_top_signal_features(
     features["sc_ens_d"] = full_feature(n, hidden_idx, ncc_ens - last_tvt)
     features["sc_trust"] = full_scalar(n, hidden_idx, known_trust)
     features["hyb_d"] = full_feature(n, hidden_idx, hybrid_ref - last_tvt)
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.ncc",
+        stage_started_at,
+        windows=len(ncc_windows),
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     if top_cfg.get("dtw_enabled", True):
         dtw_radii = [
             int(item)
@@ -1525,7 +1467,16 @@ def build_kaggle_top_signal_features(
     else:
         dtw_signal = None
         signal_stack = [beam_mean]
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.dtw",
+        stage_started_at,
+        enabled=bool(top_cfg.get("dtw_enabled", True)),
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     if top_cfg.get("dwt_enabled", False):
         dwt_full = wavelet_lowpass(
             gr_full,
@@ -1589,8 +1540,18 @@ def build_kaggle_top_signal_features(
             )
         features["kg_dwt_vs_beam"][hidden_idx] = dwt_signal[hidden_idx] - beam_mean
         signal_stack.append(dwt_signal[hidden_idx])
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.dwt",
+        stage_started_at,
+        enabled=bool(top_cfg.get("dwt_enabled", False)),
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     if context is not None:
+        formation_started_at = perf_counter()
         xy_hidden = np.column_stack([x[hidden_idx], y[hidden_idx]])
         form_hidden, form_dist = context.impute_formations(xy_hidden, self_well)
         xy_known = np.column_stack([x[known_idx], y[known_idx]])
@@ -1670,7 +1631,15 @@ def build_kaggle_top_signal_features(
             signal_stack.append(form_mean)
         else:
             form_mean = flat_pred[hidden_idx]
+        log_profile_stage(
+            logger,
+            profile_stages,
+            "top.spatial.formations",
+            formation_started_at,
+            hidden_rows=len(hidden_idx),
+        )
 
+        dense_started_at = perf_counter()
         dense_ancc, dense_std, dense_dist = context.impute_dense_ancc(
             xy_hidden, self_well
         )
@@ -1724,63 +1693,48 @@ def build_kaggle_top_signal_features(
                 n, hidden_idx, beam_ref - form_ancc_signal
             )
         signal_stack.append(dense_signal)
+        log_profile_stage(
+            logger,
+            profile_stages,
+            "top.spatial.dense",
+            dense_started_at,
+            hidden_rows=len(hidden_idx),
+        )
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.spatial",
+        stage_started_at,
+        enabled=context is not None,
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     if top_cfg.get("particle_enabled", False):
-        if notebook_mode:
-            pf_z, pf_z_std = run_pf_z_signal(
-                md,
-                z,
-                gr,
-                tvt_input,
-                tw_tvt,
-                tw_gr,
-                hidden_idx,
-                known_idx,
-                deterministic_seed(f"{well}:pf_z"),
-                int(top_cfg.get("particle_count", 600)),
-            )
-            pf_ancc, pf_ancc_std = run_pf_ancc_signal(
-                md,
-                z,
-                gr,
-                tvt_input,
-                tw_tvt,
-                tw_gr,
-                hidden_idx,
-                known_idx,
-                deterministic_seed(f"{well}:pf_ancc"),
-                int(
-                    top_cfg.get(
-                        "ancc_particle_count", top_cfg.get("particle_count", 600)
-                    )
-                ),
-            )
-        else:
-            base_candidates = [flat_pred[hidden_idx], *signal_stack]
-            pf_z, pf_z_std = particle_filter_signal(
-                np.vstack(base_candidates).T,
-                deterministic_seed(f"{well}:pf_z"),
-                int(top_cfg.get("particle_count", 192)),
-                float(top_cfg.get("particle_process_noise", 4.0)),
-                float(top_cfg.get("particle_observation_scale", 18.0)),
-            )
-
-            ancc_candidates = [flat_pred[hidden_idx], beam_mean]
-            if dtw_signal is not None:
-                ancc_candidates.append(dtw_signal[hidden_idx])
-            if dwt_signal is not None:
-                ancc_candidates.append(dwt_signal[hidden_idx])
-            if form_ancc_signal is not None:
-                ancc_candidates.append(form_ancc_signal)
-            if dense_signal is not None:
-                ancc_candidates.append(dense_signal)
-            pf_ancc, pf_ancc_std = particle_filter_signal(
-                np.vstack(ancc_candidates).T,
-                deterministic_seed(f"{well}:pf_ancc"),
-                int(top_cfg.get("particle_count", 192)),
-                float(top_cfg.get("particle_process_noise", 4.0)),
-                float(top_cfg.get("particle_observation_scale", 18.0)),
-            )
+        pf_z, pf_z_std = run_pf_z_signal(
+            md,
+            z,
+            gr,
+            tvt_input,
+            tw_tvt,
+            tw_gr,
+            hidden_idx,
+            known_idx,
+            deterministic_seed(f"{well}:pf_z"),
+            int(top_cfg.get("particle_count", 600)),
+        )
+        pf_ancc, pf_ancc_std = run_pf_ancc_signal(
+            md,
+            z,
+            gr,
+            tvt_input,
+            tw_tvt,
+            tw_gr,
+            hidden_idx,
+            known_idx,
+            deterministic_seed(f"{well}:pf_ancc"),
+            int(top_cfg.get("ancc_particle_count", top_cfg.get("particle_count", 600))),
+        )
         features["kg_pf_z_tvt"][hidden_idx] = pf_z
         features["kg_pf_z_minus_flat"][hidden_idx] = pf_z - flat_pred[hidden_idx]
         features["kg_pf_z_minus_last"][hidden_idx] = pf_z - last_tvt
@@ -1810,7 +1764,16 @@ def build_kaggle_top_signal_features(
             features["dtw_vs_pf"] = full_feature(
                 n, hidden_idx, dtw_signal[hidden_idx] - pf_ancc
             )
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.particle",
+        stage_started_at,
+        enabled=bool(top_cfg.get("particle_enabled", False)),
+        hidden_rows=len(hidden_idx),
+    )
 
+    stage_started_at = perf_counter()
     if pf_ancc_signal is not None:
         signal_stack.append(pf_ancc_signal)
     signal_stack.extend([ncc_ens, hybrid_ref])
@@ -1923,4 +1886,11 @@ def build_kaggle_top_signal_features(
     )
     features["kg_signal_std"][hidden_idx] = np.nanstd(signal_matrix, axis=1)
     features["kg_hidden_row"][hidden_idx] = 1.0
+    log_profile_stage(
+        logger,
+        profile_stages,
+        "top.offsets",
+        stage_started_at,
+        hidden_rows=len(hidden_idx),
+    )
     return features

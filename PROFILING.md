@@ -11,6 +11,7 @@ function-level view.
 ```bash
 make profile-quick
 make profile-train PROFILE_NAME=stack_YYYYMMDD
+make profile-features PROFILE_NAME=features_stack50 FEATURE_PROFILE_WELLS=50
 make profile-report PROFILE_NAME=quick
 ```
 
@@ -20,6 +21,23 @@ Generated files live under `artifacts/profiles/`:
 - `*.prof`: raw `cProfile` output;
 - `*.md`: Markdown report with stage timings and top cumulative/self-time
   functions.
+
+For feature-prep-only profiling, use `make profile-features`. By default it
+profiles the first fold's train table (`FEATURE_PROFILE_CONTEXT=fold-train`),
+uses `FEATURE_PROFILE_WELLS=50`, and disables feature cache so the report
+captures cold compute instead of cache reads. Useful variants:
+
+```bash
+make profile-features PROFILE_NAME=features_fold1_25 FEATURE_PROFILE_WELLS=25
+make profile-features PROFILE_NAME=features_valid_50 FEATURE_PROFILE_CONTEXT=fold-valid FEATURE_PROFILE_WELLS=50
+make profile-features PROFILE_NAME=features_cached_50 FEATURE_PROFILE_DISABLE_CACHE=false FEATURE_PROFILE_WELLS=50
+```
+
+When `feature_profile` runs, it enables per-stage feature logs for
+`well.read_horizontal`, `well.typewell`, `top.beam`, `top.ncc`, `top.dtw`,
+`top.dwt`, `top.spatial.formations`, `top.spatial.dense`, `top.spatial`,
+`top.particle`, `top.offsets`, `well.top_signals_total`, and
+`well.materialize_frame`.
 
 For deltas, compare runs with the same config, cache state, machine, and Python
 environment. If any of those change, treat the comparison as directional only.
@@ -132,6 +150,27 @@ Top self-time functions:
      uses `spatial_k=2`, which makes plane fitting underdetermined.
    - Full `stack.yml` uses `spatial_k=10`, so the vectorized formation path
      should apply there; exact full-run delta is pending.
+   - Implemented exact dense ANCC fetch sizing on 2026-05-19. The old code
+     queried `dense_fetch=5000` neighbors per row and then discarded same-well
+     points. The new code queries `dense_k + self_well_dense_points + 8`, which
+     is enough to preserve the same top non-self candidates while avoiding the
+     huge KD-tree result matrix.
+   - Stack feature-prep micro-profile, fold 1 train context, 3 wells, cache off:
+     - before: `Profile feature table = 9.67s`,
+       `impute_dense_ancc = 8.274s`;
+     - after: `Profile feature table = 1.38s`,
+       `impute_dense_ancc = 0.084s`;
+     - table-build speedup: `7.0x`;
+     - dense ANCC speedup: `98.5x`.
+   - Stack feature-prep profile, fold 1 train context, 25 wells, cache off:
+     `Profile feature table = 10.69s`, `117,140` rows, `415` features.
+     The matching server symptom before this fix was `25/618` wells in `03:18`,
+     so rerun server logs should show whether the remote bottleneck was the
+     same dense-neighbor fetch path.
+   - New spatial stage logs on the same after-profile:
+     `top.spatial.formations = 0.014-0.017s/well`,
+     `top.spatial.dense = 0.024-0.033s/well`,
+     `top.particle = 0.220-0.308s/well`.
    - Next idea: split context-independent alignment features from fold-specific
      spatial features so fold-safe OOF does not recompute everything.
 

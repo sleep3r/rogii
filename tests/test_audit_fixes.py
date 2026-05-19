@@ -311,7 +311,6 @@ def dwt_config() -> dict:
     config["features"]["include_typewell"] = True
     config["features"]["include_kaggle_top_signals"] = True
     config["features"]["kaggle_top"] = {
-        "mode": "notebook",
         "beam_configs": [[4, 6.0, 40.0, 1, "cons"], [4, 6.0, 40.0, 1, "sm5"]],
         "ncc_windows": [2, 3, 4],
         "ncc_stride": 1,
@@ -397,7 +396,7 @@ def reference_impute_dense_ancc(context, xy: np.ndarray, self_well: str | None):
             np.full(len(xy), np.nan, dtype=float),
             np.full(len(xy), np.nan, dtype=float),
         )
-    k_fetch = min(len(context.dense_ancc), max(context.dense_fetch, context.dense_k))
+    k_fetch = len(context.dense_ancc)
     pred = np.empty(len(xy), dtype=float)
     std = np.empty(len(xy), dtype=float)
     nearest_dist = np.empty(len(xy), dtype=float)

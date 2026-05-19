@@ -17,6 +17,11 @@ PROFILE_FILE ?= $(PROFILE_DIR)/$(PROFILE_NAME).prof
 PROFILE_LOG ?= $(PROFILE_DIR)/$(PROFILE_NAME).log
 PROFILE_REPORT ?= $(PROFILE_DIR)/$(PROFILE_NAME).md
 PROFILE_REPORT_LIMIT ?= 40
+FEATURE_PROFILE_WELLS ?= 50
+FEATURE_PROFILE_FOLD ?= 1
+FEATURE_PROFILE_CONTEXT ?= fold-train
+FEATURE_PROFILE_DISABLE_CACHE ?= true
+FEATURE_PROFILE_CACHE_ARG := $(if $(filter true 1 yes,$(FEATURE_PROFILE_DISABLE_CACHE)),--disable-cache,)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -78,7 +83,7 @@ BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file 
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path check-server-env train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -129,6 +134,11 @@ profile-quick:
 
 profile-train:
 	$(MAKE) profile CONFIG=$(CONFIG) PROFILE_NAME=stack
+
+profile-features: ensure-data
+	mkdir -p $(PROFILE_DIR)
+	set -o pipefail; $(PYTHON) -m cProfile -o $(PROFILE_FILE) -m rogii.feature_profile --config $(CONFIG) --max-wells $(FEATURE_PROFILE_WELLS) --fold-id $(FEATURE_PROFILE_FOLD) --context $(FEATURE_PROFILE_CONTEXT) $(FEATURE_PROFILE_CACHE_ARG) 2>&1 | tee $(PROFILE_LOG)
+	$(PYTHON) -m rogii.profile_report --profile $(PROFILE_FILE) --log $(PROFILE_LOG) --output $(PROFILE_REPORT) --limit $(PROFILE_REPORT_LIMIT) --title "ROGII feature profile: $(PROFILE_NAME)"
 
 profile-report:
 	$(PYTHON) -m rogii.profile_report --profile $(PROFILE_FILE) --log $(PROFILE_LOG) --output $(PROFILE_REPORT) --limit $(PROFILE_REPORT_LIMIT) --title "ROGII profile: $(PROFILE_NAME)"

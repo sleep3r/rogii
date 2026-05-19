@@ -77,6 +77,21 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Added feature-table heartbeat logging with ETA via `features.progress_interval`
   so cold fold-safe server runs do not look stuck while the first 100 wells are
   still building.
+- Added `make profile-features` / `rogii.feature_profile` for feature-prep-only
+  profiling with per-stage logs for CSV/typewell, beam/NCC/DTW/DWT, spatial,
+  particle filters, residual offsets, and frame materialization.
+- Profiled `configs/stack.yml` feature prep and found the bottleneck in dense
+  ANCC KNN: `impute_dense_ancc` queried `dense_fetch=5000` neighbors per row.
+  It now queries only `dense_k + same-well dense points + 8`, enough to preserve
+  exact self-well exclusion while cutting the micro-profile from `9.67s` to
+  `1.38s` for 3 wells (`impute_dense_ancc`: `8.274s -> 0.084s`).
+  A 25-well cold feature-prep profile now builds `117,140` rows and `415`
+  features in `10.69s`.
+- Added spatial sub-stage logs:
+  `top.spatial.formations` and `top.spatial.dense`.
+- Removed the obsolete `features.kaggle_top.mode` switch and its proxy/fallback
+  branches. The top-solution signal block now has one path: numba-backed beam,
+  DTW/DWT, PF_Z, and PF_ANCC.
 - Added `rogii/train.py` as a thin entrypoint for tools expecting a train module.
 - Validation:
   - `uv lock`: passed with `spacebridge` from nexus;

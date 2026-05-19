@@ -39,7 +39,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "include_typewell": True,
         "include_kaggle_top_signals": True,
         "kaggle_top": {
-            "mode": "notebook",
             "beam_configs": [
                 [10, 20.0, 144.0, 2, "cons"],
                 [10, 8.0, 64.0, 2, "loose"],
