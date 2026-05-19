@@ -7,6 +7,8 @@ import yaml
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "seed": 42,
+    "project_name": "ROGII/Wellbore",
+    "output_uri": "s3://s3-basket-cold.wb.ru/ds-experiments",
     "data": {
         "data_dir": None,
         "train_dir": None,
@@ -15,6 +17,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_train_wells": None,
         "max_test_wells": None,
         "target_rows": "hidden_only",
+        "clearml": {
+            "enabled": False,
+            "project": None,
+            "name": "rogii-wellbore-geology-prediction",
+            "version": None,
+            "dataset_id": None,
+            "alias": None,
+            "cache_dir": "~/.cache/clearml/rogii",
+        },
     },
     "features": {
         "tail_windows": [25, 100, 250],
@@ -118,6 +129,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "runs": {
         "registry_path": "artifacts/runs.csv",
+    },
+    "tracking": {
+        "clearml": {
+            "enabled": False,
+            "project": None,
+            "task_name": None,
+            "output_uri": None,
+            "tags": ["rogii", "kaggle"],
+            "log_artifacts": True,
+            "log_model": True,
+            "fail_on_error": False,
+        },
     },
 }
 

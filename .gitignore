@@ -150,6 +150,8 @@ activemq-data/
 # Environments
 .env
 .envrc
+clearml.conf
+portainer.yml
 .venv
 env/
 venv/

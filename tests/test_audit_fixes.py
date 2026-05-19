@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,9 @@ import pytest
 import yaml
 
 from rogii.best_public_solution import Source, claimed_score, select_best_source
+from rogii.clearml_data import apply_data_clearml_overrides, selected_top_level_paths
+from rogii.clearml_data import upload_dataset as clearml_upload_dataset
+from rogii.clearml_tracking import apply_clearml_overrides
 from rogii.config import DEFAULT_CONFIG
 from rogii.constants import FORMATIONS
 from rogii.diagnostics import append_run_registry
@@ -72,6 +76,133 @@ def test_best_public_solution_score_selection() -> None:
 def test_filter_model_bundle_removes_excluded_lines() -> None:
     text = "keep\n M tests/test_audit_fixes.py\nalso keep\n- tests/foo.py\n"
     assert filter_lines(text, ["tests/"]) == "keep\nalso keep\n"
+
+
+def test_clearml_overrides_accept_spacebridge_style_args() -> None:
+    config = {
+        "project_name": "ROGII/Fallback",
+        "output_uri": "s3://fallback",
+        "tracking": {
+            "clearml": {
+                "enabled": False,
+                "project": "old",
+                "tags": ["old"],
+                "log_model": False,
+            }
+        },
+    }
+    args = SimpleNamespace(
+        clearml_enabled="true",
+        clearml_project="ROGII/Test",
+        clearml_task_name="remote_task",
+        clearml_output_uri="s3://bucket/path",
+        clearml_tags="rogii,spacebridge",
+        clearml_log_artifacts="false",
+        clearml_log_model="true",
+        clearml_fail_on_error="true",
+    )
+
+    clearml_cfg = apply_clearml_overrides(
+        config,
+        args,
+        run_id="run_1",
+        config_path=Path("configs/stack.yml"),
+    )
+
+    assert clearml_cfg["enabled"] is True
+    assert clearml_cfg["project"] == "ROGII/Test"
+    assert clearml_cfg["task_name"] == "remote_task"
+    assert clearml_cfg["output_uri"] == "s3://bucket/path"
+    assert clearml_cfg["tags"] == ["rogii", "spacebridge"]
+    assert clearml_cfg["log_artifacts"] is False
+    assert clearml_cfg["log_model"] is True
+    assert clearml_cfg["fail_on_error"] is True
+
+
+def test_clearml_overrides_fall_back_to_project_and_output_uri() -> None:
+    config = {
+        "project_name": "ROGII/Fallback",
+        "output_uri": "s3://fallback",
+        "tracking": {
+            "clearml": {"enabled": False, "project": None, "output_uri": None}
+        },
+    }
+    args = SimpleNamespace(
+        clearml_enabled=None,
+        clearml_project=None,
+        clearml_task_name=None,
+        clearml_output_uri=None,
+        clearml_tags=None,
+        clearml_log_artifacts=None,
+        clearml_log_model=None,
+        clearml_fail_on_error=None,
+    )
+
+    clearml_cfg = apply_clearml_overrides(
+        config,
+        args,
+        run_id="run_1",
+        config_path=Path("configs/stack.yml"),
+    )
+
+    assert clearml_cfg["project"] == "ROGII/Fallback"
+    assert clearml_cfg["output_uri"] == "s3://fallback"
+    assert clearml_cfg["task_name"] == "rogii-stack-run_1"
+
+
+def test_clearml_data_upload_selection_excludes_zip(tmp_path: Path) -> None:
+    (tmp_path / "train").mkdir()
+    (tmp_path / "test").mkdir()
+    (tmp_path / "sample_submission.csv").write_text("id,tvt\n", encoding="utf-8")
+    (tmp_path / "rogii-wellbore-geology-prediction.zip").write_text(
+        "zip", encoding="utf-8"
+    )
+
+    selected = {path.name for path in selected_top_level_paths(tmp_path, ["*.zip"])}
+
+    assert selected == {"train", "test", "sample_submission.csv"}
+
+
+def test_data_clearml_overrides_accept_spacebridge_style_args() -> None:
+    config = {"data": {"clearml": {"enabled": False}}}
+    args = SimpleNamespace(
+        data_clearml_enabled="true",
+        data_clearml_project="ROGII/Test",
+        data_clearml_name="rogii-data",
+        data_clearml_version="v1",
+        data_clearml_dataset_id="dataset-id",
+        data_clearml_alias="alias",
+        data_clearml_cache_dir="/tmp/rogii-cache",
+    )
+
+    clearml_cfg = apply_data_clearml_overrides(config, args)
+
+    assert clearml_cfg["enabled"] is True
+    assert clearml_cfg["project"] == "ROGII/Test"
+    assert clearml_cfg["name"] == "rogii-data"
+    assert clearml_cfg["version"] == "v1"
+    assert clearml_cfg["dataset_id"] == "dataset-id"
+    assert clearml_cfg["alias"] == "alias"
+    assert clearml_cfg["cache_dir"] == "/tmp/rogii-cache"
+
+
+def test_clearml_data_upload_requires_s3_before_clearml_import(tmp_path: Path) -> None:
+    (tmp_path / "train").mkdir()
+
+    with pytest.raises(ValueError, match="s3://"):
+        clearml_upload_dataset(
+            data_dir=tmp_path,
+            project="p",
+            name="n",
+            version="v",
+            output_uri="https://clearml.wb.ru/fileserver",
+            tags=[],
+            excludes=[],
+            max_workers=1,
+            require_output_uri=True,
+            s3_only=True,
+            logger=SimpleNamespace(info=lambda *args, **kwargs: None),
+        )
 
 
 def write_dwt_synthetic_well(tmp_path, name: str = "abc12345") -> tuple:

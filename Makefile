@@ -9,6 +9,8 @@ DATA_DIR ?= data
 CONFIG ?= configs/stack.yml
 SUBMISSION ?= submission.csv
 MESSAGE ?= Submission
+PROJECT_NAME ?= ROGII/Wellbore
+OUTPUT_URI ?= s3://s3-basket-cold.wb.ru/ds-experiments
 PROFILE_DIR ?= artifacts/profiles
 PROFILE_NAME ?= profile
 PROFILE_FILE ?= $(PROFILE_DIR)/$(PROFILE_NAME).prof
@@ -37,6 +39,24 @@ INFER_MODEL_DIR ?= artifacts/stack
 MODEL_DATASET ?= $(KAGGLE_USER)/rogii-baseline-artifacts
 MODEL_DATASET_DIR ?= artifacts/kaggle_model_dataset
 
+INSTANCE ?=
+SPACEBRIDGE_TASK ?= rogii
+SPACEBRIDGE_IMAGE ?= sleep3r/wb_training:rogii
+SERVER_NOTES ?= spacebridge_train
+CLEARML_ENABLED ?= true
+CLEARML_PROJECT ?= $(PROJECT_NAME)
+CLEARML_TASK_NAME ?=
+CLEARML_OUTPUT_URI ?= $(OUTPUT_URI)
+CLEARML_TAGS ?= rogii,spacebridge,stack
+CLEARML_LOG_MODEL ?= true
+CLEARML_DATA_PROJECT ?= $(PROJECT_NAME)
+CLEARML_DATA_NAME ?= rogii-wellbore-geology-prediction
+CLEARML_DATA_VERSION ?= 20260519_s3
+CLEARML_DATA_OUTPUT_URI ?= $(OUTPUT_URI)
+CLEARML_DATA_CACHE_DIR ?= ~/.cache/clearml/rogii
+CLEARML_DATA_MAX_WORKERS ?= 8
+SPACEBRIDGE_CMD_ARGS ?= config=$(CONFIG) clearml_enabled=$(CLEARML_ENABLED) clearml_project=$(CLEARML_PROJECT) clearml_task_name=$(CLEARML_TASK_NAME) clearml_output_uri=$(CLEARML_OUTPUT_URI) clearml_tags=$(CLEARML_TAGS) clearml_log_model=$(CLEARML_LOG_MODEL) data_clearml_enabled=true data_clearml_project=$(CLEARML_DATA_PROJECT) data_clearml_name=$(CLEARML_DATA_NAME) data_clearml_version=$(CLEARML_DATA_VERSION) data_clearml_cache_dir=$(CLEARML_DATA_CACHE_DIR) notes=$(SERVER_NOTES)
+
 CODEX_HOME ?= $(HOME)/.codex
 MINE_DB ?= .kaggle_mining/ideas.sqlite
 MINE_WORK_DIR ?= .kaggle_mining/code
@@ -54,12 +74,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/quick.yml rogii/config.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/quick.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data train train-local quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path train train-local train-server train-spacebridge quick-train profile profile-quick profile-train profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -76,10 +96,20 @@ ensure-data:
 		$(MAKE) unzip-data; \
 	fi
 
+upload-clearml-data: ensure-data
+	$(PYTHON) -m rogii.clearml_data upload --data-dir $(DATA_DIR) --project "$(CLEARML_DATA_PROJECT)" --name "$(CLEARML_DATA_NAME)" --version "$(CLEARML_DATA_VERSION)" --output-uri "$(CLEARML_DATA_OUTPUT_URI)" --require-output-uri --s3-only --max-workers $(CLEARML_DATA_MAX_WORKERS)
+
+clearml-data-local-path:
+	$(PYTHON) -m rogii.clearml_data download --project "$(CLEARML_DATA_PROJECT)" --name "$(CLEARML_DATA_NAME)" --version "$(CLEARML_DATA_VERSION)" --cache-dir "$(CLEARML_DATA_CACHE_DIR)"
+
 train-local: ensure-data
 	$(PYTHON) -m rogii --config $(CONFIG)
 
 train: train-local
+
+train-server train-spacebridge:
+	@test -n "$(INSTANCE)" || (echo "Set INSTANCE=<portainer instance from portainer.yml>" && exit 1)
+	$(UV) run spacebridge train $(SPACEBRIDGE_TASK) --instance $(INSTANCE) $(if $(SPACEBRIDGE_IMAGE),--image-name $(SPACEBRIDGE_IMAGE),) --cmd-args "$(SPACEBRIDGE_CMD_ARGS)"
 
 quick-train:
 	$(PYTHON) -m rogii --config configs/quick.yml

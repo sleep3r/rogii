@@ -39,6 +39,32 @@ data/
 `make train-local` runs `ensure-data`, so it unzips the Kaggle archive if
 `data/train` or `data/test` is missing.
 
+Upload the unpacked data to ClearML Dataset:
+
+```bash
+make upload-clearml-data
+```
+
+Defaults:
+
+```text
+PROJECT_NAME=ROGII/Wellbore
+OUTPUT_URI=s3://s3-basket-cold.wb.ru/ds-experiments
+CLEARML_DATA_PROJECT=$(PROJECT_NAME)
+CLEARML_DATA_NAME=rogii-wellbore-geology-prediction
+CLEARML_DATA_VERSION=20260519_s3
+CLEARML_DATA_OUTPUT_URI=$(OUTPUT_URI)
+```
+
+The upload includes the unpacked `train/`, `test/`, public sample directories,
+`sample_submission.csv`, and the PPTX. Kaggle zip archives are excluded.
+`make upload-clearml-data` requires an `s3://` output URI, because the ClearML
+fileserver is too slow for this dataset size. To resolve the dataset locally:
+
+```bash
+make clearml-data-local-path
+```
+
 ## Training
 
 Fast smoke test on the public sample:
@@ -58,6 +84,44 @@ Equivalent command:
 ```bash
 uv run python -m rogii --config configs/stack.yml
 ```
+
+Server training through spacebridge:
+
+```bash
+cp portainer.yml.example portainer.yml
+# edit portainer.yml: ClearML config path, image name, Portainer instance, GPU ids
+make train-server INSTANCE=gpu
+```
+
+`make train-server` builds the Docker image, injects `~/clearml.conf` as a
+BuildKit secret, pushes the image, and starts it through Portainer. By default
+it passes `config=$(CONFIG)`, enables ClearML tracking, and enables
+`data.clearml`, so the container downloads the ClearML Dataset instead of
+packing local `data/` into the image. The Docker context excludes `.venv`,
+`artifacts`, mining output, and `data/`.
+
+Useful overrides:
+
+```bash
+make train-server INSTANCE=gpu CONFIG=configs/stack.yml SERVER_NOTES=fold_avg_v1
+make train-server INSTANCE=gpu CLEARML_TASK_NAME=rogii_fold_avg
+```
+
+Keep `SERVER_NOTES` and other spacebridge `key=value` args without spaces; the
+spacebridge parser is intentionally simple.
+
+ClearML is opt-in for normal local runs:
+
+```bash
+uv run python -m rogii --config configs/quick.yml --clearml_enabled=true
+ROGII_CLEARML_ENABLED=true make train-local
+```
+
+The ClearML task records the resolved config, scalar metrics, `metrics.json`,
+`features.json`, `config.yml`, `submission.csv`, `artifacts/runs.csv`, and every
+file under the run output directory. On server runs `CLEARML_LOG_MODEL=true` by
+default, so `model.pkl` is uploaded as well. All of this uses the task
+`output_uri`, which defaults to `s3://s3-basket-cold.wb.ru/ds-experiments`.
 
 The main `stack.yml` pipeline is the local, reproducible version of the public
 DWT-style baseline:

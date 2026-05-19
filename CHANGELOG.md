@@ -20,6 +20,62 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Spacebridge + ClearML Server Training Pass
+
+- Added top-level experiment destination config:
+  - `project_name: ROGII/Wellbore`;
+  - `output_uri: s3://s3-basket-cold.wb.ru/ds-experiments`;
+  - ClearML Task, ClearML Dataset, and spacebridge defaults inherit these
+    values unless explicitly overridden.
+- Added ClearML Dataset support:
+  - `make upload-clearml-data` uploads the local unpacked `data/` tree to
+    ClearML Dataset, excluding zip archives by default;
+  - upload now requires an `s3://` output URI and uses version `20260519_s3`
+    by default after the initial fileserver attempt proved too slow;
+  - `make clearml-data-local-path` resolves/downloads the dataset locally;
+  - `data.clearml` config block plus CLI/env overrides let train/inference use
+    ClearML data instead of a local `data/` directory.
+- Uploaded dataset:
+  - project/name/version:
+    `ROGII/Wellbore` / `rogii-wellbore-geology-prediction` / `20260519_s3`;
+  - dataset id: `48555c7ef0d44dc8a1eb1406cd7d4fcb`;
+  - selected files: 2,343;
+  - compressed upload size: 1.07 GiB, 3 chunks;
+  - S3 upload runtime: 1m43s, versus the interrupted fileserver upload that was
+    still crawling after several minutes.
+- Added a spacebridge-compatible Docker path:
+  - `Dockerfile` builds a CUDA/uv image and runs `uv run python -m rogii $CMD_ARGS`;
+  - `portainer.yml.example` documents the local Portainer/ClearML secret setup;
+  - `.dockerignore` keeps generated artifacts and mining output out of images
+    and now excludes `data/`; remote training fetches the ClearML Dataset.
+- Added Make targets:
+  - `make train-server INSTANCE=...`;
+  - alias `make train-spacebridge INSTANCE=...`;
+  - configurable `SPACEBRIDGE_CMD_ARGS`, `CLEARML_*`, `SERVER_NOTES`, and
+    `SPACEBRIDGE_IMAGE`;
+  - by default, spacebridge passes `data_clearml_enabled=true` and the ClearML
+    Dataset project/name/version.
+- Added optional ClearML tracking:
+  - `tracking.clearml` config block in defaults, `stack.yml`, and `quick.yml`;
+  - CLI/env overrides such as `--clearml_enabled=true` and
+    `ROGII_CLEARML_ENABLED=true`;
+  - resolved config, scalar metrics, submission, run registry, and every file
+    under the run output directory are logged when enabled;
+  - `model.pkl` upload is enabled for server runs by default via
+    `CLEARML_LOG_MODEL=true`;
+  - because the task `output_uri` points to S3, model/artifact uploads land in
+    `s3://s3-basket-cold.wb.ru/ds-experiments`.
+- Added `rogii/train.py` as a thin entrypoint for tools expecting a train module.
+- Validation:
+  - `uv lock`: passed with `spacebridge` from nexus;
+  - `uv run spacebridge train --help`: passed after adding explicit `pydantic`;
+  - `uv run pytest -q`: 26 passed;
+  - `uv run python -m ruff check .`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `make quick-train`: passed with ClearML disabled by config, top-level
+    `project_name`/`output_uri` resolved, and the S3 artifact-reporting step as
+    a no-op.
+
 ### Pre-Full-Run Hardening Pass
 
 - `FEATURE_CACHE_SCHEMA_VERSION` bumped to 7; old schema-v6 caches/artifacts are

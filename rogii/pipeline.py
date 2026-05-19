@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from .clearml_data import apply_data_clearml_overrides, prepare_clearml_data_if_needed
+from .clearml_tracking import ClearMLTracker, apply_clearml_overrides
 from .config import load_config
 from .diagnostics import append_run_registry, git_hash, regression_diagnostics
 from .features import FEATURE_CACHE_SCHEMA_VERSION, build_training_table
@@ -54,10 +56,18 @@ def parse_args() -> argparse.Namespace:
         help="YAML config path.",
     )
     parser.add_argument(
-        "--data-dir", type=Path, default=None, help="Override data.data_dir."
+        "--data-dir",
+        "--data_dir",
+        type=Path,
+        default=None,
+        help="Override data.data_dir.",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=None, help="Override outputs.output_dir."
+        "--output-dir",
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="Override outputs.output_dir.",
     )
     parser.add_argument(
         "--submission",
@@ -65,13 +75,53 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override outputs.submission_path.",
     )
-    parser.add_argument("--run-id", default=None, help="Optional run id for registry.")
+    parser.add_argument(
+        "--run-id", "--run_id", default=None, help="Optional run id for registry."
+    )
     parser.add_argument("--notes", default="", help="Optional run notes for registry.")
     parser.add_argument(
         "--public-lb",
+        "--public_lb",
         type=float,
         default=None,
         help="Optional public leaderboard score to record.",
+    )
+    parser.add_argument(
+        "--clearml-enabled",
+        "--clearml_enabled",
+        default=None,
+        help="Override tracking.clearml.enabled with true/false.",
+    )
+    parser.add_argument("--clearml-project", "--clearml_project", default=None)
+    parser.add_argument("--clearml-task-name", "--clearml_task_name", default=None)
+    parser.add_argument("--clearml-output-uri", "--clearml_output_uri", default=None)
+    parser.add_argument("--clearml-tags", "--clearml_tags", default=None)
+    parser.add_argument(
+        "--clearml-log-artifacts", "--clearml_log_artifacts", default=None
+    )
+    parser.add_argument("--clearml-log-model", "--clearml_log_model", default=None)
+    parser.add_argument(
+        "--clearml-fail-on-error", "--clearml_fail_on_error", default=None
+    )
+    parser.add_argument(
+        "--data-clearml-enabled", "--data_clearml_enabled", default=None
+    )
+    parser.add_argument(
+        "--data-clearml-project", "--data_clearml_project", default=None
+    )
+    parser.add_argument("--data-clearml-name", "--data_clearml_name", default=None)
+    parser.add_argument(
+        "--data-clearml-version", "--data_clearml_version", default=None
+    )
+    parser.add_argument(
+        "--data-clearml-id",
+        "--data_clearml_dataset_id",
+        dest="data_clearml_dataset_id",
+        default=None,
+    )
+    parser.add_argument("--data-clearml-alias", "--data_clearml_alias", default=None)
+    parser.add_argument(
+        "--data-clearml-cache-dir", "--data_clearml_cache_dir", default=None
     )
     return parser.parse_args()
 
@@ -281,7 +331,11 @@ def main() -> None:
         config["outputs"]["output_dir"] = str(args.output_dir)
     if args.submission is not None:
         config["outputs"]["submission_path"] = str(args.submission)
+    apply_data_clearml_overrides(config, args)
+    apply_clearml_overrides(config, args, run_id, args.config)
     print_config(config, logger)
+    clearml_tracker = ClearMLTracker.start(config, logger, run_id, args.config)
+    prepare_clearml_data_if_needed(config, logger)
     seed = int(config.get("seed", 42))
     data_dir = resolve_data_dir(config)
     train_dir = resolve_train_dir(data_dir, config)
@@ -471,6 +525,14 @@ def main() -> None:
             perf_counter() - run_started_at,
             args.notes,
         )
+    with logger.step("Report ClearML artifacts"):
+        clearml_tracker.report_metrics(metrics)
+        clearml_tracker.upload_artifacts(
+            Path(config["outputs"]["output_dir"]),
+            submission_path,
+            registry_path,
+        )
+        clearml_tracker.close()
     logger.log("DONE", "Training run complete", total_duration=logger.elapsed())
 
 

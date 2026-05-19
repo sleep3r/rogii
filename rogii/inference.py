@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from .clearml_data import apply_data_clearml_overrides, prepare_clearml_data_if_needed
 from .config import load_config
 from .io import (
     horizontal_files,
@@ -48,6 +49,26 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Override outputs.submission_path.",
+    )
+    parser.add_argument(
+        "--data-clearml-enabled", "--data_clearml_enabled", default=None
+    )
+    parser.add_argument(
+        "--data-clearml-project", "--data_clearml_project", default=None
+    )
+    parser.add_argument("--data-clearml-name", "--data_clearml_name", default=None)
+    parser.add_argument(
+        "--data-clearml-version", "--data_clearml_version", default=None
+    )
+    parser.add_argument(
+        "--data-clearml-id",
+        "--data_clearml_dataset_id",
+        dest="data_clearml_dataset_id",
+        default=None,
+    )
+    parser.add_argument("--data-clearml-alias", "--data_clearml_alias", default=None)
+    parser.add_argument(
+        "--data-clearml-cache-dir", "--data_clearml_cache_dir", default=None
     )
     return parser.parse_args()
 
@@ -177,6 +198,8 @@ def main() -> None:
         config["outputs"]["output_dir"] = str(args.output_dir)
     if args.submission is not None:
         config["outputs"]["submission_path"] = str(args.submission)
+    apply_data_clearml_overrides(config, args)
+    prepare_clearml_data_if_needed(config, logger)
 
     with logger.step("Load model artifact", path=model_dir):
         model, feature_names, metrics = load_model_bundle(model_dir)
