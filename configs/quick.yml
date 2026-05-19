@@ -89,6 +89,7 @@ model:
     method: hill_climb
     alpha_grid: [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
     iterations: 200
+    allow_negative_weights: true
 
 validation:
   n_splits: 3
@@ -96,9 +97,10 @@ validation:
   final_model_strategy: full_context
 
 postprocess:
+  search_method: grid
   progress_interval: 10
   residual_weight: 1.0
-  residual_weight_grid: [1.0]
+  residual_weight_grid: []
   residual_clip: 250.0
   notebook_blend:
     enabled: true
@@ -108,9 +110,9 @@ postprocess:
     w_pf_grid: [0, 0.10, 0.25]
   smoothing:
     enabled: true
-    candidates:
-      - {enabled: false}
-      - {window: 17, polyorder: 3}
+    window: 17
+    polyorder: 3
+    candidates: []
 
 outputs:
   output_dir: artifacts/quick

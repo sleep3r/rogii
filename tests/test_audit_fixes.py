@@ -36,8 +36,11 @@ from rogii.modeling import (
     EnsembleRegressor,
     ResidualModel,
     apply_postprocess,
+    fit_hill_climb_weights,
     make_xgboost,
     notebook_blend_candidates,
+    postprocess_candidate_count,
+    smoothing_candidates,
     tune_postprocess,
 )
 from rogii.pipeline import assert_fold_context_safe
@@ -986,6 +989,97 @@ def test_fast_postprocess_tuning_matches_bruteforce() -> None:
         assert best_smoothing == {"window": 5.0, "polyorder": 2.0}
     else:
         assert best_smoothing is None
+
+
+def test_hill_climb_can_use_negative_weights() -> None:
+    x = np.linspace(-2.0, 2.0, 50)
+    stack = np.column_stack([x, 2.0 * x])
+    y_true = -x
+
+    non_negative = fit_hill_climb_weights(
+        stack,
+        y_true,
+        iterations=200,
+        alpha_grid=[0.5, 0.25, 0.1, 0.05, 0.02, 0.01],
+        allow_negative_weights=False,
+    )
+    negative = fit_hill_climb_weights(
+        stack,
+        y_true,
+        iterations=200,
+        alpha_grid=[0.5, 0.25, 0.1, 0.05, 0.02, 0.01],
+        allow_negative_weights=True,
+    )
+
+    assert negative.sum() == pytest.approx(1.0)
+    assert np.any(negative < 0.0)
+    assert np.sqrt(np.mean((stack @ negative - y_true) ** 2)) < np.sqrt(
+        np.mean((stack @ non_negative - y_true) ** 2)
+    )
+
+
+def test_fixed_smoothing_config_returns_only_savgol() -> None:
+    config = minimal_config()
+    config["postprocess"]["smoothing"] = {
+        "enabled": True,
+        "window": 17,
+        "polyorder": 3,
+        "candidates": [],
+    }
+
+    assert smoothing_candidates(config) == [{"window": 17, "polyorder": 3}]
+
+
+def test_optuna_postprocess_tuning_uses_trial_budget() -> None:
+    config = minimal_config()
+    config["postprocess"] = {
+        "search_method": "optuna",
+        "optuna_trials": 12,
+        "optuna_seed": 123,
+        "progress_interval": 100,
+        "residual_weight": 1.0,
+        "residual_weight_grid": [],
+        "residual_clip": 10.0,
+        "notebook_blend": {
+            "enabled": True,
+            "pf_column": "kg_pf_ancc_tvt",
+            "alpha_range": [0.95, 1.05, 0.01],
+            "tau_range": [0, 50, 10],
+            "w_pf_range": [0, 0.2, 0.05],
+        },
+        "smoothing": {
+            "enabled": True,
+            "window": 5,
+            "polyorder": 2,
+            "candidates": [],
+        },
+    }
+    flat = np.array([10, 10, 10, 10, 20, 20, 20, 20], dtype=float)
+    residual = np.array([0.5, 1.5, 2.0, 2.5, -1.0, -1.5, -2.0, -2.5])
+    y_true = np.array([10.8, 11.4, 12.2, 12.9, 18.8, 18.3, 17.8, 17.3])
+    features = pd.DataFrame(
+        {
+            "last_known_tvt": [10.0] * 4 + [20.0] * 4,
+            "md_from_last_known": [0.0, 10.0, 20.0, 30.0] * 2,
+            "kg_pf_ancc_tvt": [10.7, 11.6, 12.1, 12.8, 19.0, 18.6, 17.9, 17.1],
+        }
+    )
+    groups = np.array(["a"] * 4 + ["b"] * 4)
+
+    best_weight, scores, best_blend, best_smoothing = tune_postprocess(
+        flat,
+        residual,
+        y_true,
+        config,
+        features,
+        groups,
+    )
+
+    assert postprocess_candidate_count(config) == 12
+    assert len(scores) == 12
+    assert best_weight == pytest.approx(1.0)
+    assert set(best_blend or {}) == {"alpha", "tau", "w_pf"}
+    assert best_smoothing == {"window": 5.0, "polyorder": 2.0}
 
 
 def test_lowres_dtw_signal_matches_reference() -> None:

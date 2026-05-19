@@ -212,6 +212,9 @@ class EnsembleRegressor(ResidualModel):
             y,
             iterations=int(blend_cfg.get("iterations", 1000)),
             alpha_grid=blend_cfg.get("alpha_grid"),
+            allow_negative_weights=bool(
+                blend_cfg.get("allow_negative_weights", False)
+            ),
         )
         self.oof_residual_ = oof_stack @ self.weights
 
@@ -252,6 +255,9 @@ class EnsembleRegressor(ResidualModel):
             y,
             iterations=int(blend_cfg.get("iterations", 1000)),
             alpha_grid=blend_cfg.get("alpha_grid"),
+            allow_negative_weights=bool(
+                blend_cfg.get("allow_negative_weights", False)
+            ),
         )
         self.oof_residual_ = self.oof_stack_ @ self.weights
         self.final_iteration_overrides_ = {
@@ -375,6 +381,7 @@ def fit_hill_climb_weights(
     y: np.ndarray,
     iterations: int = 1000,
     alpha_grid: list[float] | None = None,
+    allow_negative_weights: bool = False,
 ) -> np.ndarray:
     if stack.ndim != 2 or stack.shape[1] == 0:
         raise ValueError("Hill-climb blend requires a non-empty prediction stack.")
@@ -388,9 +395,14 @@ def fit_hill_climb_weights(
     best_score = single_scores[best_model]
     steps = alpha_grid or [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
     steps = [float(step) for step in steps if float(step) > 0.0]
+    deltas: list[float] = []
+    for step in steps:
+        deltas.append(step)
+        if allow_negative_weights:
+            deltas.append(-step)
     moves = 0
 
-    for step in steps:
+    for delta in deltas:
         improved = True
         while improved and moves < max(int(iterations), 1):
             improved = False
@@ -398,8 +410,11 @@ def fit_hill_climb_weights(
             candidate_weights = weights
             for model_idx in range(n_models):
                 new_weights = weights.copy()
-                new_weights[model_idx] += step
-                new_weights /= float(new_weights.sum())
+                new_weights[model_idx] += delta
+                total = float(new_weights.sum())
+                if abs(total) < 1e-12:
+                    continue
+                new_weights = new_weights / total
                 score = rmse(stack @ new_weights, y)
                 if score + 1e-12 < candidate_score:
                     candidate_score = score
@@ -411,7 +426,7 @@ def fit_hill_climb_weights(
                 moves += 1
 
     total = float(weights.sum())
-    if total <= 0:
+    if abs(total) < 1e-12:
         raise ValueError("Hill-climb blend produced invalid weights.")
     return weights / total
 
@@ -665,10 +680,22 @@ def smoothing_candidates(config: dict[str, Any]) -> list[dict[str, float] | None
     smoothing_cfg = config["postprocess"].get("smoothing") or {}
     if not smoothing_cfg.get("enabled", False):
         return [None]
-    candidates = smoothing_cfg.get("candidates") or [
-        {"enabled": False},
-        {"window": 17, "polyorder": 3},
+
+    candidates = smoothing_cfg.get("candidates")
+    if candidates:
+        return parse_smoothing_candidates(candidates)
+
+    return [
+        {
+            "window": int(smoothing_cfg.get("window", 17)),
+            "polyorder": int(smoothing_cfg.get("polyorder", 3)),
+        }
     ]
+
+
+def parse_smoothing_candidates(
+    candidates: list[dict[str, Any] | None],
+) -> list[dict[str, float] | None]:
     parsed: list[dict[str, float] | None] = []
     for candidate in candidates:
         if candidate is None or candidate.get("enabled", True) is False:
@@ -899,7 +926,28 @@ def rmse_from_basis_stats(stats: PostprocessBasisStats, coeffs: np.ndarray) -> f
     return float(np.sqrt(max(sse, 0.0) / max(stats.rows, 1)))
 
 
-def tune_postprocess(
+def postprocess_residual_grid(config: dict[str, Any]) -> list[float]:
+    grid = config["postprocess"].get("residual_weight_grid")
+    if grid:
+        return [float(value) for value in grid]
+    return [float(config["postprocess"].get("residual_weight", 1.0))]
+
+
+def postprocess_search_method(config: dict[str, Any]) -> str:
+    return str(config["postprocess"].get("search_method", "grid")).lower()
+
+
+def postprocess_candidate_count(config: dict[str, Any]) -> int:
+    if postprocess_search_method(config) == "optuna":
+        return max(1, int(config["postprocess"].get("optuna_trials", 500)))
+    return (
+        max(len(postprocess_residual_grid(config)), 1)
+        * max(len(notebook_blend_candidates(config)), 1)
+        * max(len(smoothing_candidates(config)), 1)
+    )
+
+
+def _tune_postprocess_grid(
     flat: np.ndarray,
     residual_pred: np.ndarray,
     y_true: np.ndarray,
@@ -910,9 +958,7 @@ def tune_postprocess(
 ) -> tuple[
     float, list[dict[str, float]], dict[str, float] | None, dict[str, float] | None
 ]:
-    residual_grid = config["postprocess"].get("residual_weight_grid") or [
-        config["postprocess"].get("residual_weight", 1.0)
-    ]
+    residual_grid = postprocess_residual_grid(config)
     blend_options = notebook_blend_candidates(config)
     smoothing_options = smoothing_candidates(config)
     total_candidates = (
@@ -1023,6 +1069,229 @@ def tune_postprocess(
     return float(best["weight"]), scores, best_blend or None, best_smoothing or None
 
 
+def optuna_suggest_grid_or_range(
+    trial: Any,
+    config: dict[str, Any],
+    name: str,
+    default: float,
+) -> float:
+    explicit = config.get(f"{name}_grid")
+    if explicit:
+        return float(
+            trial.suggest_categorical(
+                name,
+                [float(value) for value in explicit],
+            )
+        )
+    range_value = config.get(f"{name}_range")
+    if range_value:
+        if len(range_value) != 3:
+            raise ValueError(f"{name}_range must be [start, stop, step].")
+        start, stop, step = [float(value) for value in range_value]
+        if step <= 0:
+            raise ValueError(f"{name}_range step must be positive.")
+        return float(trial.suggest_float(name, start, stop, step=step))
+    return float(config.get(name, default))
+
+
+def _tune_postprocess_optuna(
+    flat: np.ndarray,
+    residual_pred: np.ndarray,
+    y_true: np.ndarray,
+    config: dict[str, Any],
+    features: pd.DataFrame,
+    groups: np.ndarray,
+    logger: RunLogger | None = None,
+) -> tuple[
+    float, list[dict[str, float]], dict[str, float] | None, dict[str, float] | None
+]:
+    try:
+        import optuna
+    except ImportError as exc:
+        raise RuntimeError(
+            "postprocess.search_method=optuna requires the optuna package."
+        ) from exc
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    trials = max(1, int(config["postprocess"].get("optuna_trials", 500)))
+    seed = int(config["postprocess"].get("optuna_seed", config.get("seed", 42)))
+    progress_interval = int(
+        config["postprocess"].get("progress_interval") or max(1, trials // 20)
+    )
+    residual_grid = postprocess_residual_grid(config)
+    smoothing_options = smoothing_candidates(config)
+    blend_cfg = config["postprocess"].get("notebook_blend") or {}
+    blend_enabled = bool(blend_cfg.get("enabled", False))
+
+    flat = np.asarray(flat, dtype=float)
+    residual_pred = np.asarray(residual_pred, dtype=float)
+    clip_value = config["postprocess"].get("residual_clip")
+    if clip_value not in (None, ""):
+        residual_pred = np.clip(residual_pred, -float(clip_value), float(clip_value))
+    y_true = np.asarray(y_true, dtype=float)
+
+    scores: list[dict[str, float]] = []
+    best_score = float("inf")
+    best: dict[str, float] | None = None
+    started_at = perf_counter()
+    stats_cache: dict[
+        tuple[tuple[str, float], tuple[str, int, int]], PostprocessBasisStats
+    ] = {}
+
+    def objective(trial: Any) -> float:
+        nonlocal best, best_score
+
+        if len(residual_grid) == 1:
+            weight = residual_grid[0]
+        else:
+            weight = float(trial.suggest_categorical("residual_weight", residual_grid))
+
+        blend: dict[str, float] | None = None
+        if blend_enabled:
+            blend = {
+                "alpha": optuna_suggest_grid_or_range(
+                    trial,
+                    blend_cfg,
+                    "alpha",
+                    float(blend_cfg.get("alpha", 1.0)),
+                ),
+                "tau": optuna_suggest_grid_or_range(
+                    trial,
+                    blend_cfg,
+                    "tau",
+                    float(blend_cfg.get("tau", 0.0)),
+                ),
+                "w_pf": optuna_suggest_grid_or_range(
+                    trial,
+                    blend_cfg,
+                    "w_pf",
+                    float(blend_cfg.get("w_pf", 0.0)),
+                ),
+            }
+
+        if len(smoothing_options) == 1:
+            smoothing = smoothing_options[0]
+        else:
+            smoothing_idx = int(
+                trial.suggest_int("smoothing_idx", 0, len(smoothing_options) - 1)
+            )
+            smoothing = smoothing_options[smoothing_idx]
+
+        basis_key = (blend_basis_key(blend), smoothing_key(smoothing))
+        stats = stats_cache.get(basis_key)
+        if stats is None:
+            stats = postprocess_basis_stats(
+                flat,
+                residual_pred,
+                y_true,
+                config,
+                features,
+                groups,
+                blend,
+                smoothing,
+            )
+            stats_cache[basis_key] = stats
+        coeffs = postprocess_coefficients(weight, blend, len(stats.target_dot))
+        score = {"weight": weight, "rmse": rmse_from_basis_stats(stats, coeffs)}
+        if blend is not None:
+            score.update({f"blend_{key}": float(value) for key, value in blend.items()})
+        if smoothing is not None:
+            score.update(
+                {f"smooth_{key}": float(value) for key, value in smoothing.items()}
+            )
+        scores.append(score)
+        if score["rmse"] < best_score:
+            best_score = float(score["rmse"])
+            best = score
+        return float(score["rmse"])
+
+    def progress_callback(_study: Any, trial: Any) -> None:
+        trial_idx = int(trial.number) + 1
+        if logger is None or not (
+            trial_idx == 1 or trial_idx == trials or trial_idx % progress_interval == 0
+        ):
+            return
+        elapsed = perf_counter() - started_at
+        rate = trial_idx / max(elapsed, 1e-9)
+        remaining = (trials - trial_idx) / max(rate, 1e-9)
+        best_blend = {
+            key.replace("blend_", ""): best[key]
+            for key in ("blend_alpha", "blend_tau", "blend_w_pf")
+            if best is not None and key in best
+        }
+        best_smooth = {
+            key.replace("smooth_", ""): best[key]
+            for key in ("smooth_window", "smooth_polyorder")
+            if best is not None and key in best
+        }
+        logger.info(
+            "Postprocess optuna progress",
+            current=trial_idx,
+            total=trials,
+            pct=100.0 * trial_idx / max(trials, 1),
+            elapsed=format_duration(elapsed),
+            eta=format_duration(remaining),
+            best_rmse=best_score,
+            best_weight=best.get("weight") if best is not None else None,
+            best_blend=best_blend or None,
+            best_smoothing=best_smooth or None,
+        )
+
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=trials, callbacks=[progress_callback])
+
+    if best is None:
+        best = min(scores, key=lambda item: item["rmse"])
+    best_blend = {
+        key.replace("blend_", ""): best[key]
+        for key in ("blend_alpha", "blend_tau", "blend_w_pf")
+        if key in best
+    }
+    best_smoothing = {
+        key.replace("smooth_", ""): best[key]
+        for key in ("smooth_window", "smooth_polyorder")
+        if key in best
+    }
+    return float(best["weight"]), scores, best_blend or None, best_smoothing or None
+
+
+def tune_postprocess(
+    flat: np.ndarray,
+    residual_pred: np.ndarray,
+    y_true: np.ndarray,
+    config: dict[str, Any],
+    features: pd.DataFrame,
+    groups: np.ndarray,
+    logger: RunLogger | None = None,
+) -> tuple[
+    float, list[dict[str, float]], dict[str, float] | None, dict[str, float] | None
+]:
+    method = postprocess_search_method(config)
+    if method == "optuna":
+        return _tune_postprocess_optuna(
+            flat,
+            residual_pred,
+            y_true,
+            config,
+            features,
+            groups,
+            logger=logger,
+        )
+    if method != "grid":
+        raise ValueError(f"Unsupported postprocess.search_method: {method!r}.")
+    return _tune_postprocess_grid(
+        flat,
+        residual_pred,
+        y_true,
+        config,
+        features,
+        groups,
+        logger=logger,
+    )
+
+
 def evaluate_oof_predictions(
     residual_pred: np.ndarray,
     X: pd.DataFrame,
@@ -1032,13 +1301,13 @@ def evaluate_oof_predictions(
     config: dict[str, Any],
     logger: RunLogger | None = None,
 ) -> dict[str, Any]:
-    candidate_count = (
-        max(len(config["postprocess"].get("residual_weight_grid") or []), 1)
-        * max(len(notebook_blend_candidates(config)), 1)
-        * max(len(smoothing_candidates(config)), 1)
-    )
+    candidate_count = postprocess_candidate_count(config)
     if logger is not None:
-        logger.info("Tuning postprocess", candidates=candidate_count)
+        logger.info(
+            "Tuning postprocess",
+            method=postprocess_search_method(config),
+            candidates=candidate_count,
+        )
     best_weight, weight_scores, best_notebook_blend, best_smoothing = tune_postprocess(
         flat,
         residual_pred,

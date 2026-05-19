@@ -96,6 +96,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "method": "hill_climb",
             "alpha_grid": [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001],
             "iterations": 1000,
+            "allow_negative_weights": True,
         },
     },
     "validation": {
@@ -104,9 +105,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "final_model_strategy": "full_context",
     },
     "postprocess": {
+        "search_method": "grid",
+        "optuna_trials": 500,
+        "optuna_seed": 42,
         "progress_interval": 200,
         "residual_weight": 1.0,
-        "residual_weight_grid": [0.7, 0.8, 0.9, 1.0, 1.1],
+        "residual_weight_grid": [],
         "residual_clip": 250.0,
         "notebook_blend": {
             "enabled": True,
@@ -118,7 +122,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "smoothing": {
             "enabled": True,
-            "candidates": [{"enabled": False}, {"window": 17, "polyorder": 3}],
+            "window": 17,
+            "polyorder": 3,
+            "candidates": [],
         },
     },
     "reporting": {

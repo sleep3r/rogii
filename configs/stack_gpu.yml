@@ -103,11 +103,22 @@ validation:
   final_model_strategy: full_context
 
 postprocess:
+  search_method: optuna
+  optuna_trials: 500
+  optuna_seed: 42
+  progress_interval: 50
+  residual_weight: 1.0
+  residual_weight_grid: []
   notebook_blend:
     pf_column: pf_ancc
     alpha_range: [0.95, 1.05, 0.01]
     tau_range: [40, 120, 5]
     w_pf_range: [0, 0.15, 0.01]
+  smoothing:
+    enabled: true
+    window: 17
+    polyorder: 3
+    candidates: []
 
 tracking:
   clearml:

@@ -20,6 +20,34 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-19
 
+### Ravaghi-Style Blend/Postprocess Quick Wins
+
+- Enabled negative hill-climb weights in the main blend config:
+  - `model.blend.allow_negative_weights: true`;
+  - coordinate moves can now go in both positive and negative directions, with
+    weights normalized by their sum rather than by absolute values.
+- Replaced the broad postprocess grid in `stack.yml` and `stack_gpu.yml` with
+  deterministic Optuna TPE:
+  - `postprocess.search_method: optuna`;
+  - `postprocess.optuna_trials: 500`;
+  - fixed seed `42`.
+- Fixed `residual_weight` at `1.0` and removed `residual_weight_grid` from the
+  main configs to reduce OOF overfit degrees of freedom.
+- Fixed smoothing to Ravaghi-style `savgol(window=17, polyorder=3)` instead of
+  searching no-op vs smoothing.
+- `quick.yml` keeps grid postprocess for smoke speed, but now shares negative
+  blend weights, fixed residual weight, and fixed smoothing.
+- `stack_gpu.yml` makes these settings explicit rather than relying on
+  inheritance.
+- Dependency update: added `optuna>=4.0`.
+- Validation:
+  - `uv run pytest -q`: 38 passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check .`: passed;
+  - `make quick-train`: passed, OOF ensemble RMSE `10.43739`,
+    OOF+postprocess RMSE `10.07086`.
+- Full result: pending next server/local train.
+
 ### Fold-Average Submit A/B
 
 - Submitted the ClearML task `4294380230f645feb4a2189cdd7beeb8`
