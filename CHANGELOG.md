@@ -18,6 +18,103 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Next:
 ```
 
+## 2026-05-20
+
+### EXP-20260520-1 - Clean Schema v10 vs Robust Schema v11 CML Audit
+
+- Context:
+  - user reported Kaggle public LB `9.952` for the clean main run without the
+    PF/beam robust feature pack;
+  - user reported Kaggle public LB `10.084` for the latest run with the robust
+    schema-v11 feature pack;
+  - before changing code, downloaded ClearML artifacts/logs for the relevant
+    CML tasks under `artifacts/cml_audit/`.
+- Clean/reference task:
+  - CML task: `ed4d9dc6c7cb479881f087fee1217253`;
+  - name: `rogii-stack_gpu-run_20260519_192601`;
+  - status: `completed`;
+  - notes: `clean_head_no_robust`;
+  - config: `configs/stack_gpu.yml`;
+  - feature schema: `10`;
+  - feature count: `419`;
+  - robust columns present: `false`;
+  - validation mode: fold-safe context, final model strategy `full_context`;
+  - model family: 3 CatBoost GPU + 3 XGBoost CUDA variants;
+  - raw OOF ensemble RMSE: `10.75071`;
+  - OOF+postprocess RMSE: `10.68983`;
+  - final train/OFF prediction RMSE: `10.69085`;
+  - baseline RMSE: `15.90987`;
+  - best postprocess: `alpha=1.05`, `tau=80`, `w_pf=0.08`,
+    Savitzky-Golay `(17, 3)`;
+  - blend weights:
+    - `cat_lr025=0.11822`;
+    - `cat_lr020=0.22443`;
+    - `cat_lr030=0.30963`;
+    - `xgb_lr025=0.19841`;
+    - `xgb_lr020=0.23900`;
+    - `xgb_lr030=-0.08969`;
+  - diagnostics:
+    - mean well RMSE `8.23719`;
+    - median well RMSE `6.66675`;
+    - P90 well RMSE `14.49605`;
+    - P95 well RMSE `19.90347`;
+    - worst well RMSE `51.41239`;
+    - long hidden RMSE `11.42930`;
+    - short hidden RMSE `9.46799`;
+  - Kaggle public LB: `9.952` (reported from Kaggle UI).
+- Robust schema-v11 task:
+  - CML task: `cc9e7996dd9e4a82b3e681891b085cd2`;
+  - name: `rogii-stack_gpu-run_20260519_194125`;
+  - status: `completed`;
+  - notes: `spacebridge_train`;
+  - config: `configs/stack_gpu.yml`;
+  - feature schema: `11`;
+  - feature count: `432`;
+  - robust columns present: `true`;
+  - validation mode: fold-safe context, final model strategy `full_context`;
+  - model family: 3 CatBoost GPU + 3 XGBoost CUDA variants;
+  - raw OOF ensemble RMSE: `10.69313`;
+  - OOF+postprocess RMSE: `10.63946`;
+  - final train/OFF prediction RMSE: `10.64113`;
+  - baseline RMSE: `15.90987`;
+  - best postprocess: `alpha=1.05`, `tau=90`, `w_pf=0.07`,
+    Savitzky-Golay `(17, 3)`;
+  - blend weights:
+    - `cat_lr025=0.19589`;
+    - `cat_lr020=0.73850`;
+    - `cat_lr030=-0.17571`;
+    - `xgb_lr025=-0.46637`;
+    - `xgb_lr020=0.73876`;
+    - `xgb_lr030=-0.03108`;
+  - diagnostics:
+    - mean well RMSE `8.29187`;
+    - median well RMSE `6.66673`;
+    - P90 well RMSE `15.05909`;
+    - P95 well RMSE `19.72334`;
+    - worst well RMSE `50.55713`;
+    - long hidden RMSE `11.33270`;
+    - short hidden RMSE `9.50263`;
+  - Kaggle public LB: `10.084` (reported from Kaggle UI).
+- Stopped/intermediate robust attempt:
+  - CML task: `98afa683779b4bffaafc60b3ae7aeeea`;
+  - name: `rogii-stack_gpu-run_20260519_192632`;
+  - status: `stopped`;
+  - reached fold 1 feature prep and started `cat_lr025`;
+  - no final artifacts.
+- Takeaway:
+  - schema v11 robust PF/beam features improved local fold-safe OOF
+    (`10.63946` vs `10.68983`) but worsened public LB (`10.084` vs `9.952`);
+  - this is a clear OOF/LB mismatch, not a failed artifact or wrong submit;
+  - robust standalone expert looked good on 100-well diagnostics, but the full
+    model overfit or learned a public-test-worse decision boundary from it;
+  - do not treat schema v11 robust pack as a default improvement.
+- Decision:
+  - no code rollback was performed in this audit step;
+  - before the next full train, either disable/remove the robust pack from the
+    main submit config or gate it behind a controlled ablation;
+  - avoid further 7h experiments until the feature/candidate gap to the best
+    open notebook is audited more directly.
+
 ## 2026-05-19
 
 ### PF/Beam Robust Expert Pack
