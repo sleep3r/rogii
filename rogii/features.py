@@ -22,6 +22,7 @@ from .numeric import (
     tail_slope,
     tail_stat,
 )
+from .hmm_path import build_hmm_path_features
 from .runlog import RunLogger, format_duration
 from .spatial import KaggleTopContext
 from .top_signals import (
@@ -29,7 +30,7 @@ from .top_signals import (
     build_kaggle_top_signal_features,
 )
 
-FEATURE_CACHE_SCHEMA_VERSION = 10
+FEATURE_CACHE_SCHEMA_VERSION = 13
 
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_TOP_CONTEXT: KaggleTopContext | None = None
@@ -505,6 +506,30 @@ def _build_well_features_single_layer(
             logger.info(
                 "Feature stage",
                 stage="well.top_signals_total",
+                well=well,
+                duration_sec=perf_counter() - stage_started_at,
+            )
+
+    top_cfg = config["features"].get("kaggle_top", {}) or {}
+    if top_cfg.get("hmm_enabled", False):
+        stage_started_at = perf_counter()
+        features.update(
+            build_hmm_path_features(
+                horizontal_df=df,
+                horizontal_path=horizontal_path,
+                md=md,
+                z=z,
+                gr=gr,
+                tvt_input=tvt_input,
+                flat_pred=flat_pred,
+                candidate_features=features,
+                config=config,
+            )
+        )
+        if logger is not None and profile_stages:
+            logger.info(
+                "Feature stage",
+                stage="well.hmm_path",
                 well=well,
                 duration_sec=perf_counter() - stage_started_at,
             )

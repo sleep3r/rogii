@@ -172,6 +172,35 @@ def load_model_bundle(model_dir: Path) -> tuple[Any, list[str], dict[str, Any]]:
     return model, feature_names, metrics
 
 
+def align_feature_flags_from_artifact(
+    config: dict[str, Any],
+    feature_names: list[str],
+    logger: RunLogger,
+) -> None:
+    top_cfg = config.setdefault("features", {}).setdefault("kaggle_top", {})
+    robust_markers = (
+        "kg_signal_robust",
+        "pf_ancc_conf",
+        "beam_conf",
+        "pf_beam_gap",
+        "pf_beam_abs_gap",
+        "pf_dtw_gap",
+        "pf_dwt_gap",
+    )
+    needs_robust = any(
+        any(str(name).startswith(marker) for marker in robust_markers)
+        for name in feature_names
+    )
+    if needs_robust and not top_cfg.get("robust_expert_enabled", False):
+        top_cfg["robust_expert_enabled"] = True
+        logger.warn("Enabled robust expert features from artifact schema")
+
+    needs_hmm = any(str(name).startswith("kg_hmm_") for name in feature_names)
+    if needs_hmm and not top_cfg.get("hmm_enabled", False):
+        top_cfg["hmm_enabled"] = True
+        logger.warn("Enabled HMM path features from artifact schema")
+
+
 def main() -> None:
     args = parse_args()
     logger = RunLogger()
@@ -205,6 +234,7 @@ def main() -> None:
 
     with logger.step("Load model artifact", path=model_dir):
         model, feature_names, metrics = load_model_bundle(model_dir)
+    align_feature_flags_from_artifact(config, feature_names, logger)
     logger.info(
         "Model artifact ready",
         features=len(feature_names),

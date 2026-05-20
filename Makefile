@@ -7,6 +7,8 @@ KAGGLE ?= $(UV) run kaggle
 
 DATA_DIR ?= data
 CONFIG ?= configs/stack.yml
+QUICK_CONFIG ?= configs/quick.yml
+QUICK_TRAIN_CONFIG := $(if $(filter configs/stack.yml,$(CONFIG)),$(QUICK_CONFIG),$(CONFIG))
 SUBMISSION ?= submission.csv
 MESSAGE ?= Submission
 PROJECT_NAME ?= ROGII/Wellbore
@@ -51,10 +53,11 @@ SUBMIT_OUTPUT_DIR ?= artifacts/kaggle_submit_output
 SUBMIT_ARTIFACT_DIR ?= artifacts/kaggle_submit
 
 CML_ID ?= 2b77f48a1a294304bf859ea798666d65
+CML_SHORT := $(shell printf '%s' '$(CML_ID)' | cut -c1-12)
 CML_MODEL_DIR ?= artifacts/clearml/$(CML_ID)
 CML_ARG := $(if $(CML_ID),--clearml-task-id $(CML_ID),)
 INFER_MODEL_DIR ?= $(CML_MODEL_DIR)
-MODEL_DATASET ?= $(KAGGLE_USER)/rogii-baseline-artifacts
+MODEL_DATASET ?= $(KAGGLE_USER)/rogii-baseline-artifacts$(if $(CML_SHORT),-$(CML_SHORT),)
 MODEL_DATASET_DIR ?= artifacts/kaggle_model_dataset
 
 INSTANCE ?=
@@ -91,7 +94,7 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
@@ -139,7 +142,7 @@ train-server train-spacebridge: check-server-env
 	$(UV) run spacebridge train $(SPACEBRIDGE_TASK) --instance $(INSTANCE) --cmd-args "$(SPACEBRIDGE_CMD_ARGS)"
 
 quick-train:
-	$(PYTHON) -m rogii --config configs/quick.yml
+	$(PYTHON) -m rogii --config $(QUICK_TRAIN_CONFIG)
 
 expert-report: ensure-data
 	$(PYTHON) -m rogii.expert_report --config $(CONFIG) --output $(EXPERT_REPORT) --csv $(EXPERT_REPORT_CSV) --json $(EXPERT_REPORT_JSON) --top-n $(EXPERT_REPORT_TOP_N) $(EXPERT_REPORT_MAX_WELLS_ARG) $(EXPERT_REPORT_CONTEXT_ARG)

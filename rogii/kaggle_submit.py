@@ -327,11 +327,24 @@ def prepare_model_dataset(args: argparse.Namespace) -> Path:
         if path.is_file() and path.name in artifact_names:
             shutil.copyfile(path, dataset_dir / path.name)
 
+    feature_names = json.loads((dataset_dir / "features.json").read_text())
+    metrics = json.loads((dataset_dir / "metrics.json").read_text())
+    feature_info = metrics.get("features", {}) if isinstance(metrics, dict) else {}
+    dataset_slug = args.model_dataset.split("/", 1)[1]
+    title_suffix = dataset_slug.rsplit("-", 1)[-1][:12]
+    log(
+        "Prepared model artifact files: "
+        f"features={len(feature_names)} "
+        f"schema={feature_info.get('schema_version')} "
+        f"robust={sum('robust' in str(name) for name in feature_names)} "
+        f"hmm={sum('hmm' in str(name) for name in feature_names)}"
+    )
+
     metadata = {
-        "title": "ROGII Baseline Artifacts",
+        "title": f"ROGII Artifacts {title_suffix}",
         "id": args.model_dataset,
         "licenses": [{"name": "CC0-1.0"}],
-        "subtitle": "Trained ROGII model artifacts for inference-only Kaggle runs",
+        "subtitle": f"Trained ROGII model artifacts for {dataset_slug}",
         "description": (
             "Private model artifact dataset generated from the local ROGII repository."
         ),

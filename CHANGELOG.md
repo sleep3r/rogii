@@ -20,6 +20,188 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-20
 
+### EXP-20260520-5 - HMM Schema13 Public LB Failure
+
+- Command/config:
+  - trained/submitted ClearML artifact
+    `adfcc7b5806b433e94fa4ff394b161bf`;
+  - submit command:
+    `make submit CML_ID=adfcc7b5806b433e94fa4ff394b161bf
+    MESSAGE="hmm schema13 remount check"`.
+- Kaggle plumbing check:
+  - after the Kaggle artifact isolation fix, the inference kernel mounted the
+    correct CML-specific dataset:
+    `/kaggle/input/rogii-baseline-artifacts-adfcc7b5806b`;
+  - loaded artifact feature count: `437`;
+  - source CV RMSE: `10.05919`;
+  - `train_wells=773`, `test_wells=3`;
+  - submission rows: `14,151`;
+  - no missing-feature warnings in the corrected run.
+- Kaggle result:
+  - public LB: `21.064`.
+- Takeaway:
+  - this is not the previous stale-dataset/missing-column failure; the corrected
+    kernel used the intended schema13 HMM artifact;
+  - HMM schema13 strongly overfit the local/quick diagnostics and generalized
+    catastrophically to the public test wells;
+  - do **not** use `configs/stack_gpu_hmm.yml` or CML
+    `adfcc7b5806b433e94fa4ff394b161bf` for leaderboard submissions.
+- Decision:
+  - keep HMM only as a quarantined ablation/research branch;
+  - submit defaults stay on the clean schema10 family (`hmm_enabled: false`,
+    `robust_expert_enabled: false`);
+  - future HMM work needs a separate diagnostic explaining why public-test
+    predictions shift before another full submit.
+
+### EXP-20260520-3 - HMM Path Expert Ablation Pack
+
+- Context:
+  - added the external Viterbi/HMM path expert pack from
+    `/Users/alexander/Desktop/hmm_path_expert`;
+  - this is intentionally an ablation path, not the default submit config.
+- What changed:
+  - added `rogii/hmm_path.py`;
+  - added `tests/test_hmm_path.py`;
+  - added `configs/quick_hmm.yml` and `configs/stack_gpu_hmm.yml`;
+  - wired HMM feature generation behind
+    `features.kaggle_top.hmm_enabled: true`;
+  - bumped `FEATURE_CACHE_SCHEMA_VERSION` to `12`;
+  - `make quick-train CONFIG=configs/quick_hmm.yml` now honors the passed
+    config instead of always using `configs/quick.yml`;
+  - model bundle inputs now include the HMM configs and `rogii/hmm_path.py`.
+- New HMM columns:
+  - `kg_hmm_tvt`, `kg_hmm_delta`, `kg_hmm_minus_flat`;
+  - `kg_hmm_path_cost`, `kg_hmm_emit_cost`, `kg_hmm_transition_cost`;
+  - `kg_hmm_confidence_gap`, `kg_hmm_slope`, `kg_hmm_curvature`;
+  - `kg_hmm_vs_pf`, `kg_hmm_vs_dtw`;
+  - `kg_hmm_state_index`, `kg_hmm_candidate_prior`, `kg_hmm_geo_prior`.
+- Validation:
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run pytest -q tests/test_hmm_path.py tests/test_audit_fixes.py`:
+    `43 passed`;
+  - `make expert-report CONFIG=configs/quick_hmm.yml
+    EXPERT_REPORT_MAX_WELLS=100`: passed;
+  - `make quick-train CONFIG=configs/quick_hmm.yml`: passed.
+- Quick diagnostics:
+  - expert report best standalone candidate:
+    `kg_pf_ancc_minus_last__as_tvt`, RMSE `10.32416`;
+  - HMM standalone candidates were weak on quick public rows:
+    - `kg_hmm_minus_flat__as_tvt`: RMSE `14.61095`;
+    - `kg_hmm_delta__as_tvt`: RMSE `14.61114`;
+    - `kg_hmm_tvt`: RMSE `14.61117`;
+  - quick HMM train produced:
+    - features: `398`;
+    - raw OOF ensemble RMSE: `10.26238`;
+    - OOF+postprocess RMSE: `10.05803`;
+    - best postprocess: `alpha=1.05`, `tau=100`,
+      `w_pf_ancc=0.20`, `w_pf_z=0.00`, Savitzky-Golay `(17, 3)`.
+- Takeaway:
+  - HMM integration works technically, but it did **not** pass the standalone
+    expert criterion on quick diagnostics;
+  - the better quick-train number is too small/noisy to justify a 7-hour full
+    CML run by itself;
+  - next step, if we keep pursuing HMM, is to tune/debug the HMM expert on
+    larger expert reports before launching full training.
+
+### EXP-20260520-4 - Tuned HMM Around PF_ANCC Anchor
+
+- Context:
+  - raw HMM from EXP-20260520-3 was worse than `PF_ANCC`;
+  - quick diagnostics showed the HMM path helped some wells but failed when
+    its PF anchor was polluted by `PF_Z`.
+- What changed:
+  - HMM state grid is now local around candidate paths instead of spanning the
+    whole typewell TVT range by default;
+  - HMM uses `PF_ANCC` as the primary PF anchor, with fallback to the old PF
+    median only when ANCC candidates are missing;
+  - added HMM/PF confidence-gated outputs:
+    - `kg_hmm_pf_abs_gap`;
+    - `kg_hmm_pf_gated_tvt`;
+    - `kg_hmm_pf_gated_delta`;
+    - `kg_hmm_pf_gated_minus_flat`;
+  - tuned `quick_hmm.yml` and `stack_gpu_hmm.yml` toward a PF-anchored path:
+    - lower GR/typewell weight;
+    - higher PF_ANCC weight;
+    - local candidate state span;
+    - `hmm_pf_gate_threshold: 6.0`;
+  - bumped `FEATURE_CACHE_SCHEMA_VERSION` to `13`.
+- Validation:
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run pytest -q tests/test_hmm_path.py`: `2 passed`;
+  - `uv run pytest -q`: `43 passed`;
+  - `make expert-report CONFIG=configs/quick_hmm.yml
+    EXPERT_REPORT_MAX_WELLS=100`: passed;
+  - `make quick-train CONFIG=configs/quick_hmm.yml`: passed.
+- Quick diagnostics:
+  - best standalone expert is now `kg_hmm_tvt`, RMSE `9.71811`;
+  - `kg_hmm_pf_gated_tvt` RMSE `9.82155`;
+  - previous `PF_ANCC` anchor RMSE `10.32416`;
+  - quick HMM train:
+    - features: `402`;
+    - raw OOF ensemble RMSE: `9.71731`;
+    - OOF+postprocess RMSE: `9.59224`;
+    - best postprocess: `alpha=1.05`, `tau=100`,
+      `w_pf_ancc=0.20`, `w_pf_z=0.00`, Savitzky-Golay `(17, 3)`.
+- Takeaway:
+  - HMM is now a plausible ablation candidate rather than a broken standalone
+    path;
+  - quick public rows are still too small for certainty, but this clears the
+    bar for a controlled `stack_gpu_hmm.yml` run if we want to spend the hour.
+- Server run attempt:
+  - command:
+    `INSTANCE=el CONFIG=configs/stack_gpu_hmm.yml SERVER_NOTES=hmm_schema13_pf_ancc_anchor make train-server`;
+  - Docker image build succeeded;
+  - Docker push failed before Portainer launch:
+    `lookup harbor.wildberries.ru ... no such host`;
+  - no ClearML/server training result from this attempt.
+
+### Kaggle Artifact Dataset Isolation Fix
+
+- Problem:
+  - `make submit CML_ID=adfcc7b5806b433e94fa4ff394b161bf` was expected to
+    submit the schema13 HMM artifact;
+  - Kaggle logs instead showed `features=432`, `cv_rmse=10.63946`, and missing
+    `kg_signal_robust_*` warnings;
+  - local ClearML artifact `adfcc7...` was correct:
+    `features=437`, schema `13`, `hmm=18`, `robust=0`.
+- Root cause:
+  - all submits reused the same Kaggle dataset slug
+    `sleep3r/rogii-baseline-artifacts`;
+  - the kernel mounted an older dataset version/artifact while local files had
+    already been replaced;
+  - old schema11 artifacts also lacked the new explicit
+    `robust_expert_enabled` config flag, so current inference code could skip
+    columns that existed in `features.json`.
+- Fix:
+  - `MODEL_DATASET` now defaults to a CML-specific slug:
+    `sleep3r/rogii-baseline-artifacts-<first12-cml-id>`;
+  - Kaggle dataset title is kept under Kaggle's 50-character limit;
+  - `rogii.inference` now auto-enables feature gates from artifact
+    `features.json`:
+    - robust pack if robust columns are present;
+    - HMM pack if `kg_hmm_*` columns are present;
+  - `kaggle_submit` logs artifact feature count/schema/robust/HMM counts before
+    publishing the model dataset.
+- Validation:
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run pytest -q`: `43 passed`;
+  - `make submit-dry CML_ID=adfcc7b5806b433e94fa4ff394b161bf`: passed and
+    used dataset source
+    `sleep3r/rogii-baseline-artifacts-adfcc7b5806b`;
+  - `make submit CML_ID=adfcc7b5806b433e94fa4ff394b161bf
+    MESSAGE="hmm schema13 remount check"` completed Kaggle kernel version `10`.
+- Kaggle inference check:
+  - mounted model dir:
+    `/kaggle/input/rogii-baseline-artifacts-adfcc7b5806b`;
+  - loaded `features=437`;
+  - source CV RMSE `10.05919`;
+  - `train_wells=773`, `test_wells=3`;
+  - submission rows `14,151`;
+  - no missing-feature warnings in the corrected run.
+
 ### EXP-20260520-2 - Conservative schema10 default plus PF_Z postprocess candidate
 
 - Context:
