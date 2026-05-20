@@ -37,16 +37,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("artifacts/prediction_guard.md"))
     parser.add_argument("--json", type=Path, default=Path("artifacts/prediction_guard.json"))
-    parser.add_argument("--max-well-p95-shift", type=float, default=25.0)
-    parser.add_argument("--max-well-median-abs-shift", type=float, default=12.0)
-    parser.add_argument("--max-slope-ratio", type=float, default=3.0)
-    parser.add_argument("--max-curvature-ratio", type=float, default=3.0)
-    parser.add_argument("--max-endpoint-abs-shift", type=float, default=25.0)
+    parser.add_argument(
+        "--mode",
+        choices=["strict", "bold"],
+        default="strict",
+        help=(
+            "strict: hard-fail at HMM-level shifts (p95>25 ft, median>12 ft). "
+            "bold: allow honest 5-20 ft per-well shifts, hard-fail only at "
+            "HMM-level p95>35 ft or median>20 ft, warn in the 5-12 ft band."
+        ),
+    )
+    parser.add_argument("--max-well-p95-shift", type=float, default=None)
+    parser.add_argument("--max-well-median-abs-shift", type=float, default=None)
+    parser.add_argument("--max-slope-ratio", type=float, default=None)
+    parser.add_argument("--max-curvature-ratio", type=float, default=None)
+    parser.add_argument("--max-endpoint-abs-shift", type=float, default=None)
     parser.add_argument("--warn-one-sided-frac", type=float, default=0.95)
-    parser.add_argument("--warn-one-sided-median-abs", type=float, default=5.0)
+    parser.add_argument("--warn-one-sided-median-abs", type=float, default=None)
+    parser.add_argument("--warn-well-median-abs-shift", type=float, default=None,
+        help="If set, candidate is warned (not failed) when per-well median_abs_shift exceeds this.")
+    parser.add_argument("--warn-well-p95-shift", type=float, default=None,
+        help="If set, candidate is warned (not failed) when per-well p95_abs_shift exceeds this.")
     parser.add_argument("--max-tail-continuity-error", type=float, default=120.0)
     parser.add_argument("--allow-fail", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    _apply_mode_defaults(args)
+    return args
+
+
+def _apply_mode_defaults(args: argparse.Namespace) -> None:
+    if args.mode == "strict":
+        presets = {
+            "max_well_p95_shift": 25.0,
+            "max_well_median_abs_shift": 12.0,
+            "max_slope_ratio": 3.0,
+            "max_curvature_ratio": 3.0,
+            "max_endpoint_abs_shift": 25.0,
+            "warn_one_sided_median_abs": 5.0,
+            "warn_well_median_abs_shift": 8.0,
+            "warn_well_p95_shift": 18.0,
+        }
+    else:
+        presets = {
+            "max_well_p95_shift": 35.0,
+            "max_well_median_abs_shift": 20.0,
+            "max_slope_ratio": 4.5,
+            "max_curvature_ratio": 4.5,
+            "max_endpoint_abs_shift": 35.0,
+            "warn_one_sided_median_abs": 5.0,
+            "warn_well_median_abs_shift": 5.0,
+            "warn_well_p95_shift": 12.0,
+        }
+    for key, value in presets.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
 
 
 def read_submission(path: Path) -> pd.DataFrame:
@@ -174,6 +218,18 @@ def evaluate_well(
         reasons.append(
             f"one_sided_shift={same_sign_fraction:.3f}, "
             f"median_abs_shift={median_abs_shift:.3f}"
+        )
+    warn_median = getattr(thresholds, "warn_well_median_abs_shift", None)
+    warn_p95 = getattr(thresholds, "warn_well_p95_shift", None)
+    if status == "pass" and warn_median is not None and median_abs_shift > warn_median:
+        status = "warn"
+        reasons.append(
+            f"median_abs_shift={median_abs_shift:.3f}>warn={warn_median:.3f}"
+        )
+    if status == "pass" and warn_p95 is not None and p95_abs_shift > warn_p95:
+        status = "warn"
+        reasons.append(
+            f"p95_abs_shift={p95_abs_shift:.3f}>warn={warn_p95:.3f}"
         )
     if well in last_known and len(candidate):
         tail_error = float(candidate[0] - last_known[well])

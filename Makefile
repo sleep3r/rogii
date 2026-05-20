@@ -38,8 +38,25 @@ PREDICTION_GUARD_ANCHOR ?= artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/
 PREDICTION_GUARD_CANDIDATE ?= $(SUBMISSION)
 PREDICTION_GUARD_REPORT ?= artifacts/prediction_guard.md
 PREDICTION_GUARD_JSON ?= artifacts/prediction_guard.json
+PREDICTION_GUARD_MODE ?= strict
 PREDICTION_GUARD_ALLOW_FAIL ?= false
 PREDICTION_GUARD_ALLOW_FAIL_ARG := $(if $(filter true 1 yes,$(PREDICTION_GUARD_ALLOW_FAIL)),--allow-fail,)
+DIRECT_SOLVER_OUTPUT ?= artifacts/direct_solver
+DIRECT_SOLVER_ANCHOR ?= artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/submission.csv
+DIRECT_SOLVER_VARIANT ?= stage12_raw
+DIRECT_SOLVER_PROGRESS_INTERVAL ?= 5
+DIRECT_SOLVER_MAX_WELLS ?=
+DIRECT_SOLVER_MAX_WELLS_ARG := $(if $(DIRECT_SOLVER_MAX_WELLS),--max-wells $(DIRECT_SOLVER_MAX_WELLS),)
+DIRECT_SOLVER_SAMPLE_SEED ?=
+DIRECT_SOLVER_SAMPLE_SEED_ARG := $(if $(DIRECT_SOLVER_SAMPLE_SEED),--sample-seed $(DIRECT_SOLVER_SAMPLE_SEED),)
+DIRECT_SOLVER_ANCHOR_ARG := $(if $(DIRECT_SOLVER_ANCHOR),--anchor-submission $(DIRECT_SOLVER_ANCHOR),)
+DIRECT_SOLVER_PSEUDO_PUBLIC_TRIALS ?= 0
+DIRECT_SOLVER_PSEUDO_PUBLIC_TRIPLE_SIZE ?= 3
+DIRECT_SOLVER_PSEUDO_PUBLIC_ANCHOR ?= stage12_raw
+DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED ?= true
+DIRECT_SOLVER_PSEUDO_PUBLIC_CANDIDATE_K ?= 80
+DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED_ARG := $(if $(filter true 1 yes,$(DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED)),--pseudo-public-matched --pseudo-public-candidate-k $(DIRECT_SOLVER_PSEUDO_PUBLIC_CANDIDATE_K),)
+DIRECT_SOLVER_PSEUDO_PUBLIC_ARG := $(if $(filter-out 0,$(DIRECT_SOLVER_PSEUDO_PUBLIC_TRIALS)),--pseudo-public-trials $(DIRECT_SOLVER_PSEUDO_PUBLIC_TRIALS) --pseudo-public-triple-size $(DIRECT_SOLVER_PSEUDO_PUBLIC_TRIPLE_SIZE) --pseudo-public-anchor-variant $(DIRECT_SOLVER_PSEUDO_PUBLIC_ANCHOR) $(DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED_ARG),)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -100,12 +117,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml configs/direct_solver_policy.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/direct_solver.py rogii/path_solver_extras.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report prediction-guard profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report prediction-guard direct-solver-train-eval direct-solver-test direct-solver-guard direct-solver-guard-bold direct-solver-use profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -154,7 +171,22 @@ expert-report: ensure-data
 	$(PYTHON) -m rogii.expert_report --config $(CONFIG) --output $(EXPERT_REPORT) --csv $(EXPERT_REPORT_CSV) --json $(EXPERT_REPORT_JSON) --top-n $(EXPERT_REPORT_TOP_N) $(EXPERT_REPORT_MAX_WELLS_ARG) $(EXPERT_REPORT_CONTEXT_ARG)
 
 prediction-guard: ensure-data
-	$(PYTHON) -m rogii.prediction_guard --candidate $(PREDICTION_GUARD_CANDIDATE) --anchor $(PREDICTION_GUARD_ANCHOR) --data-dir $(DATA_DIR) --output $(PREDICTION_GUARD_REPORT) --json $(PREDICTION_GUARD_JSON) $(PREDICTION_GUARD_ALLOW_FAIL_ARG)
+	$(PYTHON) -m rogii.prediction_guard --candidate $(PREDICTION_GUARD_CANDIDATE) --anchor $(PREDICTION_GUARD_ANCHOR) --data-dir $(DATA_DIR) --output $(PREDICTION_GUARD_REPORT) --json $(PREDICTION_GUARD_JSON) --mode $(PREDICTION_GUARD_MODE) $(PREDICTION_GUARD_ALLOW_FAIL_ARG)
+
+direct-solver-train-eval: ensure-data
+	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/train_eval --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG) $(DIRECT_SOLVER_PSEUDO_PUBLIC_ARG) --train-eval
+
+direct-solver-test: ensure-data
+	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/test --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG)
+
+direct-solver-guard: ensure-data
+	$(MAKE) prediction-guard PREDICTION_GUARD_ANCHOR=$(DIRECT_SOLVER_ANCHOR) PREDICTION_GUARD_CANDIDATE=$(DIRECT_SOLVER_OUTPUT)/test/submission_direct_$(DIRECT_SOLVER_VARIANT).csv PREDICTION_GUARD_REPORT=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT).md PREDICTION_GUARD_JSON=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT).json PREDICTION_GUARD_MODE=$(PREDICTION_GUARD_MODE)
+
+direct-solver-guard-bold: ensure-data
+	$(MAKE) prediction-guard PREDICTION_GUARD_ANCHOR=$(DIRECT_SOLVER_ANCHOR) PREDICTION_GUARD_CANDIDATE=$(DIRECT_SOLVER_OUTPUT)/test/submission_direct_$(DIRECT_SOLVER_VARIANT).csv PREDICTION_GUARD_REPORT=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT)_bold.md PREDICTION_GUARD_JSON=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT)_bold.json PREDICTION_GUARD_MODE=bold
+
+direct-solver-use:
+	cp $(DIRECT_SOLVER_OUTPUT)/test/submission_direct_$(DIRECT_SOLVER_VARIANT).csv $(SUBMISSION)
 
 profile: ensure-data
 	mkdir -p $(PROFILE_DIR)

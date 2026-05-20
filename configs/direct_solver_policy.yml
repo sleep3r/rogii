@@ -1,0 +1,37 @@
+# Fixed policy for the direct test-time TVT path optimizer.
+# This is intentionally not an Optuna/search config: do not tune these from public LB.
+direct_solver:
+  tail_rows: 384
+  base_path_for_cem: geo_path  # never the submission anchor
+  energy_weights:
+    gr_weight: 1.00
+    geo_weight: 0.50
+    anchor_weight: 0.00      # explicitly free; never pull search to anchor
+    slope_weight: 0.20
+    endpoint_weight: 0.00    # no endpoint pull to anchor
+  submit_budget:
+    max_public_submits: 2
+    preferred_first_submit: submission_direct_stage12_raw.csv
+    optional_second_submit: submission_direct_cem_top_median.csv
+  anchor:
+    # The anchor is used ONLY for guard reports and optional output blends.
+    # It is never used inside the energy function.
+    recommended: artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/submission.csv
+  variants:
+    raw:
+      - linear_tailfit
+      - geo_tailfit
+      - stage1_raw
+      - stage12_raw
+      - cem_raw
+      - cem_top_median
+    optional_anchor_blends:
+      - cem_top_median_anchor_blend40
+      - cem_top_median_anchor_blend60
+      - stage12_raw_anchor_blend40
+      - stage12_raw_anchor_blend60
+  anti_overfit:
+    require_prediction_guard: true
+    hard_fail_hmm_level_shift: true
+    do_not_change_weights_after_public_lb: true
+    matched_triple_harness_required_for_any_submit: true

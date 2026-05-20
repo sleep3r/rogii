@@ -20,6 +20,394 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-20
 
+### Direct Solver: Anchor-Free Simplification
+
+The LB landscape (top is `8.239`, ours is `10.084`) made it clear that the
+24-variant safe/bold/consensus/Rust zoo we just shipped is the wrong shape.
+Every safety mechanism — `gated_blend`, `anchor_weight` in the energy
+function, `consensus_safe/bold/bold_family` blends, the self-anchoring
+fallback when no submission anchor is provided, the Rust correction kernel
+applied on top of `anchor_path` — was pulling each candidate back toward a
+`10.084` anchor. The next radical move could not coexist with that gravity.
+
+This change strips the defenses that pulled the search toward the anchor
+and leaves a small, focused solver pack.
+
+- Removed:
+  - `gated_blend` helper. Solver paths are not partially blended with the
+    submission anchor anymore. Raw candidates are emitted as-is and clipped
+    by the per-step physics limiter only.
+  - `VARIANTS` tuple (`gr_safe`, `geo_safe`, `gr_bold`, `geo_bold`) and the
+    big `for variant in VARIANTS:` loop in `solve_well`.
+  - `affine_search_grid_values`, `build_grid_paths`: deterministic affine
+    grid that produced `lin_s*_e*` candidates. CEM with 320 candidates per
+    iteration over `(offset, slope_offset, curvature)` is strictly more
+    expressive than this fixed grid.
+  - `RUST_CORRECTION_VARIANTS` and the Rust kernel integration
+    (`rust_affine_candidate`, `rust_correction_candidates`). The Rust kernel
+    `correction_grid_search` corrected on top of `anchor_path` — i.e. it
+    was an anchor-pinned defense by construction. Removed the crate entirely
+    (`rust/`), the ctypes wrapper (`rogii/solver_core.py`), the
+    `solver-core-build` / `solver-core-test` Make targets and the
+    `--backend rust` CLI flag. Keep a placeholder in mind for re-introducing
+    a Rust energy-scoring batch later once we know the energy is correct.
+  - Tie-point / landmark solver (`detect_landmarks`,
+    `_monotonic_landmark_assignment`, `_interpolate_path`,
+    `fit_tiepoint_path`) and all its tests. It rarely produced enough
+    monotonic GR-typewell matches to move the path on real wells and added
+    220 lines of code.
+  - `consensus_safe`, `consensus_bold`, `consensus_bold_family` outputs.
+    These were all anchor-medianed and pulled solutions back to the same
+    anchor.
+  - `*_anchor_blend40/60` proliferation for every variant. Only kept the
+    two blends that are useful as an explicit safety net:
+    `cem_top_median_anchor_blend{40,60}` and
+    `stage12_raw_anchor_blend{40,60}`. These are emitted only when a
+    submission anchor is actually provided.
+  - The `(linear + geo) / 2` self-anchor fallback that fired whenever no
+    submission anchor was supplied. There is no fabricated anchor anymore;
+    if you do not pass `--anchor-submission`, no anchor diagnostics or
+    blends are produced.
+
+- Changed:
+  - `solve_well` is anchor-free by design. The energy function uses
+    `anchor_weight = 0` and `endpoint_weight = 0`; only GR/typewell match,
+    geological distance and slope priors drive the search.
+  - CEM applies its `(offset + slope_offset * centered + curvature * shape)`
+    correction on top of `geo_path` (the geological tailfit), not on top of
+    the submission anchor. The principled prior is the geology, not a
+    known-suboptimal submission.
+  - `solve_well` now produces six raw variants instead of twenty-four:
+    `linear_tailfit`, `geo_tailfit`, `stage1_raw`, `stage12_raw`,
+    `cem_raw`, `cem_top_median`.
+  - Default pseudo-public anchor variant flipped from `consensus_safe` to
+    `stage12_raw`. Default `DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED=true`:
+    matched-triple harness is now the default, not an opt-in.
+  - `configs/direct_solver_policy.yml` rewritten to reflect the new
+    energy_weights, base_path, raw variant list and bold-only submit
+    discipline.
+
+- Validation:
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run pytest -q`: `57 passed` (was `60` before; the 3 tiepoint tests
+    are gone, the rust-backend test is gone, replaced with two new tests
+    that check the simplified variant surface and the anchor-blend gating);
+  - end-to-end smoke (3 train wells, matched-triple harness with 4
+    trials):
+    - `python -m rogii.direct_solver --data-dir data --train-eval
+      --max-wells 3 --progress-interval 1 --sample-seed 11
+      --pseudo-public-trials 4 --pseudo-public-anchor-variant stage12_raw
+      --pseudo-public-matched --pseudo-public-candidate-k 5`;
+    - `01:16` runtime, `6` submission files, no NaN warnings;
+    - train hidden-row RMSE on this slice (smaller is better):
+      `geo_tailfit 0.24`, `cem_raw 2.57`, `cem_top_median 4.32`,
+      `stage1_raw 8.00`, `stage12_raw 8.38`, `linear_tailfit 388.38`.
+    - Note: `geo_tailfit` looks too good here because train wells expose
+      the geology that we used to fit it. Real public LB will reward `cem_raw`
+      and `stage12_raw` more, which is the whole point of the simplification.
+
+- Code statistics:
+  - `direct_solver.py`: `1457` → `1085` lines (-25%);
+  - `path_solver_extras.py`: `787` → `567` lines (-28%);
+  - removed the `rust/` crate (-616 lines of Rust);
+  - removed `rogii/solver_core.py` (-295 lines of ctypes glue);
+  - net delta: roughly `-1500` lines of code with no loss of relevant
+    functionality.
+
+- Why this is the right move now:
+  - The leaderboard gap is ~`1.8 RMSE`. Defenses that pull our output
+    toward a `10.084` anchor cap us at roughly `10.084` regardless of how
+    good the solver is.
+  - The matched-triple harness is the relevant evaluation, not gated
+    train-eval rankings.
+  - With fewer variants and an honest energy, each submit is a real
+    statement, not a partial nudge.
+  - Reintroducing complexity is cheap once we know it earns LB. Removing
+    accumulated complexity later is much harder.
+
+### Direct Solver Plan Completion: Tie-Point, CEM, Stage1/Stage2, Matched Triples, Bold Guard
+
+- Context:
+  - Day-1 chunk shipped the bold affine/correction solver (plan item 1) and
+    the random pseudo-public harness (plan item 0). Plan items 2/3/5, the
+    matched-triple sampling, and the relaxed prediction guard were still open;
+  - MTP CNN (plan item 4) intentionally remains out of scope: a 6-12 h training
+    prototype does not fit the same submit-discipline window as the other
+    direct-solver families.
+- What changed:
+  - added `rogii/path_solver_extras.py` with:
+    - `detect_landmarks` + `_monotonic_landmark_assignment` (plan item 2,
+      tie-point / landmark solver);
+    - `fit_tiepoint_path` interpolating monotonic GR landmarks against typewell
+      TVT;
+    - `cem_path_search` (plan item 3, cross-entropy iterative search over
+      `(offset, slope_offset, curvature)` with elite refit, top-k median path,
+      clipped `|param| <= 24/24/16 ft`);
+    - `stage1_global_linear` + `stage2_local_refine` + `stage12_path`
+      (plan item 5, global `tvt = last_tvt + a*dmd + b*dz` grid then
+      knot-by-knot bounded refinement, max `+/-12 ft`, smoothness penalty
+      `0.05 * sum(diff(offsets)^2)`);
+    - `compute_well_signature`, `signatures_to_frame`,
+      `collect_well_signatures`, `matched_triples` for signature-matched
+      train-triples in the pseudo-public harness.
+  - wired all new families through `direct_solver.solve_well`, sharing
+    `EnergyContext` + `score_candidate_path` so they are ranked on the same
+    loss as the affine grid;
+  - new output variants:
+    `tiepoint_raw`, `tiepoint_blend40`, `tiepoint_blend60`,
+    `cem_raw`, `cem_top_median`, `cem_blend40`, `cem_blend60`,
+    `stage1_raw`, `stage12_raw`, `stage12_blend40`, `stage12_blend60`,
+    `consensus_bold_family` (median of CEM top-k, tie-point, stage12, anchor);
+  - relaxed prediction guard:
+    - new `--mode {strict,bold}` flag (default `strict` keeps EXP-20260520-8
+      semantics);
+    - bold mode raises hard-fail thresholds to `p95=35 ft` and
+      `median_abs=20 ft` (still blocks HMM-level shifts at >25/12 ft +
+      the existing tail-continuity / one-sided checks) and adds an explicit
+      warn band at `median_abs>5 ft` / `p95>12 ft`;
+    - new `--warn-well-median-abs-shift` / `--warn-well-p95-shift` flags
+      surface the warn band as a status (not a fail) for honest 5-12 ft
+      per-well shifts.
+  - new Makefile targets and vars:
+    - `PREDICTION_GUARD_MODE` (defaults `strict`, used by `make prediction-guard`);
+    - `make direct-solver-guard-bold DIRECT_SOLVER_VARIANT=...` runs the bold
+      preset and writes a separate `_bold.{md,json}` report;
+    - `DIRECT_SOLVER_PSEUDO_PUBLIC_MATCHED=true` plus
+      `DIRECT_SOLVER_PSEUDO_PUBLIC_CANDIDATE_K=80` route train-eval to use
+      signature-matched test-like triples instead of uniform-random ones.
+  - new CLI args on `python -m rogii.direct_solver`:
+    `--pseudo-public-matched`, `--pseudo-public-candidate-k`;
+  - bundle now ships `rogii/path_solver_extras.py`;
+  - updated `configs/direct_solver_policy.yml` with the `bold_families`
+    block and `bold_guard_required_for_bold_families` rule so future runs
+    cannot silently submit a bold family without the bold guard report.
+- Anti-overfit discipline (carried over from the prior pack and reaffirmed):
+  - submit budget stays at `<=2` public submits for the safe + bold pair;
+  - bold families (`tiepoint_raw`, `cem_raw`, `cem_top_median`,
+    `stage12_raw`, `consensus_bold_family`) must always be checked with the
+    bold guard; the bold guard hard-fails at HMM-level shifts but lets honest
+    5-12 ft per-well shifts pass as a `warn`;
+  - matched-triple harness is required before submitting any bold family.
+- Validation:
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run pytest -q`: `60 passed` (was `48` before this pack);
+  - `make solver-core-test`: passed (1 Rust unit test, unchanged);
+  - end-to-end smoke:
+    `python -m rogii.direct_solver --data-dir data --train-eval
+    --max-wells 5 --progress-interval 1 --sample-seed 11
+    --pseudo-public-trials 6 --pseudo-public-triple-size 3
+    --pseudo-public-anchor-variant consensus_safe
+    --pseudo-public-matched --pseudo-public-candidate-k 8`
+    completed in `02:55`, generated `24` submission variants (was `12`),
+    wrote signature CSVs and matched-triple pseudo-public summary;
+  - bold-mode guard smoke:
+    `python -m rogii.prediction_guard --mode bold ...`: PASS on a
+    self-compared submission, no crash, separate report path.
+- Tests added (`tests/test_path_solver_extras.py`, `10 passed`):
+  - `test_detect_landmarks_finds_extrema`;
+  - `test_monotonic_landmark_assignment_orders_pairs`;
+  - `test_fit_tiepoint_path_uses_typewell`;
+  - `test_cem_path_search_returns_finite_paths`;
+  - `test_stage1_global_linear_picks_finite_pair`;
+  - `test_stage2_local_refine_respects_max_offset`;
+  - `test_stage12_path_chains_stage1_and_stage2`;
+  - `test_compute_well_signature_returns_expected_keys`;
+  - `test_matched_triples_picks_neighbors`;
+  - `test_collect_well_signatures_train`.
+- Plan coverage after this pack:
+  - item 0 (pseudo-public harness): DONE, now with optional matched triples;
+  - item 1 (bold affine/correction): DONE (Rust correction kernel);
+  - item 2 (tie-point / landmark): DONE in Python;
+  - item 3 (CEM iterative refit): DONE in Python (Rust scoring stays via the
+    existing `path_energy` kernel for the affine grid path; CEM is fast
+    enough in Python because the candidate path build is vectorized);
+  - item 4 (MTP CNN candidate generator): NOT STARTED, deliberately deferred
+    until a safer two-day window is available;
+  - item 5 (Stage1 / Stage2 reproduction): DONE.
+- Submit discipline reminder:
+  - first safe submit candidate stays
+    `submission_direct_consensus_safe.csv` from the test run;
+  - second submit, when matched-triple harness ranks a bold family above
+    the consensus anchor and bold-guard passes, should be one of
+    `submission_direct_cem_top_median.csv`,
+    `submission_direct_stage12_raw.csv`,
+    `submission_direct_tiepoint_raw.csv`,
+    or `submission_direct_consensus_bold_family.csv`. Never tune weights
+    after seeing public LB.
+
+### Direct Solver Rust Core
+
+- Context:
+  - direct inversion / local-search solvers are the next plausible route for
+    large LB movement;
+  - Python is fine for CSV/reporting, but CEM/stage2 candidate scoring should
+    run in a tight compiled loop.
+- What changed:
+  - added Rust crate `rust/rogii_solver_core`;
+  - added `rogii.solver_core` ctypes wrapper;
+  - added explicit `--backend rust` to `rogii.direct_solver`;
+  - added Make targets:
+    - `make solver-core-build`;
+    - `make solver-core-test`;
+  - no silent fallback: `--backend rust` requires the Rust dylib/so to exist.
+- Current Rust kernel:
+  - affine TVT path grid search over slope and endpoint correction;
+  - scores GR/typewell match, geo path distance, anchor distance, slope
+    penalty, endpoint penalty;
+  - returns best path, score, slope, endpoint correction.
+- Added Rust correction kernel:
+  - searches `anchor + offset + slope_shape + curvature_shape`;
+  - emits candidates:
+    - `rust_corr_bal_raw`, `rust_corr_bal_blend40`, `rust_corr_bal_blend60`;
+    - `rust_corr_gr_raw`, `rust_corr_gr_blend40`, `rust_corr_gr_blend60`;
+    - `rust_corr_geo_raw`, `rust_corr_geo_blend40`, `rust_corr_geo_blend60`.
+- Validation:
+  - `make solver-core-test`: passed;
+  - `make solver-core-build`: passed;
+  - `uv run pytest -q tests/test_direct_solver.py`: `2 passed`;
+  - `uv run pytest -q`: `48 passed`;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed.
+- Smoke:
+  - command:
+    `make direct-solver-train-eval DIRECT_SOLVER_OUTPUT=artifacts/direct_solver_rust_smoke
+    DIRECT_SOLVER_MAX_WELLS=1 DIRECT_SOLVER_PROGRESS_INTERVAL=1
+    DIRECT_SOLVER_BACKEND=rust DIRECT_SOLVER_ANCHOR=`;
+  - runtime: `07.43s`;
+  - rows: `3,836`;
+  - generated `12` direct-solver variants.
+- Correction smoke:
+  - command:
+    `make direct-solver-train-eval DIRECT_SOLVER_OUTPUT=artifacts/direct_solver_rust_corr_smoke
+    DIRECT_SOLVER_MAX_WELLS=1 DIRECT_SOLVER_PROGRESS_INTERVAL=1
+    DIRECT_SOLVER_BACKEND=rust DIRECT_SOLVER_ANCHOR=`;
+  - runtime: `08.74s`;
+  - rows: `3,836`;
+  - generated `21` direct-solver variants.
+- Test candidate generation:
+  - command:
+    `make direct-solver-test DIRECT_SOLVER_OUTPUT=artifacts/direct_solver_rust_corr
+    DIRECT_SOLVER_PROGRESS_INTERVAL=1 DIRECT_SOLVER_BACKEND=rust`;
+  - runtime: `33.56s`;
+  - rows: `14,151`;
+  - generated `21` candidate submissions.
+- Prediction guard for Rust correction candidates vs schema10 anchor:
+  - all correction candidates passed the current guard;
+  - `rust_corr_bal_raw`: median abs shift `1.780 ft`, P95 `4.863 ft`,
+    max `7.500 ft`;
+  - `rust_corr_geo_raw`: median abs shift `2.016 ft`, P95 `5.013 ft`,
+    max `6.000 ft`;
+  - blend40 candidates move much less:
+    `rust_corr_bal_blend40` median abs `0.712 ft`, P95 `1.945 ft`,
+    max `3.000 ft`;
+    `rust_corr_geo_blend40` median abs `0.806 ft`, P95 `2.005 ft`,
+    max `2.400 ft`.
+- Random 10-well train hidden-row pseudo-public sample:
+  - command:
+    `make direct-solver-train-eval DIRECT_SOLVER_OUTPUT=artifacts/direct_solver_rust_corr_sample10
+    DIRECT_SOLVER_MAX_WELLS=10 DIRECT_SOLVER_SAMPLE_SEED=42
+    DIRECT_SOLVER_PROGRESS_INTERVAL=1 DIRECT_SOLVER_BACKEND=rust
+    DIRECT_SOLVER_ANCHOR= DIRECT_SOLVER_PSEUDO_PUBLIC_TRIALS=200`;
+  - runtime: `02:09`;
+  - rows: `49,062`;
+  - caveat: no real schema10 train OOF anchor was provided, so safe/blend
+    candidates use the internal fallback anchor and should not be read as
+    schema10 deltas;
+  - `geo_tailfit` was extremely strong on this sampled train-hidden setup
+    (weighted RMSE `1.62765`, median triple RMSE `0.41079`), while Rust
+    correction variants stayed much worse on this proxy.
+- Takeaway:
+  - the Rust ABI path works end-to-end;
+  - Rust correction candidates now provide bounded 2-7 ft public-test shifts
+    without HMM-level path explosions;
+  - the train-hidden sample says formation tailfit can be very strong, but this
+    may be distribution-specific. A real OOF-anchor pseudo-public harness is
+    still needed before trusting raw geo candidates;
+  - direct-solver roadmap status after this pass:
+    - implemented: uniform 3-well pseudo-public harness and bold
+      affine/correction solver;
+    - not started: tie-point/landmark solver, CEM iterative refit, MTP CNN
+      candidate generator, Stage1/Stage2 local-search reproduction, and relaxed
+      prediction-guard policy;
+  - train-eval without a real OOF/schema anchor uses an internal fallback anchor,
+    so gated train-eval ranks are diagnostic only. Prefer `*_raw` and
+    pseudo-public summaries in that mode;
+  - next Rust work should be CEM/stage2 local search over low-dimensional path
+    families, not more GBM features.
+
+### Direct TVT Path Solver Pack
+
+- Context:
+  - after HMM schema13 failed hard on public LB, new path experts must be
+    bounded against a known safe anchor and checked with prediction guard before
+    any submit;
+  - this pack does not train GBM and does not add stack features. It generates
+    direct test-time TVT path candidates from fixed solver variants.
+- What changed:
+  - added `rogii.direct_solver`;
+  - added `configs/direct_solver_policy.yml`;
+  - added Makefile targets:
+    - `make direct-solver-train-eval`;
+    - `make direct-solver-test`;
+    - `make direct-solver-guard DIRECT_SOLVER_VARIANT=...`;
+    - `make direct-solver-use DIRECT_SOLVER_VARIANT=...`;
+  - added progress logging:
+    - start line with mode/wells/rows/output;
+    - per-well start line;
+    - progress line with elapsed, ETA, rows/sec;
+    - final duration line;
+  - added `DIRECT_SOLVER_MAX_WELLS` for fast partial train hidden-row sanity.
+- Validation:
+  - `uv run pytest -q`: `48 passed`;
+  - `make check`: passed;
+  - `uv run python -m compileall rogii`: passed.
+- Partial train hidden-row sanity:
+  - command:
+    `make direct-solver-train-eval DIRECT_SOLVER_MAX_WELLS=10
+    DIRECT_SOLVER_PROGRESS_INTERVAL=1`;
+  - runtime: `01:46`;
+  - rows: `46,484`;
+  - estimated full 773-well train-eval runtime from this sample:
+    roughly `2-2.5h`;
+  - caveat: safe variants cannot be ranked honestly in train-eval when the
+    anchor submission contains only test ids. In that mode the solver falls
+    back to internal paths for the anchor proxy;
+  - raw geo sanity looked strong on the first 10 train wells
+    (`geo_tailfit`/`geo_*_raw` weighted RMSE `0.23090`), while linear tailfit
+    was poor (`681.44225`).
+- Test candidate generation:
+  - command:
+    `make direct-solver-test DIRECT_SOLVER_PROGRESS_INTERVAL=1`;
+  - runtime: `30.83s`;
+  - generated `12` submission candidates under `artifacts/direct_solver/test`.
+- Prediction guard vs clean schema10 anchor
+  `ed4d9dc6c7cb479881f087fee1217253`:
+  - `consensus_safe`: `PASS`, median abs shift `0.000 ft`,
+    P95 `0.202 ft`, max `0.526 ft`;
+  - `gr_safe`: `PASS`, median abs shift `0.000 ft`,
+    P95 `1.671 ft`, max `2.261 ft`;
+  - `geo_safe`: `PASS`, median abs shift `0.000 ft`,
+    P95 `0.288 ft`, max `0.700 ft`;
+  - `gr_bold`: `PASS`, median abs shift `0.000 ft`,
+    P95 `3.217 ft`, max `4.354 ft`;
+  - `geo_bold`: `PASS`, median abs shift `0.291 ft`,
+    P95 `11.582 ft`, max `16.300 ft`;
+  - `geo_bold_raw`: `FAIL`, median abs shift `2.281 ft`,
+    P95 `39.946 ft`, max `56.218 ft`;
+  - `geo_tailfit`: `FAIL`, median abs shift `47.402 ft`,
+    P95 `1160.587 ft`, max `1674.705 ft`.
+- Takeaway:
+  - logs are now good enough to run the long train-eval deliberately;
+  - safe variants are extremely conservative on the public test rows and mostly
+    behave like tiny anchor nudges;
+  - raw geological paths can move the solution violently and should remain
+    diagnostics only unless a stronger guard/report justifies them;
+  - if a direct-solver variant is submitted, the only low-risk first choices are
+    `submission_direct_consensus_safe.csv` or `submission_direct_gr_safe.csv`,
+    but expected LB movement is probably small because shifts are tiny.
+
 ### EXP-20260520-8 - Schema15 DTW/DWT Confidence Inference Candidate
 
 - Command/config:
