@@ -20,6 +20,113 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-20
 
+### Schema16: Direct Solver Outputs as GBM Features
+
+After the 773-well train-eval at schema15 confirmed that no direct-solver
+output is strong enough to be a standalone submission (best variant
+`geo_consensus 0.97 ft` on train is in-sample and inflates to roughly
+`~10 ft` on test, similar to current GBM stack at `10.084`), we pivoted
+direct-solver outputs from a competing submission into **feature inputs
+for the existing GBM stack**.
+
+This is RESEARCH_PLAN.md "Path B": let LightGBM/CatBoost learn when to
+trust which path solver per well, instead of betting on one solver
+generalizing across the hidden ~200 wells.
+
+- New module ``rogii/path_features.py``:
+  - ``build_direct_path_features`` runs ``fit_geo_candidate``,
+    ``cem_path_search`` and ``stage12_path`` per well and exposes 33
+    diagnostic features;
+  - includes raw path predictions
+    (``kg_path_geo_consensus_tvt``, ``kg_path_cem_raw_tvt``,
+    ``kg_path_stage12_tvt``, ...);
+  - includes anchor-relative deltas
+    (``kg_path_*_minus_last``, ``kg_path_*_minus_flat``);
+  - includes pairwise disagreements
+    (``kg_path_geo_consensus_minus_best``, ``kg_path_cem_minus_geo``,
+    ``kg_path_stage12_minus_geo``, ``kg_path_stage12_minus_stage1``,
+    ``kg_path_cem_minus_stage12``);
+  - includes per-well scalars
+    (``kg_path_cem_best_offset``, ``..._slope_offset``, ``..._curvature``,
+    ``..._score``; ``kg_path_stage1_best_a/b/score``;
+    ``kg_path_stage2_accepted``, ``..._max_offset_used``, ``..._score``;
+    ``kg_path_geo_n_surfaces``, ``..._rmse_min``, ``..._rmse_spread``;
+    ``kg_path_gr_cal_a/b/rmse``; ``kg_path_tail_slope``);
+  - **deliberately omits cross-well prior outputs**: schema15 train-eval
+    showed ``crosswell_*`` produces 16-58 ft weighted RMSE with a
+    systematic +9.6 ft anchor bias, which makes it noise rather than
+    signal for GBM to learn from.
+- Schema version bumped from ``15`` to ``16``. All previous feature
+  caches are invalidated and rebuilt with the new column set.
+- Config integration:
+  - ``configs/stack.yml`` and ``configs/quick.yml`` enable
+    ``features.include_direct_path_features: true`` by default with a
+    ``features.direct_path`` sub-block tuning CEM/Stage2 cost vs.
+    quality;
+  - test fixtures keep the flag off so the existing test suite is
+    unaffected by the heavier per-well work.
+- Fold safety:
+  - the new feature block uses ``TVT_input`` which is NaN in hidden rows
+    for both train and test wells;
+  - the direct solver fits only on the known tail (mask) and extrapolates
+    to hidden, so train-fold OOF and test inference receive structurally
+    identical inputs;
+  - no information about the held-out ``TVT`` leaks into the features.
+- Validation:
+  - ``uv run python -m compileall rogii``: passed;
+  - ``uv run ruff check rogii tests``: passed;
+  - ``uv run pytest -q``: ``67 passed`` (was ``64``, added 3 path feature
+    tests covering empty fixture, finite-hidden values, and empty-known
+    fallback);
+  - ``make quick-train`` end-to-end: succeeded with feature count
+    ``451`` (was ``419`` in schema15, +32 path features as expected),
+    OOF postprocessed RMSE on the 3 quick wells dropped to ``4.69`` from
+    a baseline of ``11.54``; total runtime ``02:50`` for 3 wells, of
+    which feature stage is ``~10 s/well``;
+  - direct-path feature stage adds ``~3-8 s/well`` depending on hidden
+    length; with the existing ``num_workers`` parallelization in
+    ``build_training_table`` this scales to ``~15-25 min`` extra on the
+    full 773-well train run.
+- Bundle file list updated to ship ``rogii/path_features.py`` in the
+  Kaggle kernel.
+- What this does NOT change:
+  - the GBM ensemble architecture, post-processing, and submit pipeline
+    are unchanged;
+  - the direct_solver module stays in the repo as both a feature source
+    here and a future standalone tool;
+  - ``RESEARCH_PLAN.md`` Path B (this change) is now implemented; Path A
+    (direct solver as standalone kernel submission) remains feasible if
+    schema16 LB is disappointing.
+
+### Direct Solver Multiprocessing
+
+After plugging in cross-well prior + geo consensus + CEM-over-crosswell,
+the per-well work grew to ~45s on real train wells and the full 773-well
+train-eval extrapolated to ~10 hours single-threaded. Wells are
+independent after the cross-well train_paths table is loaded, so we
+parallelize with ``multiprocessing.Pool``.
+
+- New ``--workers N`` CLI flag (default ``1``); ``DIRECT_SOLVER_WORKERS``
+  Makefile var (default ``1``).
+- Pool initializer loads ``collect_train_paths(data_dir)`` once per
+  worker process. The parent never pickles the 100 MB+ train-paths
+  structure; each worker reads CSVs itself, so spawn-startup cost is the
+  same ~5 s for 1 or 8 workers (in parallel).
+- Worker receives only ``(well, rows, data_dir, train_eval, tail_rows,
+  anchor, cross_well_k)``. The CSV read, ``df.attrs["horizontal_path"]``
+  hack, and per-well eval RMSE all happen in the worker.
+- Progress logging switched from per-well-start to per-well-completion
+  via ``imap_unordered``.
+- Validation:
+  - 20-well smoke with ``--workers 8`` finished in ``03:05`` at
+    ``530 rows/s`` (single-thread baseline ``104 rows/s``);
+  - measured speedup ``5.1x`` on an 8-core M-series Mac; theoretical max
+    ``8x`` is held back by spawn startup and uneven well sizes;
+  - extrapolated full-773-well train-eval runtime drops from ``~10 h``
+    to ``~2 h``;
+  - ``uv run pytest -q``: ``64 passed``, no regressions;
+  - ``uv run ruff check``: passed.
+
 ### Tier-1 Implementation: Cross-Well Typewell Prior + Geo Consensus
 
 This implements the two highest-impact Tier-1 levers from

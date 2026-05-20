@@ -60,6 +60,8 @@ DIRECT_SOLVER_PSEUDO_PUBLIC_ARG := $(if $(filter-out 0,$(DIRECT_SOLVER_PSEUDO_PU
 DIRECT_SOLVER_CROSS_WELL ?= true
 DIRECT_SOLVER_CROSS_WELL_K ?= 8
 DIRECT_SOLVER_CROSS_WELL_ARG := $(if $(filter true 1 yes,$(DIRECT_SOLVER_CROSS_WELL)),--cross-well-prior --cross-well-k $(DIRECT_SOLVER_CROSS_WELL_K),)
+DIRECT_SOLVER_WORKERS ?= 1
+DIRECT_SOLVER_WORKERS_ARG := --workers $(DIRECT_SOLVER_WORKERS)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -120,7 +122,7 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml configs/direct_solver_policy.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/direct_solver.py rogii/path_solver_extras.py rogii/cross_well_prior.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml configs/direct_solver_policy.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/direct_solver.py rogii/path_solver_extras.py rogii/path_features.py rogii/cross_well_prior.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
@@ -177,10 +179,10 @@ prediction-guard: ensure-data
 	$(PYTHON) -m rogii.prediction_guard --candidate $(PREDICTION_GUARD_CANDIDATE) --anchor $(PREDICTION_GUARD_ANCHOR) --data-dir $(DATA_DIR) --output $(PREDICTION_GUARD_REPORT) --json $(PREDICTION_GUARD_JSON) --mode $(PREDICTION_GUARD_MODE) $(PREDICTION_GUARD_ALLOW_FAIL_ARG)
 
 direct-solver-train-eval: ensure-data
-	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/train_eval --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG) $(DIRECT_SOLVER_PSEUDO_PUBLIC_ARG) $(DIRECT_SOLVER_CROSS_WELL_ARG) --train-eval
+	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/train_eval --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG) $(DIRECT_SOLVER_PSEUDO_PUBLIC_ARG) $(DIRECT_SOLVER_CROSS_WELL_ARG) $(DIRECT_SOLVER_WORKERS_ARG) --train-eval
 
 direct-solver-test: ensure-data
-	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/test --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG) $(DIRECT_SOLVER_CROSS_WELL_ARG)
+	$(PYTHON) -m rogii.direct_solver --data-dir $(DATA_DIR) $(DIRECT_SOLVER_ANCHOR_ARG) --output-dir $(DIRECT_SOLVER_OUTPUT)/test --progress-interval $(DIRECT_SOLVER_PROGRESS_INTERVAL) $(DIRECT_SOLVER_MAX_WELLS_ARG) $(DIRECT_SOLVER_SAMPLE_SEED_ARG) $(DIRECT_SOLVER_CROSS_WELL_ARG) $(DIRECT_SOLVER_WORKERS_ARG)
 
 direct-solver-guard: ensure-data
 	$(MAKE) prediction-guard PREDICTION_GUARD_ANCHOR=$(DIRECT_SOLVER_ANCHOR) PREDICTION_GUARD_CANDIDATE=$(DIRECT_SOLVER_OUTPUT)/test/submission_direct_$(DIRECT_SOLVER_VARIANT).csv PREDICTION_GUARD_REPORT=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT).md PREDICTION_GUARD_JSON=$(DIRECT_SOLVER_OUTPUT)/prediction_guard_$(DIRECT_SOLVER_VARIANT).json PREDICTION_GUARD_MODE=$(PREDICTION_GUARD_MODE)

@@ -30,6 +30,16 @@ features:
     dir: artifacts/feature_cache_quick
   include_typewell: true
   include_kaggle_top_signals: true
+  include_direct_path_features: true
+  direct_path:
+    tail_rows: 240
+    cem_n_iter: 3
+    cem_pop_size: 120
+    cem_top_k: 4
+    cem_seed: 17
+    stage2_n_knots: 6
+    stage2_max_offset: 12.0
+    stage2_passes: 1
   kaggle_top:
     beam_configs:
       - [10, 20.0, 144.0, 2, cons]

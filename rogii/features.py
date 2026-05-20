@@ -23,6 +23,7 @@ from .numeric import (
     tail_stat,
 )
 from .hmm_path import build_hmm_path_features
+from .path_features import build_direct_path_features
 from .runlog import RunLogger, format_duration
 from .spatial import KaggleTopContext
 from .top_signals import (
@@ -30,7 +31,7 @@ from .top_signals import (
     build_kaggle_top_signal_features,
 )
 
-FEATURE_CACHE_SCHEMA_VERSION = 15
+FEATURE_CACHE_SCHEMA_VERSION = 16
 
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_TOP_CONTEXT: KaggleTopContext | None = None
@@ -530,6 +531,31 @@ def _build_well_features_single_layer(
             logger.info(
                 "Feature stage",
                 stage="well.hmm_path",
+                well=well,
+                duration_sec=perf_counter() - stage_started_at,
+            )
+
+    if config["features"].get("include_direct_path_features", False):
+        stage_started_at = perf_counter()
+        features.update(
+            build_direct_path_features(
+                df,
+                horizontal_path,
+                md,
+                x,
+                y,
+                z,
+                gr,
+                tvt_input,
+                flat_pred,
+                config,
+                logger,
+            )
+        )
+        if logger is not None and profile_stages:
+            logger.info(
+                "Feature stage",
+                stage="well.direct_path_features",
                 well=well,
                 duration_sec=perf_counter() - stage_started_at,
             )

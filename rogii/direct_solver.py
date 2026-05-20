@@ -744,6 +744,59 @@ def solve_well(
     return outputs, diagnostics
 
 
+_WORKER_TRAIN_PATHS: list[TrainWellPath] | None = None
+_WORKER_TRAIN_PATHS_LOADED: bool = False
+
+
+def _init_worker(data_dir_str: str | None, cross_well_enabled: bool) -> None:
+    """Pool initializer: load train_paths once per worker process.
+
+    Reading 773 CSVs takes a few seconds per worker, but they happen in
+    parallel so wall-clock cost is roughly one CSV-load worth of latency
+    regardless of pool size.
+    """
+    global _WORKER_TRAIN_PATHS, _WORKER_TRAIN_PATHS_LOADED
+    _WORKER_TRAIN_PATHS_LOADED = True
+    if cross_well_enabled and data_dir_str is not None:
+        _WORKER_TRAIN_PATHS = collect_train_paths(Path(data_dir_str))
+    else:
+        _WORKER_TRAIN_PATHS = None
+
+
+def _solve_one_well_worker(
+    args: tuple[str, list[int], str, bool, int, dict[str, float], int],
+) -> tuple[str, list[int], dict[str, np.ndarray], list[dict[str, object]], list[dict[str, object]]]:
+    """Worker entry point. Reads its own CSV so the parent never pickles a DataFrame."""
+    well, rows, data_dir_str, train_eval, tail_rows, anchor, cross_well_k = args
+    path = horizontal_path(Path(data_dir_str), well, train=train_eval)
+    if not path.exists():
+        return well, rows, {}, [], []
+    df = pd.read_csv(path)
+    df.attrs["horizontal_path"] = str(path)
+    outputs, diag = solve_well(
+        well, df, rows, anchor,
+        train_eval=train_eval, tail_rows=tail_rows,
+        train_paths=_WORKER_TRAIN_PATHS, cross_well_k=cross_well_k,
+    )
+    eval_local: list[dict[str, object]] = []
+    if train_eval and "TVT" in df.columns:
+        y_true = pd.to_numeric(df["TVT"], errors="coerce").to_numpy(float)
+        rows_arr = np.asarray(rows, dtype=int)
+        for name, path_values in outputs.items():
+            diff = path_values[rows_arr] - y_true[rows_arr]
+            if np.isfinite(diff).any():
+                eval_local.append(
+                    {
+                        "well": well,
+                        "variant": name,
+                        "rows": int(np.isfinite(diff).sum()),
+                        "rmse": float(np.sqrt(np.nanmean(diff**2))),
+                        "mae": float(np.nanmean(np.abs(diff))),
+                    }
+                )
+    return well, rows, outputs, diag, eval_local
+
+
 def build_submission_frames(
     data_dir: Path,
     anchor_submission: Path | None,
@@ -755,10 +808,12 @@ def build_submission_frames(
     sample_seed: int | None = None,
     cross_well_enabled: bool = False,
     cross_well_k: int = 8,
+    workers: int = 1,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame | None]:
     anchor = read_anchor_submission(anchor_submission)
     train_paths: list[TrainWellPath] | None = None
-    if cross_well_enabled:
+    if cross_well_enabled and int(workers) <= 1:
+        # Serial path loads once in the parent.
         train_paths = collect_train_paths(data_dir)
         print(
             "Direct solver | cross-well prior loaded "
@@ -800,45 +855,20 @@ def build_submission_frames(
     progress_interval = max(1, int(progress_interval))
     started_at = perf_counter()
     mode = "train_eval" if train_eval else "test"
+    n_workers = max(1, min(int(workers), total_wells))
     print(
         "Direct solver start | "
         f"mode={mode} wells={total_wells} rows={total_rows} "
         f"tail_rows={tail_rows} anchor={'yes' if anchor else 'no'} "
+        f"workers={n_workers} "
+        f"cross_well={'on' if cross_well_enabled else 'off'} "
         f"max_wells={max_wells if max_wells is not None else 'all'} "
         f"sample_seed={sample_seed if sample_seed is not None else 'none'} "
         f"output_dir={output_dir}",
         flush=True,
     )
-    rows_done = 0
-    for current, (well, rows) in enumerate(well_rows.items(), start=1):
-        if should_log_progress(current, total_wells, progress_interval):
-            print(
-                "Direct solver well start | "
-                f"mode={mode} current={current} total={total_wells} "
-                f"well={well} rows={len(rows)}",
-                flush=True,
-            )
-        path = horizontal_path(data_dir, well, train=train_eval)
-        if not path.exists():
-            rows_done += len(rows)
-            if should_log_progress(current, total_wells, progress_interval):
-                log_progress(
-                    mode=mode,
-                    current=current,
-                    total=total_wells,
-                    rows_done=rows_done,
-                    total_rows=total_rows,
-                    well=well,
-                    started_at=started_at,
-                )
-            continue
-        df = pd.read_csv(path)
-        df.attrs["horizontal_path"] = str(path)
-        outputs, diag = solve_well(
-            well, df, rows, anchor,
-            train_eval=train_eval, tail_rows=tail_rows,
-            train_paths=train_paths, cross_well_k=cross_well_k,
-        )
+
+    def _absorb(well: str, rows: list[int], outputs: dict[str, np.ndarray], diag: list[dict[str, object]], eval_local: list[dict[str, object]]) -> None:
         diagnostics.extend(diag)
         for name, path_values in outputs.items():
             frames.setdefault(name, [])
@@ -848,31 +878,83 @@ def build_submission_frames(
                 if not np.isfinite(value):
                     value = float(anchor.get(row_id, np.nan)) if anchor else np.nan
                 frames[name].append((row_id, value))
-        if train_eval and "TVT" in df.columns:
-            y_true = pd.to_numeric(df["TVT"], errors="coerce").to_numpy(float)
-            for name, path_values in outputs.items():
-                diff = path_values[np.asarray(rows, dtype=int)] - y_true[np.asarray(rows, dtype=int)]
-                if np.isfinite(diff).any():
-                    eval_rows.append(
-                        {
-                            "well": well,
-                            "variant": name,
+        eval_rows.extend(eval_local)
+
+    rows_done = 0
+    if n_workers <= 1:
+        for current, (well, rows) in enumerate(well_rows.items(), start=1):
+            if should_log_progress(current, total_wells, progress_interval):
+                print(
+                    "Direct solver well start | "
+                    f"mode={mode} current={current} total={total_wells} "
+                    f"well={well} rows={len(rows)}",
+                    flush=True,
+                )
+            path = horizontal_path(data_dir, well, train=train_eval)
+            if not path.exists():
+                rows_done += len(rows)
+                continue
+            df = pd.read_csv(path)
+            df.attrs["horizontal_path"] = str(path)
+            outputs, diag = solve_well(
+                well, df, rows, anchor,
+                train_eval=train_eval, tail_rows=tail_rows,
+                train_paths=train_paths, cross_well_k=cross_well_k,
+            )
+            eval_local: list[dict[str, object]] = []
+            if train_eval and "TVT" in df.columns:
+                y_true = pd.to_numeric(df["TVT"], errors="coerce").to_numpy(float)
+                rows_arr = np.asarray(rows, dtype=int)
+                for name, path_values in outputs.items():
+                    diff = path_values[rows_arr] - y_true[rows_arr]
+                    if np.isfinite(diff).any():
+                        eval_local.append({
+                            "well": well, "variant": name,
                             "rows": int(np.isfinite(diff).sum()),
                             "rmse": float(np.sqrt(np.nanmean(diff**2))),
                             "mae": float(np.nanmean(np.abs(diff))),
-                        }
+                        })
+            _absorb(well, rows, outputs, diag, eval_local)
+            rows_done += len(rows)
+            if should_log_progress(current, total_wells, progress_interval):
+                log_progress(
+                    mode=mode, current=current, total=total_wells,
+                    rows_done=rows_done, total_rows=total_rows,
+                    well=well, started_at=started_at,
+                )
+    else:
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn") if "spawn" in mp.get_all_start_methods() else mp.get_context()
+        worker_args = [
+            (well, rows, str(data_dir), bool(train_eval), int(tail_rows), dict(anchor), int(cross_well_k))
+            for well, rows in well_items
+        ]
+        # chunksize=1 is critical: imap_unordered with chunksize>1 buffers
+        # results in batches and only yields when each batch completes, which
+        # silently delays progress logs by minutes on long-running tasks.
+        chunk = 1
+        completed = 0
+        with ctx.Pool(
+            processes=n_workers,
+            initializer=_init_worker,
+            initargs=(str(data_dir), bool(cross_well_enabled)),
+        ) as pool:
+            for well_out, rows_out, outputs, diag, eval_local in pool.imap_unordered(
+                _solve_one_well_worker, worker_args, chunksize=chunk
+            ):
+                completed += 1
+                _absorb(well_out, rows_out, outputs, diag, eval_local)
+                rows_done += len(rows_out)
+                # Always log the first completed well so the user sees the
+                # workers are alive and producing, then fall back to the
+                # configured progress interval.
+                if completed == 1 or should_log_progress(completed, total_wells, progress_interval):
+                    log_progress(
+                        mode=mode, current=completed, total=total_wells,
+                        rows_done=rows_done, total_rows=total_rows,
+                        well=well_out, started_at=started_at,
                     )
-        rows_done += len(rows)
-        if should_log_progress(current, total_wells, progress_interval):
-            log_progress(
-                mode=mode,
-                current=current,
-                total=total_wells,
-                rows_done=rows_done,
-                total_rows=total_rows,
-                well=well,
-                started_at=started_at,
-            )
+
     submissions = {
         name: pd.DataFrame(rows, columns=["id", "tvt"]).sort_values("id").reset_index(drop=True)
         for name, rows in frames.items()
@@ -1143,6 +1225,12 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Number of nearest train wells to aggregate for the cross-well prior",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes (1 disables multiprocessing). Each worker loads train_paths once.",
+    )
     parser.add_argument("--pseudo-public-trials", type=int, default=0, help="After --train-eval, bootstrap this many 3-well pseudo-public trials")
     parser.add_argument("--pseudo-public-triple-size", type=int, default=3)
     parser.add_argument("--pseudo-public-anchor-variant", default="stage12_raw")
@@ -1173,6 +1261,7 @@ def main() -> None:
         sample_seed=args.sample_seed,
         cross_well_enabled=bool(args.cross_well_prior),
         cross_well_k=int(args.cross_well_k),
+        workers=int(args.workers),
     )
     eval_summary = summarize_eval(eval_frame)
     if eval_summary is not None:
@@ -1232,6 +1321,7 @@ def main() -> None:
         "pseudo_public_candidate_k": int(args.pseudo_public_candidate_k),
         "cross_well_prior": bool(args.cross_well_prior),
         "cross_well_k": int(args.cross_well_k),
+        "workers": int(args.workers),
         "variants": [_ENERGY_VARIANT.__dict__],
         "submission_files": [f"submission_direct_{name}.csv" for name in submissions],
     }
