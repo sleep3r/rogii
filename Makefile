@@ -34,6 +34,12 @@ EXPERT_REPORT_MAX_WELLS ?=
 EXPERT_REPORT_CONTEXT ?= fold-safe
 EXPERT_REPORT_CONTEXT_ARG := $(if $(filter full full-context,$(EXPERT_REPORT_CONTEXT)),--full-context,)
 EXPERT_REPORT_MAX_WELLS_ARG := $(if $(EXPERT_REPORT_MAX_WELLS),--max-wells $(EXPERT_REPORT_MAX_WELLS),)
+PREDICTION_GUARD_ANCHOR ?= artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/submission.csv
+PREDICTION_GUARD_CANDIDATE ?= $(SUBMISSION)
+PREDICTION_GUARD_REPORT ?= artifacts/prediction_guard.md
+PREDICTION_GUARD_JSON ?= artifacts/prediction_guard.json
+PREDICTION_GUARD_ALLOW_FAIL ?= false
+PREDICTION_GUARD_ALLOW_FAIL_ARG := $(if $(filter true 1 yes,$(PREDICTION_GUARD_ALLOW_FAIL)),--allow-fail,)
 
 KAGGLE_DATA_DIR ?= /kaggle/input/$(COMPETITION)
 KERNEL_TIMEOUT ?= 32400
@@ -94,12 +100,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report prediction-guard profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -146,6 +152,9 @@ quick-train:
 
 expert-report: ensure-data
 	$(PYTHON) -m rogii.expert_report --config $(CONFIG) --output $(EXPERT_REPORT) --csv $(EXPERT_REPORT_CSV) --json $(EXPERT_REPORT_JSON) --top-n $(EXPERT_REPORT_TOP_N) $(EXPERT_REPORT_MAX_WELLS_ARG) $(EXPERT_REPORT_CONTEXT_ARG)
+
+prediction-guard: ensure-data
+	$(PYTHON) -m rogii.prediction_guard --candidate $(PREDICTION_GUARD_CANDIDATE) --anchor $(PREDICTION_GUARD_ANCHOR) --data-dir $(DATA_DIR) --output $(PREDICTION_GUARD_REPORT) --json $(PREDICTION_GUARD_JSON) $(PREDICTION_GUARD_ALLOW_FAIL_ARG)
 
 profile: ensure-data
 	mkdir -p $(PROFILE_DIR)

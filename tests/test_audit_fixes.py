@@ -43,6 +43,7 @@ from rogii.modeling import (
     tune_postprocess,
 )
 from rogii.pipeline import assert_fold_context_safe
+from rogii.prediction_guard import compare_predictions
 from rogii.spatial import KaggleTopContext, context_key_for_paths, context_well_overlap
 from rogii.submission import predict_test
 from rogii.top_signals import downsample_indices, lowres_dtw_signal
@@ -606,9 +607,16 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         "pf_ancc_delta",
         "pf_z_delta",
         "dtw_ens_d",
+        "kg_dtw_r2_cost_mean",
+        "kg_dtw_r2_path_slope_std",
+        "kg_dtw_best_radius_margin",
+        "kg_dtw_radii_agreement",
         "dtw_stoch_std",
         "dwt_ens_d",
         "kg_dwt_r2_tvt",
+        "kg_dwt_r2_cost_mean",
+        "kg_dwt_best_radius_margin",
+        "kg_dwt_raw_gap",
         "tddtw0",
         "tdpf0",
         "tvt_dense_d",
@@ -620,7 +628,103 @@ def test_dwt_repro_feature_block_is_present(tmp_path) -> None:
         assert column in wf.features.columns
         values = wf.features.loc[hidden, column].to_numpy(dtype=float)
         assert np.isfinite(values).all()
+    assert "kg_dtw_radii_std" not in wf.features.columns
+    dtw_std = wf.features.loc[hidden, "kg_dtw_std"].to_numpy(dtype=float)
+    dtw_agreement = wf.features.loc[hidden, "kg_dtw_radii_agreement"].to_numpy(
+        dtype=float
+    )
+    assert np.allclose(dtw_agreement, 1.0 / (1.0 + dtw_std))
+    assert not np.allclose(dtw_agreement, dtw_std)
+    dwt_std = wf.features.loc[hidden, "kg_dwt_std"].to_numpy(dtype=float)
+    dwt_agreement = wf.features.loc[hidden, "kg_dwt_radii_agreement"].to_numpy(
+        dtype=float
+    )
+    assert np.allclose(dwt_agreement, 1.0 / (1.0 + dwt_std))
+    dwt_gap = wf.features.loc[hidden, "kg_dwt_raw_gap"].to_numpy(dtype=float)
+    dwt_vs_dtw = wf.features.loc[hidden, "kg_dwt_vs_dtw"].to_numpy(dtype=float)
+    assert np.allclose(dwt_gap, np.abs(dwt_vs_dtw))
     assert "kg_signal_robust_tvt" not in wf.features.columns
+
+
+def test_prediction_guard_flags_large_shift(tmp_path) -> None:
+    anchor = tmp_path / "anchor.csv"
+    candidate = tmp_path / "candidate.csv"
+    ids = [f"well0001_{idx}" for idx in range(6)]
+    pd.DataFrame({"id": ids, "tvt": np.linspace(100.0, 105.0, 6)}).to_csv(
+        anchor, index=False
+    )
+    pd.DataFrame({"id": ids, "tvt": np.linspace(130.0, 135.0, 6)}).to_csv(
+        candidate, index=False
+    )
+    thresholds = SimpleNamespace(
+        max_well_p95_shift=25.0,
+        max_well_median_abs_shift=12.0,
+        max_slope_ratio=3.0,
+        max_curvature_ratio=3.0,
+        max_endpoint_abs_shift=25.0,
+        warn_one_sided_frac=0.95,
+        warn_one_sided_median_abs=5.0,
+        max_tail_continuity_error=120.0,
+    )
+
+    report = compare_predictions(candidate, anchor, data_dir=None, thresholds=thresholds)
+
+    assert report["status"] == "fail"
+    assert report["well_failures"][0]["well"] == "well0001"
+
+
+def test_prediction_guard_passes_small_shift(tmp_path) -> None:
+    anchor = tmp_path / "anchor.csv"
+    candidate = tmp_path / "candidate.csv"
+    ids = [f"well0001_{idx}" for idx in range(6)]
+    pd.DataFrame({"id": ids, "tvt": np.linspace(100.0, 105.0, 6)}).to_csv(
+        anchor, index=False
+    )
+    pd.DataFrame({"id": ids, "tvt": np.linspace(101.0, 106.0, 6)}).to_csv(
+        candidate, index=False
+    )
+    thresholds = SimpleNamespace(
+        max_well_p95_shift=25.0,
+        max_well_median_abs_shift=12.0,
+        max_slope_ratio=3.0,
+        max_curvature_ratio=3.0,
+        max_endpoint_abs_shift=25.0,
+        warn_one_sided_frac=0.95,
+        warn_one_sided_median_abs=5.0,
+        max_tail_continuity_error=120.0,
+    )
+
+    report = compare_predictions(candidate, anchor, data_dir=None, thresholds=thresholds)
+
+    assert report["status"] == "pass"
+    assert report["global"]["median_abs_shift"] == pytest.approx(1.0)
+
+
+def test_prediction_guard_flags_endpoint_shift(tmp_path) -> None:
+    anchor = tmp_path / "anchor.csv"
+    candidate = tmp_path / "candidate.csv"
+    ids = [f"well0001_{idx}" for idx in range(6)]
+    pd.DataFrame({"id": ids, "tvt": np.linspace(100.0, 105.0, 6)}).to_csv(
+        anchor, index=False
+    )
+    values = np.linspace(100.0, 105.0, 6)
+    values[-1] += 30.0
+    pd.DataFrame({"id": ids, "tvt": values}).to_csv(candidate, index=False)
+    thresholds = SimpleNamespace(
+        max_well_p95_shift=25.0,
+        max_well_median_abs_shift=12.0,
+        max_slope_ratio=float("inf"),
+        max_curvature_ratio=float("inf"),
+        max_endpoint_abs_shift=25.0,
+        warn_one_sided_frac=0.95,
+        warn_one_sided_median_abs=5.0,
+        max_tail_continuity_error=120.0,
+    )
+
+    report = compare_predictions(candidate, anchor, data_dir=None, thresholds=thresholds)
+
+    assert report["status"] == "fail"
+    assert "endpoint_abs_shift" in report["well_failures"][0]["reasons"][0]
 
 
 def test_robust_expert_pack_is_optional(tmp_path) -> None:

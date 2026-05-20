@@ -20,6 +20,185 @@ run here with command, data, CV, LB, runtime, and the next decision.
 
 ## 2026-05-20
 
+### EXP-20260520-8 - Schema15 DTW/DWT Confidence Inference Candidate
+
+- Command/config:
+  - trained ClearML task: `fd5fdcf043234e7fad4ba615a24ba956`;
+  - local artifact fetch:
+    `make fetch-clearml-model CML_ID=fd5fdcf043234e7fad4ba615a24ba956`;
+  - inference kernel:
+    `make submit CML_ID=fd5fdcf043234e7fad4ba615a24ba956
+    MESSAGE="schema15 dtw dwt confidence"`;
+  - Kaggle model dataset slug:
+    `sleep3r/rogii-baseline-artifacts-fd5fdcf04323`;
+  - Kaggle kernel version: `13`.
+- Artifact:
+  - schema version: `15`;
+  - features: `477`;
+  - HMM columns: `0`;
+  - robust columns: `0`;
+  - final model strategy: `full_context`;
+  - fold-safe OOF+postprocess RMSE: `10.70543`;
+  - best postprocess:
+    `alpha=1.05`, `tau=90`, `w_pf_ancc=0.07`, `w_pf_z=0.02`,
+    smoothing `(17, 3)`.
+- Inference:
+  - Kaggle kernel completed successfully in `45.35s`;
+  - submission rows: `14,151`;
+  - no NaN predictions;
+  - prediction range: `11591.078` to `12239.345`.
+- Prediction guard vs clean schema10 anchor
+  `ed4d9dc6c7cb479881f087fee1217253`:
+  - result: `PASS`;
+  - global median absolute shift `0.948 ft`;
+  - global P95 absolute shift `2.781 ft`;
+  - max absolute shift `5.347 ft`;
+  - max endpoint absolute shift `1.012 ft`;
+  - report:
+    `artifacts/prediction_guard_schema15_fd5.md`.
+- Kaggle result:
+  - not competition-submitted by the CLI (`--skip-competition-submit`);
+  - manual UI submit can use
+    `artifacts/kaggle_submit_output/submission.csv`.
+- Takeaway:
+  - this is a safe prediction-shift candidate, not an HMM-style failure;
+  - OOF is slightly worse than the clean schema10 isolated anchor
+    (`10.70543` vs `10.68983`), so expected LB improvement is uncertain;
+  - use this as the last trained schema15 diagnostic candidate, not as proof of
+    progress until a public LB is recorded.
+
+### Schema15 DTW/DWT Confidence Pack + Prediction Shift Guard
+
+- Context:
+  - after isolated submits, the reproducible baseline is worse than the old
+    pre-isolation `9.94/9.95` rows;
+  - HMM schema13 proved that local/fold-safe diagnostics can accept a feature
+    family that catastrophically shifts public-test predictions;
+  - next step is conservative: add confidence/gating information for existing
+    DTW/DWT paths, not a new aggressive TVT path.
+- What changed:
+  - bumped `FEATURE_CACHE_SCHEMA_VERSION` to `15`;
+  - added DTW confidence/agreement features:
+    - per-radius cost, slope mean/std, local stretch, endpoint gap,
+      and deviation from the DTW ensemble;
+    - `kg_dtw_radii_agreement = 1 / (1 + kg_dtw_std)`;
+    - `kg_dtw_cost_mean`, `kg_dtw_cost_std`;
+    - `kg_dtw_best_radius_id`, normalized `kg_dtw_best_radius_margin`;
+  - added DWT-lowpass confidence/agreement features:
+    - per-radius cost, slope mean/std, local stretch, endpoint gap,
+      and deviation from the DWT ensemble;
+    - `kg_dwt_radii_agreement = 1 / (1 + kg_dwt_std)`;
+    - `kg_dwt_best_radius_id`, normalized `kg_dwt_best_radius_margin`;
+    - `kg_dwt_raw_gap = abs(kg_dwt_vs_dtw)`,
+      `kg_dwt_vs_dtw_slope_gap`;
+  - added `rogii.prediction_guard` and `make prediction-guard` to compare a
+    candidate submission against an anchor before spending a Kaggle submit.
+  - added explicit endpoint-shift guard on the last hidden prediction;
+  - intentionally did not add `kg_dwt_level_agreement`: the current production
+    DWT block uses one configured wavelet level and varies only DTW radius on
+    the low-pass signal, so a "level agreement" column would be synthetic.
+- Guard defaults:
+  - anchor: `artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/submission.csv`;
+  - hard-fails when a test well exceeds:
+    - P95 absolute shift `>25 ft`;
+    - median absolute shift `>12 ft`;
+    - endpoint absolute shift `>25 ft`;
+    - slope/curvature ratio `>3x`;
+  - warns on mostly one-sided well shifts.
+- Validation:
+  - `uv run python -m compileall rogii`: passed;
+  - `uv run ruff check rogii tests`: passed;
+  - `uv run pytest -q`: `46 passed`;
+  - `make quick-train`: passed with schema `15`, features `418`,
+    quick OOF+postprocess RMSE `10.14868`;
+  - robust schema11 vs clean schema10 guard:
+    - command:
+      `make prediction-guard
+      PREDICTION_GUARD_CANDIDATE=artifacts/cml_audit/cc9e7996dd9e4a82b3e681891b085cd2/submission.csv
+      PREDICTION_GUARD_ANCHOR=artifacts/cml_audit/ed4d9dc6c7cb479881f087fee1217253/submission.csv`;
+    - result: `PASS`;
+    - global median absolute shift `0.578 ft`, P95 `1.731 ft`;
+    - max endpoint absolute shift `0.487 ft`;
+    - this is deliberately `PASS`, not `WARN`: the shift is below 2 ft P95 on
+      all visible test rows, so the earlier plan's desired schema11 warning was
+      too conservative for the calibrated guard thresholds.
+  - HMM schema13 vs clean schema10 guard:
+    - local inference from CML `adfcc7b5806b433e94fa4ff394b161bf`;
+    - result: `FAIL`;
+    - global median absolute shift `24.065 ft`, P95 `30.001 ft`;
+    - max endpoint absolute shift `25.340 ft`;
+    - all 3 test wells had one-sided negative shifts.
+- Takeaway:
+  - the guard would have blocked the HMM `21.064` submit;
+  - DTW/DWT confidence pack is low-risk relative to HMM because it adds trust
+    indicators for existing paths rather than a new absolute path.
+
+### EXP-20260520-7 - Isolated Schema9 Full-Context Resubmit
+
+- Command/config:
+  - `make submit CML_ID=2b77f48a1a294304bf859ea798666d65
+    MESSAGE="schema9 full_context isolated check"`;
+  - CML task: `2b77f48a1a294304bf859ea798666d65`;
+  - source config: `configs/stack_gpu.yml`;
+  - artifact dataset slug:
+    `sleep3r/rogii-baseline-artifacts-2b77f48a1a29`.
+- Artifact:
+  - schema version: `9`;
+  - features: `414`;
+  - HMM columns: `0`;
+  - robust columns: `0`;
+  - fold-safe OOF+postprocess RMSE: `10.66742`;
+  - final model strategy: `full_context`.
+- Kaggle result:
+  - public LB: `10.229`;
+  - Kaggle ref: `52844767`.
+- Takeaway:
+  - this also does not reproduce the old `9.945` / `9.952` public scores;
+  - after CML-specific dataset isolation, neither schema9 `2b77...` nor
+    schema10 `ed4d...` is a reliable `9.95` anchor;
+  - the old `9.945` / `9.952` submissions were likely produced by a different
+    artifact/code combination from the pre-isolation shared Kaggle dataset era,
+    or by source-code drift between training and current inference packaging.
+- Decision:
+  - stop treating pre-isolation leaderboard rows as clean CML-to-LB evidence;
+  - future model artifacts must be submitted with a CML-specific Kaggle dataset
+    slug and should include enough source/config metadata to reproduce feature
+    generation exactly.
+
+### EXP-20260520-6 - Isolated Schema10 Resubmit Corrects The Anchor
+
+- Command/config:
+  - `make submit CML_ID=ed4d9dc6c7cb479881f087fee1217253
+    MESSAGE="clean schema10 baseline resubmit"`;
+  - CML task: `ed4d9dc6c7cb479881f087fee1217253`;
+  - source config: `configs/stack_gpu.yml`;
+  - artifact dataset slug after the isolation fix:
+    `sleep3r/rogii-baseline-artifacts-ed4d9dc6c7cb`.
+- Artifact:
+  - schema version: `10`;
+  - features: `419`;
+  - HMM columns: `0`;
+  - robust columns: `0`;
+  - fold-safe OOF+postprocess RMSE: `10.68983`;
+  - final model strategy: `full_context`.
+- Kaggle result:
+  - public LB: `10.084`.
+- Correction:
+  - the earlier EXP-20260520-1 attribution of public LB `9.952` to this CML
+    task is no longer trustworthy;
+  - before the Kaggle artifact dataset isolation fix, several submits reused
+    the same `sleep3r/rogii-baseline-artifacts` slug, so the Kaggle kernel could
+    mount a different artifact version than the local CML id implied;
+  - with the isolated `ed4d...` dataset slug, schema10 `ed4d...` is a `10.084`
+    artifact, not a `9.952` artifact.
+- Takeaway:
+  - do not use `ed4d9dc6c7cb479881f087fee1217253` as the clean 9.95 anchor;
+  - the remaining old `9.945` / `9.952` submissions must be revalidated with
+    CML-specific dataset slugs before assigning them to `2b77...` or
+    `429438...`;
+  - from now on, only post-isolation submissions should be treated as reliable
+    artifact-to-LB pairs.
+
 ### EXP-20260520-5 - HMM Schema13 Public LB Failure
 
 - Command/config:
@@ -288,7 +467,11 @@ run here with command, data, CV, LB, runtime, and the next decision.
     - worst well RMSE `51.41239`;
     - long hidden RMSE `11.42930`;
     - short hidden RMSE `9.46799`;
-  - Kaggle public LB: `9.952` (reported from Kaggle UI).
+  - Kaggle public LB:
+    - originally attributed as `9.952` from the Kaggle UI;
+    - superseded by EXP-20260520-6: after CML-specific dataset isolation, this
+      exact artifact scores `10.084`;
+    - treat the earlier `9.952` attribution as unreliable.
 - Robust schema-v11 task:
   - CML task: `cc9e7996dd9e4a82b3e681891b085cd2`;
   - name: `rogii-stack_gpu-run_20260519_194125`;
@@ -330,10 +513,13 @@ run here with command, data, CV, LB, runtime, and the next decision.
   - no final artifacts.
 - Takeaway:
   - schema v11 robust PF/beam features improved local fold-safe OOF
-    (`10.63946` vs `10.68983`) but worsened public LB (`10.084` vs `9.952`);
-  - this is a clear OOF/LB mismatch, not a failed artifact or wrong submit;
+    (`10.63946` vs `10.68983`), but the public-LB comparison against schema10
+    was polluted by the pre-isolation shared Kaggle dataset slug;
+  - after EXP-20260520-6, schema10 `ed4d...` and schema11 `cc9e...` both have
+    observed public LB `10.084` under the old/new submit history, so this pair
+    is not evidence of a robust-pack public improvement;
   - robust standalone expert looked good on 100-well diagnostics, but the full
-    model overfit or learned a public-test-worse decision boundary from it;
+    model did not produce a better reliable LB anchor;
   - do not treat schema v11 robust pack as a default improvement.
 - Decision:
   - no code rollback was performed in this audit step;

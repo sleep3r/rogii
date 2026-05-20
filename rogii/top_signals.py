@@ -927,6 +927,29 @@ def run_dtw_multiscale(
     return tvt_by_radius, slope_by_radius, costs, ensemble.astype(float)
 
 
+def _cost_margin(cost_values: np.ndarray) -> float:
+    finite = np.sort(cost_values[np.isfinite(cost_values)])
+    if len(finite) == 0:
+        return np.nan
+    if len(finite) == 1:
+        return np.inf
+    return float((finite[1] - finite[0]) / (abs(finite[0]) + 1e-6))
+
+
+def _best_radius_id(radii: list[int], cost_values: np.ndarray) -> float:
+    if len(radii) == 0 or not np.isfinite(cost_values).any():
+        return np.nan
+    return float(radii[int(np.nanargmin(cost_values))])
+
+
+def _safe_nanmean(values: np.ndarray) -> float:
+    return float(np.nanmean(values)) if np.isfinite(values).any() else np.nan
+
+
+def _safe_nanstd(values: np.ndarray) -> float:
+    return float(np.nanstd(values)) if np.isfinite(values).any() else np.nan
+
+
 def run_dtw_stochastic(
     full_gr: np.ndarray,
     tw_tvt: np.ndarray,
@@ -1217,12 +1240,22 @@ def empty_top_signal_features(
         "kg_dtw_minus_last",
         "kg_dtw_std",
         "kg_dtw_vs_beam",
+        "kg_dtw_radii_agreement",
+        "kg_dtw_cost_mean",
+        "kg_dtw_cost_std",
+        "kg_dtw_best_radius_id",
+        "kg_dtw_best_radius_margin",
         "kg_dwt_tvt",
         "kg_dwt_minus_flat",
         "kg_dwt_minus_last",
         "kg_dwt_std",
         "kg_dwt_vs_dtw",
         "kg_dwt_vs_beam",
+        "kg_dwt_radii_agreement",
+        "kg_dwt_best_radius_id",
+        "kg_dwt_best_radius_margin",
+        "kg_dwt_raw_gap",
+        "kg_dwt_vs_dtw_slope_gap",
         "kg_signal_mean_tvt",
         "kg_signal_mean_minus_flat",
         "kg_signal_mean_minus_last",
@@ -1320,6 +1353,12 @@ def build_kaggle_top_signal_features(
             features[f"kg_dtw_r{radius}_tvt"] = _nan.copy()
             features[f"kg_dtw_r{radius}_minus_flat"] = _nan.copy()
             features[f"kg_dtw_r{radius}_minus_last"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_cost_mean"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_path_slope_mean"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_path_slope_std"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_local_stretch"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_endpoint_gap"] = _nan.copy()
+            features[f"kg_dtw_r{radius}_vs_ensemble"] = _nan.copy()
     if top_cfg.get("dwt_enabled", False):
         for radius in [
             int(r)
@@ -1328,6 +1367,12 @@ def build_kaggle_top_signal_features(
             features[f"kg_dwt_r{radius}_tvt"] = _nan.copy()
             features[f"kg_dwt_r{radius}_minus_flat"] = _nan.copy()
             features[f"kg_dwt_r{radius}_minus_last"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_cost_mean"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_path_slope_mean"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_path_slope_std"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_local_stretch"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_endpoint_gap"] = _nan.copy()
+            features[f"kg_dwt_r{radius}_vs_ensemble"] = _nan.copy()
     for formation in FORMATIONS:
         features[f"kg_form_{formation}_tvt"] = _nan.copy()
         features[f"kg_form_{formation}_minus_flat"] = _nan.copy()
@@ -1569,6 +1614,20 @@ def build_kaggle_top_signal_features(
             features[f"dtw_slope_r{radius}"] = full_feature(
                 n, hidden_idx, slope[hidden_idx]
             )
+            hidden_slope = slope[hidden_idx]
+            slope_center = _safe_nanmean(hidden_slope)
+            features[f"kg_dtw_r{radius}_cost_mean"] = full_scalar(
+                n, hidden_idx, dtw_costs[radius]
+            )
+            features[f"kg_dtw_r{radius}_path_slope_mean"] = full_scalar(
+                n, hidden_idx, slope_center
+            )
+            features[f"kg_dtw_r{radius}_path_slope_std"] = full_scalar(
+                n, hidden_idx, _safe_nanstd(hidden_slope)
+            )
+            features[f"kg_dtw_r{radius}_local_stretch"] = full_feature(
+                n, hidden_idx, hidden_slope - slope_center
+            )
         dtw_matrix = np.vstack(dtw_hidden_signals).T
         dtw_hidden = dtw_ensemble[hidden_idx]
         dtw_slope_matrix = np.vstack(dtw_hidden_slopes).T
@@ -1580,7 +1639,11 @@ def build_kaggle_top_signal_features(
             dtw_signal[hidden_idx] - flat_pred[hidden_idx]
         )
         features["kg_dtw_minus_last"][hidden_idx] = dtw_signal[hidden_idx] - last_tvt
-        features["kg_dtw_std"][hidden_idx] = np.nanstd(dtw_matrix, axis=1)
+        dtw_radius_std = np.nanstd(dtw_matrix, axis=1)
+        features["kg_dtw_std"][hidden_idx] = dtw_radius_std
+        features["kg_dtw_radii_agreement"][hidden_idx] = 1.0 / (
+            1.0 + dtw_radius_std
+        )
         features["kg_dtw_vs_beam"][hidden_idx] = dtw_signal[hidden_idx] - beam_mean
         cost_values = np.array([dtw_costs[radius] for radius in dtw_radii], dtype=float)
         features["dtw_ens_d"] = full_feature(n, hidden_idx, dtw_hidden - last_tvt)
@@ -1591,6 +1654,30 @@ def build_kaggle_top_signal_features(
         features["dtw_cost_range"] = full_scalar(
             n, hidden_idx, float(np.nanmax(cost_values) - np.nanmin(cost_values))
         )
+        features["kg_dtw_cost_mean"] = full_scalar(
+            n, hidden_idx, _safe_nanmean(cost_values)
+        )
+        features["kg_dtw_cost_std"] = full_scalar(
+            n, hidden_idx, _safe_nanstd(cost_values)
+        )
+        features["kg_dtw_best_radius_id"] = full_scalar(
+            n, hidden_idx, _best_radius_id(dtw_radii, cost_values)
+        )
+        features["kg_dtw_best_radius_margin"] = full_scalar(
+            n, hidden_idx, _cost_margin(cost_values)
+        )
+        for radius, radius_signal in zip(dtw_radii, dtw_hidden_signals, strict=False):
+            features[f"kg_dtw_r{radius}_vs_ensemble"] = full_feature(
+                n, hidden_idx, radius_signal - dtw_hidden
+            )
+            endpoint_gap = (
+                float(radius_signal[-1] - dtw_hidden[-1])
+                if len(radius_signal) and np.isfinite(radius_signal[-1])
+                else np.nan
+            )
+            features[f"kg_dtw_r{radius}_endpoint_gap"] = full_scalar(
+                n, hidden_idx, endpoint_gap
+            )
         features["dtw_vs_beam"] = full_feature(n, hidden_idx, dtw_hidden - beam_ref)
         features["dtw_vs_sc"] = full_feature(n, hidden_idx, dtw_hidden - ncc_ens)
         if top_cfg.get("dtw_stochastic_enabled", True):
@@ -1647,11 +1734,17 @@ def build_kaggle_top_signal_features(
             float(np.nanmean(tw_gr)),
         )
         dwt_hidden_signals = []
-        dwt_radii = top_cfg.get("dwt_radii") or [
-            top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))
+        dwt_hidden_slopes = []
+        dwt_costs: dict[int, float] = {}
+        dwt_radii = [
+            int(item)
+            for item in (
+                top_cfg.get("dwt_radii")
+                or [top_cfg.get("dwt_radius", top_cfg.get("dtw_radius", 35))]
+            )
         ]
-        for radius in [int(item) for item in dwt_radii]:
-            signal = lowres_dtw_signal(
+        for radius in dwt_radii:
+            signal, slope, cost = lowres_dtw_alignment(
                 dwt_full,
                 tw_tvt,
                 dwt_tw,
@@ -1668,7 +1761,9 @@ def build_kaggle_top_signal_features(
                 ),
                 radius,
             )
+            dwt_costs[int(radius)] = cost
             dwt_hidden_signals.append(signal[hidden_idx])
+            dwt_hidden_slopes.append(slope[hidden_idx])
             features[f"kg_dwt_r{radius}_tvt"] = np.zeros(n, dtype=float)
             features[f"kg_dwt_r{radius}_tvt"][hidden_idx] = signal[hidden_idx]
             features[f"kg_dwt_r{radius}_minus_flat"] = np.zeros(n, dtype=float)
@@ -1679,9 +1774,25 @@ def build_kaggle_top_signal_features(
             features[f"kg_dwt_r{radius}_minus_last"][hidden_idx] = (
                 signal[hidden_idx] - last_tvt
             )
+            hidden_slope = slope[hidden_idx]
+            slope_center = _safe_nanmean(hidden_slope)
+            features[f"kg_dwt_r{radius}_cost_mean"] = full_scalar(
+                n, hidden_idx, cost
+            )
+            features[f"kg_dwt_r{radius}_path_slope_mean"] = full_scalar(
+                n, hidden_idx, slope_center
+            )
+            features[f"kg_dwt_r{radius}_path_slope_std"] = full_scalar(
+                n, hidden_idx, _safe_nanstd(hidden_slope)
+            )
+            features[f"kg_dwt_r{radius}_local_stretch"] = full_feature(
+                n, hidden_idx, hidden_slope - slope_center
+            )
         dwt_matrix = np.vstack(dwt_hidden_signals).T
         dwt_hidden = np.nanmean(dwt_matrix, axis=1)
         dwt_hidden_signal = dwt_hidden
+        dwt_slope_matrix = np.vstack(dwt_hidden_slopes).T
+        dwt_slope_mean = np.nanmean(dwt_slope_matrix, axis=1)
         dwt_signal = np.full(n, np.nan, dtype=float)
         dwt_signal[hidden_idx] = dwt_hidden
         features["kg_dwt_tvt"][hidden_idx] = dwt_signal[hidden_idx]
@@ -1689,11 +1800,42 @@ def build_kaggle_top_signal_features(
             dwt_signal[hidden_idx] - flat_pred[hidden_idx]
         )
         features["kg_dwt_minus_last"][hidden_idx] = dwt_signal[hidden_idx] - last_tvt
-        features["kg_dwt_std"][hidden_idx] = np.nanstd(dwt_matrix, axis=1)
+        dwt_radius_std = np.nanstd(dwt_matrix, axis=1)
+        features["kg_dwt_std"][hidden_idx] = dwt_radius_std
+        features["kg_dwt_radii_agreement"][hidden_idx] = 1.0 / (
+            1.0 + dwt_radius_std
+        )
         features["dwt_ens_d"] = full_feature(n, hidden_idx, dwt_hidden - last_tvt)
+        dwt_cost_values = np.array(
+            [dwt_costs[radius] for radius in dwt_radii], dtype=float
+        )
+        features["kg_dwt_best_radius_id"] = full_scalar(
+            n, hidden_idx, _best_radius_id(dwt_radii, dwt_cost_values)
+        )
+        features["kg_dwt_best_radius_margin"] = full_scalar(
+            n, hidden_idx, _cost_margin(dwt_cost_values)
+        )
+        for radius, radius_signal in zip(dwt_radii, dwt_hidden_signals, strict=False):
+            features[f"kg_dwt_r{radius}_vs_ensemble"] = full_feature(
+                n, hidden_idx, radius_signal - dwt_hidden
+            )
+            endpoint_gap = (
+                float(radius_signal[-1] - dwt_hidden[-1])
+                if len(radius_signal) and np.isfinite(radius_signal[-1])
+                else np.nan
+            )
+            features[f"kg_dwt_r{radius}_endpoint_gap"] = full_scalar(
+                n, hidden_idx, endpoint_gap
+            )
         if dtw_signal is not None:
             features["kg_dwt_vs_dtw"][hidden_idx] = (
                 dwt_signal[hidden_idx] - dtw_signal[hidden_idx]
+            )
+            features["kg_dwt_raw_gap"][hidden_idx] = np.abs(
+                dwt_signal[hidden_idx] - dtw_signal[hidden_idx]
+            )
+            features["kg_dwt_vs_dtw_slope_gap"][hidden_idx] = (
+                dwt_slope_mean - dtw_slope_mean
             )
         features["kg_dwt_vs_beam"][hidden_idx] = dwt_signal[hidden_idx] - beam_mean
         signal_stack.append(dwt_signal[hidden_idx])
