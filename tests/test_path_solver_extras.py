@@ -61,7 +61,7 @@ def _build_context(seed: int = 7) -> tuple[EnergyContext, "callable[[np.ndarray]
         df, md, z, df["X"].to_numpy(float), df["Y"].to_numpy(float), tvt_input,
         hidden_idx, last_idx, last_tvt, tail_rows,
     )
-    geo_path, _ = fit_geo_candidate(df, md, z, tvt_input, hidden_idx, last_idx, last_tvt, tail_rows)
+    geo_path, _, _ = fit_geo_candidate(df, md, z, tvt_input, hidden_idx, last_idx, last_tvt, tail_rows)
     # Use geo_path as the CEM base path so the search is not anchor-pinned.
     typewell_tvt = np.linspace(1180.0, 1260.0, 80)
     typewell_gr = 90.0 + 12.0 * np.sin(typewell_tvt / 18.0)

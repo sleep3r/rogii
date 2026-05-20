@@ -18,6 +18,12 @@ from .path_solver_extras import (
     matched_triples,
     stage12_path,
 )
+from .cross_well_prior import (
+    TrainWellPath,
+    collect_train_paths,
+    compute_signature,
+    cross_well_typewell_path,
+)
 
 FORMATIONS: tuple[str, ...] = ("ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA")
 
@@ -278,7 +284,15 @@ def fit_linear_candidate(df: pd.DataFrame, md: np.ndarray, z: np.ndarray, x: np.
     return clip_path_steps(path, md, hidden_indices, last_idx, last_tvt, tail_slope_abs)
 
 
-def fit_geo_candidate(df: pd.DataFrame, md: np.ndarray, z: np.ndarray, tvt_input: np.ndarray, hidden_indices: np.ndarray, last_idx: int, last_tvt: float, tail_rows: int) -> tuple[np.ndarray, dict[str, float]]:
+def fit_geo_candidate(df: pd.DataFrame, md: np.ndarray, z: np.ndarray, tvt_input: np.ndarray, hidden_indices: np.ndarray, last_idx: int, last_tvt: float, tail_rows: int) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """Per-formation linear TVT fit.
+
+    Returns ``(best_path, consensus_path, diagnostics)``. ``best_path`` is the
+    single best surface (by tail RMSE) preserved for backward compatibility.
+    ``consensus_path`` is the inverse-RMSE-weighted median across all
+    formations that produced a finite fit. Tier-1 plan item 5: do not lock
+    onto one formation when several agree, and do not ignore disagreement.
+    """
     n = len(df)
     mask = known_tail_mask(tvt_input, last_idx, tail_rows)
     best_path: np.ndarray | None = None
@@ -286,6 +300,9 @@ def fit_geo_candidate(df: pd.DataFrame, md: np.ndarray, z: np.ndarray, tvt_input
     best_surface = "none"
     diagnostics: dict[str, float] = {}
     dmd = md - float(md[last_idx])
+    per_surface_paths: list[np.ndarray] = []
+    per_surface_rmse: list[float] = []
+    per_surface_names: list[str] = []
     for surface in FORMATIONS:
         if surface not in df.columns:
             continue
@@ -305,20 +322,56 @@ def fit_geo_candidate(df: pd.DataFrame, md: np.ndarray, z: np.ndarray, tvt_input
         pred = xmat @ beta
         rmse = float(np.sqrt(np.nanmean((pred[valid] - tvt_input[valid]) ** 2)))
         diagnostics[f"geo_{surface}_tail_rmse"] = rmse
+        if np.isfinite(pred).any():
+            if np.isfinite(pred[last_idx]):
+                pred = pred + (last_tvt - float(pred[last_idx]))
+            per_surface_paths.append(pred)
+            per_surface_rmse.append(rmse)
+            per_surface_names.append(surface)
         if np.isfinite(rmse) and rmse < best_rmse:
             best_rmse = rmse
             best_surface = surface
             best_path = pred
+    fallback_path = fit_linear_candidate(df, md, z, np.zeros(n), np.zeros(n), tvt_input, hidden_indices, last_idx, last_tvt, tail_rows)
     if best_path is None:
-        best_path = fit_linear_candidate(df, md, z, np.zeros(n), np.zeros(n), tvt_input, hidden_indices, last_idx, last_tvt, tail_rows)
+        best_path = fallback_path.copy()
         best_rmse = float("nan")
     if np.isfinite(best_path[last_idx]):
         best_path = best_path + (last_tvt - float(best_path[last_idx]))
     tail_slope_abs = abs(robust_line_slope(md[mask], tvt_input[mask], default=0.02))
     best_path = clip_path_steps(best_path, md, hidden_indices, last_idx, last_tvt, tail_slope_abs)
+    if per_surface_paths:
+        stack = np.vstack(per_surface_paths)
+        rmse_arr = np.asarray(per_surface_rmse, dtype=float)
+        finite_rmse = np.where(np.isfinite(rmse_arr) & (rmse_arr > 1e-6), rmse_arr, np.inf)
+        weights = 1.0 / (finite_rmse + 1e-3)
+        if not np.isfinite(weights).any() or float(weights.sum()) <= 0.0:
+            consensus_path = np.nanmedian(stack, axis=0)
+        else:
+            normalized = weights / float(weights.sum())
+            # Weighted median: replicate each surface roughly proportional
+            # to its inverse-RMSE weight, then take a plain median. Using a
+            # 100-step replication grid keeps this deterministic and avoids
+            # an external dependency.
+            scaled = np.round(normalized * 100).astype(int)
+            scaled = np.maximum(scaled, 1)
+            replicated = np.vstack([stack[i] for i, count in enumerate(scaled) for _ in range(int(count))])
+            consensus_path = np.nanmedian(replicated, axis=0)
+        if np.isfinite(consensus_path[last_idx]):
+            consensus_path = consensus_path + (last_tvt - float(consensus_path[last_idx]))
+        consensus_path = clip_path_steps(consensus_path, md, hidden_indices, last_idx, last_tvt, tail_slope_abs)
+        diagnostics["geo_consensus_surfaces"] = float(len(per_surface_paths))
+        diagnostics["geo_consensus_rmse_min"] = float(np.nanmin(rmse_arr)) if rmse_arr.size else float("nan")
+        diagnostics["geo_consensus_rmse_max"] = float(np.nanmax(rmse_arr)) if rmse_arr.size else float("nan")
+        diagnostics["geo_consensus_rmse_spread"] = (
+            float(np.nanmax(rmse_arr) - np.nanmin(rmse_arr)) if rmse_arr.size else float("nan")
+        )
+    else:
+        consensus_path = best_path.copy()
+        diagnostics["geo_consensus_surfaces"] = 0.0
     diagnostics["geo_best_tail_rmse"] = float(best_rmse) if np.isfinite(best_rmse) else np.nan
     diagnostics["geo_best_surface_id"] = float(FORMATIONS.index(best_surface)) if best_surface in FORMATIONS else -1.0
-    return best_path, diagnostics
+    return best_path, consensus_path, diagnostics
 
 
 def fit_gr_calibration(typewell: tuple[np.ndarray, np.ndarray] | None, tvt_input: np.ndarray, gr: np.ndarray, tail_mask: np.ndarray) -> tuple[float, float, float]:
@@ -418,6 +471,8 @@ def solve_well(
     anchor_by_id: Mapping[str, float],
     train_eval: bool,
     tail_rows: int,
+    train_paths: list["TrainWellPath"] | None = None,
+    cross_well_k: int = 8,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, object]]]:
     """Build direct test-time TVT path candidates for one well.
 
@@ -458,7 +513,7 @@ def solve_well(
     tail_slope = robust_line_slope(md[tail_mask], tvt_input[tail_mask], default=0.0)
 
     linear_path = fit_linear_candidate(df, md, z, x, y, tvt_input, hidden_indices, last_idx, last_tvt, tail_rows)
-    geo_path, geo_diag = fit_geo_candidate(df, md, z, tvt_input, hidden_indices, last_idx, last_tvt, tail_rows)
+    geo_path, geo_consensus_path, geo_diag = fit_geo_candidate(df, md, z, tvt_input, hidden_indices, last_idx, last_tvt, tail_rows)
 
     # Optional submission anchor. Never falls back to a self-fabricated path:
     # if the submission anchor is missing or invalid we just return None and
@@ -534,18 +589,80 @@ def solve_well(
     outputs: dict[str, np.ndarray] = {
         "linear_tailfit": linear_path,
         "geo_tailfit": geo_path,
+        "geo_consensus": _clip(geo_consensus_path),
         "cem_raw": _clip(cem_outputs["cem_raw"]),
         "cem_top_median": _clip(cem_outputs["cem_top_median"]),
         "stage1_raw": _clip(stage12_outputs["stage1_path"]),
         "stage12_raw": _clip(stage12_outputs["stage12_path"]),
     }
 
+    crosswell_diag: dict[str, object] = {}
+    if train_paths:
+        test_signature = compute_signature(df, last_idx=int(last_idx), hidden_indices=hidden_indices)
+        crosswell_md, crosswell_z, crosswell_diag_raw = cross_well_typewell_path(
+            test_md=md,
+            test_z=z,
+            hidden_indices=hidden_indices,
+            last_idx=int(last_idx),
+            last_tvt=float(last_tvt),
+            last_md=float(md[int(last_idx)]),
+            last_z=float(z[int(last_idx)]),
+            test_signature=test_signature,
+            train_paths=train_paths,
+            k=int(cross_well_k),
+            self_well=well,
+        )
+        crosswell_md = _clip(crosswell_md)
+        crosswell_z = _clip(crosswell_z)
+        crosswell_median = _clip(np.nanmedian(np.vstack([crosswell_md, crosswell_z]), axis=0))
+        outputs["crosswell_md_raw"] = crosswell_md
+        outputs["crosswell_z_raw"] = crosswell_z
+        outputs["crosswell_median"] = crosswell_median
+        crosswell_diag = dict(crosswell_diag_raw)
+
+        # CEM corrections on top of the cross-well prior. Same energy as the
+        # main CEM run; only the base path differs. The hypothesis is that
+        # the cross-well prior is a *better* base path than geo_path for the
+        # test wells where the official typewell is weak.
+        xw_ctx = EnergyContext(
+            md=md,
+            gr=gr,
+            z=z,
+            typewell=typewell,
+            hidden_indices=hidden_indices,
+            last_idx=int(last_idx),
+            last_tvt=float(last_tvt),
+            tail_slope=float(tail_slope),
+            cal_a=float(cal_a),
+            cal_b=float(cal_b),
+            linear_path=linear_path,
+            geo_path=geo_path,
+            anchor_path=crosswell_median,
+        )
+        cem_over_xw_outputs, cem_over_xw_diag = cem_path_search(
+            xw_ctx, _energy_fn, seed=23
+        )
+        outputs["cem_over_crosswell_raw"] = _clip(cem_over_xw_outputs["cem_raw"])
+        outputs["cem_over_crosswell_top_median"] = _clip(cem_over_xw_outputs["cem_top_median"])
+        # Stash the over-crosswell CEM diagnostics so we can attribute the
+        # contribution of each base path in the report.
+        crosswell_diag = {
+            **crosswell_diag,
+            "cem_over_crosswell_best_score": cem_over_xw_diag.get("cem_best_score", float("nan")),
+            "cem_over_crosswell_best_offset": cem_over_xw_diag.get("cem_best_offset", float("nan")),
+            "cem_over_crosswell_best_slope_offset": cem_over_xw_diag.get("cem_best_slope_offset", float("nan")),
+            "cem_over_crosswell_best_curvature": cem_over_xw_diag.get("cem_best_curvature", float("nan")),
+        }
+
     # Optional anchor blends. Only emitted when a real submission anchor was
     # provided. These are a controlled regression safety net, not the primary
     # candidate — pick them when you specifically want to soften a bold path
     # toward the known anchor.
     if anchor_path is not None:
-        for source_name in ("cem_top_median", "stage12_raw"):
+        blend_sources = ["cem_top_median", "stage12_raw"]
+        if "crosswell_median" in outputs:
+            blend_sources.append("crosswell_median")
+        for source_name in blend_sources:
             raw = outputs[source_name]
             for weight in (0.40, 0.60):
                 blended = anchor_path.copy()
@@ -558,6 +675,12 @@ def solve_well(
     diag_extras: dict[str, dict[str, object]] = {
         "linear_tailfit": {},
         "geo_tailfit": {},
+        "geo_consensus": {
+            "geo_consensus_surfaces": geo_diag.get("geo_consensus_surfaces", float("nan")),
+            "geo_consensus_rmse_min": geo_diag.get("geo_consensus_rmse_min", float("nan")),
+            "geo_consensus_rmse_max": geo_diag.get("geo_consensus_rmse_max", float("nan")),
+            "geo_consensus_rmse_spread": geo_diag.get("geo_consensus_rmse_spread", float("nan")),
+        },
         "cem_raw": {k: v for k, v in cem_diag.items() if k != "cem_history"},
         "cem_top_median": {},
         "stage1_raw": {
@@ -573,6 +696,17 @@ def solve_well(
             "stage2_max_offset_used": stage12_diag.get("stage2_max_offset_used", np.nan),
         },
     }
+    if crosswell_diag:
+        crosswell_extra = {
+            key: value
+            for key, value in crosswell_diag.items()
+            if key != "crosswell_neighbors"
+        }
+        diag_extras["crosswell_md_raw"] = crosswell_extra
+        diag_extras["crosswell_z_raw"] = crosswell_extra
+        diag_extras["crosswell_median"] = crosswell_extra
+        diag_extras["cem_over_crosswell_raw"] = crosswell_extra
+        diag_extras["cem_over_crosswell_top_median"] = crosswell_extra
     anchor_scale = (
         max(robust_sigma(anchor_path[hidden_indices], default=10.0), 3.0)
         if anchor_path is not None
@@ -619,8 +753,18 @@ def build_submission_frames(
     progress_interval: int = 25,
     max_wells: int | None = None,
     sample_seed: int | None = None,
+    cross_well_enabled: bool = False,
+    cross_well_k: int = 8,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame | None]:
     anchor = read_anchor_submission(anchor_submission)
+    train_paths: list[TrainWellPath] | None = None
+    if cross_well_enabled:
+        train_paths = collect_train_paths(data_dir)
+        print(
+            "Direct solver | cross-well prior loaded "
+            f"{len(train_paths)} train wells with full TVT curves",
+            flush=True,
+        )
     if train_eval:
         # Train eval uses real hidden rows from train wells, not sample_submission.
         well_rows: dict[str, list[int]] = {}
@@ -690,7 +834,11 @@ def build_submission_frames(
             continue
         df = pd.read_csv(path)
         df.attrs["horizontal_path"] = str(path)
-        outputs, diag = solve_well(well, df, rows, anchor, train_eval=train_eval, tail_rows=tail_rows)
+        outputs, diag = solve_well(
+            well, df, rows, anchor,
+            train_eval=train_eval, tail_rows=tail_rows,
+            train_paths=train_paths, cross_well_k=cross_well_k,
+        )
         diagnostics.extend(diag)
         for name, path_values in outputs.items():
             frames.setdefault(name, [])
@@ -984,6 +1132,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-interval", type=int, default=25)
     parser.add_argument("--max-wells", type=int, default=None)
     parser.add_argument("--sample-seed", type=int, default=None, help="Shuffle wells with this seed before applying --max-wells")
+    parser.add_argument(
+        "--cross-well-prior",
+        action="store_true",
+        help="Load train wells once and produce crosswell_md_raw / crosswell_z_raw / crosswell_median variants for each test well",
+    )
+    parser.add_argument(
+        "--cross-well-k",
+        type=int,
+        default=8,
+        help="Number of nearest train wells to aggregate for the cross-well prior",
+    )
     parser.add_argument("--pseudo-public-trials", type=int, default=0, help="After --train-eval, bootstrap this many 3-well pseudo-public trials")
     parser.add_argument("--pseudo-public-triple-size", type=int, default=3)
     parser.add_argument("--pseudo-public-anchor-variant", default="stage12_raw")
@@ -1012,6 +1171,8 @@ def main() -> None:
         progress_interval=int(args.progress_interval),
         max_wells=args.max_wells,
         sample_seed=args.sample_seed,
+        cross_well_enabled=bool(args.cross_well_prior),
+        cross_well_k=int(args.cross_well_k),
     )
     eval_summary = summarize_eval(eval_frame)
     if eval_summary is not None:
@@ -1069,6 +1230,8 @@ def main() -> None:
         "pseudo_public_anchor_variant": str(args.pseudo_public_anchor_variant),
         "pseudo_public_matched": bool(args.pseudo_public_matched),
         "pseudo_public_candidate_k": int(args.pseudo_public_candidate_k),
+        "cross_well_prior": bool(args.cross_well_prior),
+        "cross_well_k": int(args.cross_well_k),
         "variants": [_ENERGY_VARIANT.__dict__],
         "submission_files": [f"submission_direct_{name}.csv" for name in submissions],
     }

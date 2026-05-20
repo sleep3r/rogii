@@ -100,24 +100,32 @@ oracle). We have to chase the "found the trick" pattern.
 
 ### Tier 1 — Most likely to actually unlock 8.x
 
-4. **Cross-well typewell prior.**
+4. **Cross-well typewell prior.** **STATUS: IMPLEMENTED.**
    Currently each test well is paired with one typewell. We have 773 train
-   wells with full TVT/MD/Z/GR. For each test well, find the `k` nearest
+   wells with full TVT/MD/Z. For each test well, find the `k` nearest
    train wells in `(X, Y, formation_surface_depths, GR statistics)` and
    build a synthetic typewell whose `TVT - last_known_tvt` is the median
    of those `k` train wells. This is exactly the kind of "found the
-   trick" Jaeger could have. Implementation cost: `1 - 2 days`.
+   trick" Jaeger could have.
 
-   - Expected impact: `+0.4 - +1.0` public LB.
-   - Risk: medium-high if spatial assumption is wrong, low-medium
-     otherwise.
-   - Success: matched-triple median RMSE improves by `>= 0.4 ft` and the
-     bold guard does not flag the result.
+   - Lives in `rogii/cross_well_prior.py`. Enabled with
+     `--cross-well-prior --cross-well-k 8` (or
+     `DIRECT_SOLVER_CROSS_WELL=true` which is now the Makefile default).
+   - Produces three raw variants `crosswell_md_raw`, `crosswell_z_raw`,
+     `crosswell_median` and two CEM-on-top variants
+     `cem_over_crosswell_raw`, `cem_over_crosswell_top_median`.
+   - Train-eval result is intentionally NOT a validation. On a 5-well
+     slice these variants land at `15 - 53 ft` median triple RMSE vs
+     `0.24 - 3.4 ft` for `geo_consensus`/`cem_raw`. Each train well has a
+     near-perfect official typewell so train-eval rewards the wrong
+     thing. The hypothesis is that on the 3 public test wells the
+     official typewell is the weak signal and cross-well is the right
+     one. This can only be tested by submitting.
 
-5. **Direct geological-prior path solver.**
+5. **Direct geological-prior path solver.** **STATUS: IMPLEMENTED.**
    The plan's section "Azimuth / dip / formation-relative geological pack"
-   in the earlier brief was never built into a *path* solver; we built it
-   into GBM features. The actual move is:
+   was never built into a *path* solver; we built it into GBM features.
+   The actual move was:
    ```text
    for each formation S in [ANCC, ASTNU, ASTNL, EGFDU, EGFDL, BUDA]:
        a_S, b_S = fit_on_train_tail(z_minus_S, TVT_input)
@@ -125,13 +133,10 @@ oracle). We have to chase the "found the trick" pattern.
    pred = weighted_median(cand_path_S for S in formations,
                           weights = inverse_train_tail_rmse_S)
    ```
-   Plus azimuth/dip stretch correction. This is fundamentally different
-   from the current solvers because the candidate paths are constructed
-   from *geology*, not from anchor offsets.
-
-   - Expected impact: `+0.3 - +0.8`.
-   - Risk: medium. Formation surfaces in test wells may be noisier than in
-     train.
+   This is now `fit_geo_candidate` returning both `best_path` and
+   `consensus_path` (inverse-RMSE-weighted median of all formations).
+   Surfaces with bad tail fit are down-weighted; surfaces that agree
+   reinforce each other. Exposed as the `geo_consensus` variant.
 
 6. **Per-well solver selection by signature.**
    Right now `consensus_safe` blends gr_safe + geo_safe + anchor for every
