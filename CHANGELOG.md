@@ -18,6 +18,355 @@ run here with command, data, CV, LB, runtime, and the next decision.
 - Next:
 ```
 
+## 2026-05-21
+
+### Phase 2 - Surface Student v0
+
+- Added `rogii/surface_student.py` as a CatBoost-only fold-safe student
+  trainer for the privileged Surface Teacher labels from Phase 1.
+- The student feature builder uses test-available inputs only:
+  - `MD`, `X`, `Y`, `Z`, `GR`, known/hidden `TVT_input` mask-derived
+    tail features, last-known anchors, GR rolling stats, typewell GR
+    interpolation, and optional fold-safe spatial imputed formation
+    surfaces from `KaggleTopContext(train_fold_paths, config)`;
+  - raw true formation surfaces are masked before feature construction and
+    are used only as teacher/target labels.
+- Added `configs/surface_student_gbm.yml` with `model.name: catboost`.
+  Despite the generic `gbm` filename from the plan, v0 intentionally trains
+  only CatBoost models, one model per target:
+  - `target_geo_teacher_delta_last`;
+  - `target_surface_resid_ANCC`;
+  - `target_surface_resid_ASTNU`;
+  - `target_surface_resid_ASTNL`;
+  - `target_surface_resid_EGFDU`;
+  - `target_surface_resid_EGFDL`;
+  - `target_surface_resid_BUDA`.
+- CLI:
+  - `uv run python -m rogii.surface_student --config configs/surface_student_gbm.yml --data-dir data --output-dir artifacts/surface_student`.
+- Outputs:
+  - `artifacts/surface_student/oof_predictions.parquet`;
+  - `artifacts/surface_student/models/<target>/fold_<k>.pkl`;
+  - `artifacts/surface_student/surface_student_metrics.json`;
+  - `artifacts/surface_student/surface_student_report.md`.
+- OOF columns include:
+  - `geo_student_tvt`, `geo_student_delta_last`, `geo_student_minus_flat`,
+    `geo_student_uncertainty`;
+  - `surface_hat_ANCC` ... `surface_hat_BUDA`;
+  - `surface_unc_ANCC` ... `surface_unc_BUDA`;
+  - placeholder comparison columns `student_vs_pf_ancc`, `student_vs_dtw`,
+    `student_vs_dwt`, `student_vs_schema10` for the next integration pass.
+- Dependency note:
+  - `pyarrow` was installed into the local `.venv` via
+    `uv pip install pyarrow>=16.0.0` so the smoke writes parquet;
+  - `uv add pyarrow` could not update `pyproject.toml`/`uv.lock` because
+    the private Nexus index for `spacebridge` was not resolvable at the
+    time of implementation. The writer still has a CSV fallback if parquet
+    support is missing in a fresh environment.
+- Smoke on real train CSVs:
+  - command:
+    `uv run python -m rogii.surface_student --config configs/surface_student_gbm.yml --data-dir data --output-dir artifacts/surface_student_smoke --max-wells 8`;
+  - rows: `39,287`;
+  - wells: `8`;
+  - folds: `5`;
+  - feature count: `51`;
+  - student vs teacher RMSE: `12.618760`;
+  - student vs true RMSE: `12.651168`;
+  - teacher vs true RMSE on the same 8 wells: `0.248166`;
+  - parquet written: `True`.
+- Interpretation:
+  - The 8-well smoke proves plumbing and fold protocol, not model quality.
+    Student generalization is intentionally hard with only 6-7 train wells
+    per fold. Run the full 773-well OOF before deciding whether Phase 2
+    can become production features.
+- Validation:
+  - `uv run pytest -q tests/test_surface_student.py`: `3 passed`;
+  - `uv run pytest -q`: `79 passed`;
+  - `uv run python -m compileall rogii`: passed;
+  - `make check`: passed.
+
+#### Phase 2 logging pass
+
+- Added verbose progress logs to `rogii.surface_student`:
+  - fold start with total folds, train/valid well counts and target count;
+  - fold spatial context start/complete with duration;
+  - train/valid table start/progress/complete with current well, rows,
+    rows/sec, elapsed and ETA;
+  - CatBoost target start/complete with target name, feature count,
+    train/valid rows, RMSE, best iteration and duration;
+  - output write stage.
+- Added `surface_student.progress_interval: 25` to
+  `configs/surface_student_gbm.yml`.
+- Smoke after logging pass:
+  - `uv run python -m rogii.surface_student --config configs/surface_student_gbm.yml --data-dir data --output-dir artifacts/surface_student_log_smoke --max-wells 4`;
+  - completed successfully and showed per-split/target progress.
+- Validation after logging pass:
+  - `uv run ruff check rogii/surface_student.py tests/test_surface_student.py`: passed;
+  - `uv run pytest -q tests/test_surface_student.py`: `3 passed`;
+  - `uv run pytest -q`: `79 passed`;
+  - `make check`: passed.
+
+#### Experiment 0.5 - Surface Student Integration Smoke
+
+- Added `rogii/surface_student_integration.py`, a cheap integration gate that
+  does **not** rebuild the heavy schema10 feature table and does **not** run
+  the full 7h ensemble.
+- Method:
+  - load schema10 `model.pkl` and reconstruct raw OOF row order from the
+    persisted `oof_residual_`;
+  - verify reconstructed schema10 raw OOF RMSE matches the stored ensemble
+    metric (`10.750713`);
+  - merge with `artifacts/surface_student/oof_predictions.parquet`;
+  - train a small CatBoost meta-residual model by well folds on safe student
+    columns only.
+- Safe columns used:
+  - `geo_student_tvt`;
+  - `geo_student_delta_last`;
+  - `geo_student_minus_schema10`;
+  - `geo_student_minus_flat`;
+  - `surface_hat_ANCC` ... `surface_hat_BUDA`;
+  - `z_minus_surface_hat_ANCC` ... `z_minus_surface_hat_BUDA`.
+- `geo_student_uncertainty` is explicitly excluded by default because the
+  current v0 value is `abs(student - teacher)`, which is teacher-derived and
+  not available at test time.
+- Command:
+  - `uv run python -m rogii.surface_student_integration --iterations 200 --output-dir artifacts/surface_student_integration`.
+- Outputs:
+  - `artifacts/surface_student_integration/integration_oof_predictions.parquet`;
+  - `artifacts/surface_student_integration/integration_metrics.json`;
+  - `artifacts/surface_student_integration/integration_report.md`.
+- Result:
+  - rows: `3,783,989`;
+  - wells: `773`;
+  - schema10 raw RMSE: `10.750713`;
+  - schema10 + student raw RMSE: `10.752214`;
+  - gain: `-0.001502`;
+  - geo student standalone RMSE: `14.818934`;
+  - P95 well RMSE changed from `20.097915` to `20.075772` (`+0.022143`
+    positive delta), but worst-well RMSE worsened by `1.264745`.
+- Decision under the requested gate:
+  - gain `< 0.05`, so **drop v0 from main features** and keep it only in
+    `candidate_bank`/diagnostics.
+- Validation:
+  - `uv run ruff check rogii/surface_student_integration.py`: passed;
+  - `uv run python -m compileall rogii/surface_student_integration.py`: passed;
+  - `uv run pytest -q tests/test_surface_student.py`: `3 passed`.
+
+### Experiment 1 - Candidate Bank + Oracle v0
+
+- Added `rogii/candidate_bank.py`, a row-level candidate bank and oracle
+  report builder.
+- Inputs:
+  - `artifacts/surface_student_integration/integration_oof_predictions.parquet`;
+  - `artifacts/surface_student/oof_predictions.parquet`;
+  - `artifacts/direct_solver_tier1/train_eval/*.csv`;
+  - `data/train` for the tail-slope baseline.
+- Command:
+  - `uv run python -m rogii.candidate_bank --output-dir artifacts/candidate_bank`.
+- Outputs:
+  - `artifacts/candidate_bank/oof_candidates.parquet`;
+  - `artifacts/candidate_bank/candidate_scores.csv`;
+  - `artifacts/candidate_bank/oracle_scores.csv`;
+  - `artifacts/candidate_bank/oracle_scores_with_privileged.csv`;
+  - `artifacts/candidate_bank/oracle_choices.parquet`;
+  - `artifacts/candidate_bank/candidate_bank_metrics.json`;
+  - `artifacts/candidate_bank/candidate_bank_report.md`.
+- Logging pass included from the start:
+  - base candidate load/merge;
+  - tail-slope baseline build;
+  - parquet write;
+  - individual candidate scoring;
+  - production-like and privileged oracle scoring.
+- Important classification:
+  - production-like candidates are only paths that are available from
+    current OOF artifacts without true formation surfaces:
+    `schema10_oof_raw`, `schema10_plus_student_raw`,
+    `geo_student_v0_tvt`, `last_known_tvt`, `flat_tvt`, `last_known`,
+    `flat_last_known`, `linear_tailfit`, `tail_slope_baseline`;
+  - current `direct_solver_tier1/train_eval` outputs are treated as
+    privileged diagnostics because their train-eval generation uses true
+    train surfaces or surface-derived energy. They are not counted in the
+    production-like gate.
+- Missing requested row-level candidates:
+  - `schema10_oof_pp`, `schema15_oof_raw`, `schema15_oof_pp`;
+  - `kg_pf_ancc_tvt`, `kg_pf_z_tvt`;
+  - `kg_dtw_best_tvt`, `kg_dtw_mean_tvt`;
+  - `kg_dwt_best_tvt`, `kg_dwt_mean_tvt`;
+  - `kg_beam_tvt`, `kg_ncc_tvt`;
+  - `public_family_path`.
+  These need a feature-table candidate export pass before the oracle is
+  complete.
+- Result:
+  - rows: `3,783,989`;
+  - wells: `773`;
+  - production-like candidates: `9`;
+  - privileged diagnostic candidates: `12`;
+  - best production-like individual candidate: `schema10_oof_raw`
+    (`10.750713` RMSE);
+  - best diagnostic privileged individual candidate: `geo_consensus`
+    (`0.973869` RMSE), matching the Surface Teacher result.
+- Production-like oracle scores:
+  - row oracle: `7.937209`;
+  - chunk512 oracle: `8.102471`;
+  - chunk1024 oracle: `8.276168`;
+  - thirds oracle: `8.571232`;
+  - smooth top-2 thirds oracle: `8.701084`;
+  - whole-well oracle: `9.271468`;
+  - smooth top-3 thirds oracle: `9.569256`.
+- Privileged diagnostic oracle scores:
+  - row oracle: `0.668296`;
+  - smooth top-2 thirds oracle: `0.738854`;
+  - whole-well oracle: `0.833150`.
+- Decision under the requested gate:
+  - `smooth_top2_thirds_oracle = 8.701084`, so **STRONG GO** for a router
+    experiment;
+  - but this strong signal is mostly "can choose between schema10 vs weak
+    baseline/student-like paths by segment", not proof that existing
+    production candidates alone can beat public LB without a robust router;
+  - next required step is exporting full row-level PF/DTW/DWT/beam/NCC OOF
+    candidates before building NN/router models.
+- Validation:
+  - `uv run ruff check rogii/candidate_bank.py`: passed;
+  - `uv run python -m compileall rogii/candidate_bank.py`: passed;
+  - `make check`: passed;
+  - `uv run pytest -q tests/test_surface_student.py`: `3 passed`.
+
+### Experiment 2 - Surface Student v1
+
+- Added `rogii/surface_student_v1.py`, an alignment-rich CatBoost student
+  branch. It is separate from v0 and does not modify the main stack.
+- Added `configs/surface_student_v1.yml`.
+- Guardrails:
+  - force `features.include_direct_path_features: false`;
+  - force `kaggle_top.hmm_enabled: false`;
+  - exclude `kg_path_*`, `stage1*`, `stage12*`, `cem_*`, `geo_consensus*`,
+    `geo_tailfit*`, and `crosswell*` from the student feature set;
+  - teacher and `_true` columns are targets/diagnostics only, never input
+    features.
+- v1 inputs come from the normal fold-safe schema feature builder, so they
+  include geometry/GR/typewell/alignment/spatial-context groups when present:
+  `kg_pf*`, `kg_dtw*`, `kg_dwt*`, `kg_beam*`, `kg_ncc*`, `kg_form*`,
+  `kg_dense*`, `kg_signal*`, plus derived disagreement and trajectory
+  features.
+- Heads:
+  - direct supervised head: `TVT - schema10_oof_raw`;
+  - teacher-distillation head: `geo_teacher_tvt - last_known_tvt`, weighted
+    by teacher absolute error;
+  - six surface latent heads: `Z - true_surface_S`.
+- Outputs:
+  - `geo_student_v1_true_tvt`;
+  - `geo_student_v1_teacher_tvt`;
+  - `geo_student_v1_blend_tvt`;
+  - `surface_hat_*`, `surface_unc_*`;
+  - `student_ensemble_std`, `student_error_pred`, `student_vs_pf`,
+    `student_vs_dtw`, `student_vs_dwt`, `student_vs_schema10`;
+  - `schema10_plus_student_v1_raw` from an internal cheap integration smoke.
+- CLI:
+  - `uv run python -m rogii.surface_student_v1 --config configs/surface_student_v1.yml --data-dir data --output-dir artifacts/surface_student_v1`.
+- Logging is included from the first stage:
+  - fold-safe context/table build;
+  - selected feature count and sample columns;
+  - each CatBoost head/fold RMSE and duration;
+  - schema10+v1 integration fold RMSE and final gain.
+- Validation so far:
+  - unit tests added in `tests/test_surface_student_v1.py`.
+- Smoke:
+  - command:
+    `uv run python -m rogii.surface_student_v1 --config configs/surface_student_v1.yml --data-dir data --output-dir artifacts/surface_student_v1_smoke --max-wells 4`;
+  - rows: `18,447`;
+  - wells: `4`;
+  - selected safe features: `403`;
+  - schema10 raw RMSE on this tiny slice: `10.535630`;
+  - teacher true RMSE on this tiny slice: `0.309105`;
+  - v1 true-head RMSE: `12.107306`;
+  - v1 teacher-head RMSE: `15.721410`;
+  - v1 blend RMSE: `12.261388`;
+  - schema10 + v1 cheap integration RMSE: `9.401026`;
+  - cheap integration gain: `1.134605`.
+- Interpretation:
+  - the 4-well smoke is not a quality decision, but it validates the full
+    v1 plumbing and logging path. Full 773-well OOF is required for the
+    requested Go/No-Go thresholds.
+- Validation:
+  - `uv run ruff check rogii/surface_student_v1.py tests/test_surface_student_v1.py`: passed;
+  - `uv run pytest -q tests/test_surface_student_v1.py tests/test_surface_student.py`: `6 passed`;
+  - `uv run pytest -q`: `82 passed`;
+  - `uv run python -m compileall rogii`: passed;
+  - `make check`: passed.
+
+### Experiment 3 - VirtualGeologist v0
+
+- Added `rogii/virtual_geologist.py`, a constrained stratigraphic path
+  candidate generator around schema10 OOF.
+- Added `configs/virtual_geologist.yml`.
+- Path family is deliberately low-dimensional:
+  - `schema10_oof_raw + shift + dip * centered_hidden_frac + stretch * curvature_term`;
+  - default grid: shift `[-80, 80]` step `8`, dip `[-24, 24]`
+    step `6`, stretch fixed at `0`.
+- Costs:
+  - GR/typewell GR mismatch;
+  - typewell derivative mismatch;
+  - fold-safe surface prior penalty from `kg_form_*` / `kg_dense_*`;
+  - known/tail continuity and smoothness regularization.
+- Outputs:
+  - `vg_best_tvt`, `vg_mean_tvt`, `vg_p10_tvt`, `vg_p50_tvt`,
+    `vg_p90_tvt`;
+  - `vg_top1_tvt` ... `vg_top5_tvt`;
+  - entropy/gap/cost/deformation diagnostics.
+- Added VirtualGeologist candidate ingestion to `rogii/candidate_bank.py`
+  through `--virtual-geologist-oof`.
+- CLI:
+  - `uv run python -m rogii.virtual_geologist --config configs/virtual_geologist.yml --data-dir data --output-dir artifacts/virtual_geologist`.
+- Smoke:
+  - command:
+    `uv run python -m rogii.virtual_geologist --config configs/virtual_geologist.yml --data-dir data --output-dir artifacts/virtual_geologist_smoke --max-wells 4`;
+  - rows: `18,447`;
+  - schema10 raw RMSE on the slice: `10.535630`;
+  - `vg_best_tvt` RMSE: `12.438337`;
+  - thirds top-K oracle RMSE: `6.689492`.
+- Interpretation:
+  - standalone VG is **not** useful in this first smoke;
+  - top-K oracle has real headroom, so VG may still be useful as a candidate
+    bank/router input rather than a direct submit path.
+- Validation:
+  - `uv run ruff check rogii/virtual_geologist.py tests/test_virtual_geologist.py`: passed;
+  - `uv run pytest -q tests/test_virtual_geologist.py`: `2 passed`;
+  - `uv run python -m compileall rogii/virtual_geologist.py`: passed.
+
+### Phase 1 - Surface Teacher
+
+- Added `rogii/surface_teacher.py` as a privileged train-only teacher label
+  generator. It uses true formation surfaces only to create diagnostics and
+  future student targets; it is not wired into training, inference, or submit.
+- Public API:
+  - `build_geo_teacher_for_well(horizontal_df, typewell_df, config)`;
+  - CLI: `uv run python -m rogii.surface_teacher --data-dir data --output-dir artifacts/surface_teacher`.
+- Outputs:
+  - `artifacts/surface_teacher/teacher_rows.csv`;
+  - `artifacts/surface_teacher/teacher_by_well.csv`;
+  - `artifacts/surface_teacher/teacher_metrics.json`;
+  - `artifacts/surface_teacher/teacher_report.md`.
+- Full train-only teacher report:
+  - rows: `3,783,989`;
+  - coverage: `1.000000`;
+  - teacher vs true RMSE: `0.974129`;
+  - mean / median well RMSE: `0.212581` / `0.063135`;
+  - P90 / P95 well RMSE: `0.334386` / `0.624852`;
+  - worst well: `a959858c`, RMSE `20.449605`;
+  - long / short hidden RMSE: `0.771615` / `1.142089`.
+- Confidence calibration is useful but imperfect:
+  - lowest confidence quartile RMSE `1.797217`;
+  - middle-high confidence quartile RMSE `0.084574`;
+  - top quartile RMSE rises to `0.637693`, so Phase 2 should not blindly
+    treat confidence as a perfectly monotonic selector.
+- Validation:
+  - `uv run pytest -q tests/test_surface_teacher.py`: `5 passed`;
+  - `uv run pytest -q`: `76 passed`;
+  - `uv run python -m compileall rogii`: passed.
+- Takeaway:
+  - `SOLVER_RESULTS.md` is confirmed: true formation surfaces almost solve
+    train hidden rows, but this is privileged information and must become
+    teacher/student supervision rather than a direct submit solver.
+
 ## 2026-05-20
 
 ### Schema16: Direct Solver Outputs as GBM Features

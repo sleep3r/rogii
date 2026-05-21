@@ -1,0 +1,33 @@
+inherits: stack.yml
+
+features:
+  include_direct_path_features: false
+  num_workers: 8
+  progress_interval: 25
+  cache:
+    enabled: true
+    dir: artifacts/feature_cache_virtual_geologist
+  kaggle_top:
+    hmm_enabled: false
+
+virtual_geologist:
+  seed: 42
+  output_dir: artifacts/virtual_geologist
+  max_wells:
+  n_splits: 5
+  schema10_model_path: artifacts/clearml/ed4d9dc6c7cb479881f087fee1217253/model.pkl
+  schema10_config_path: artifacts/clearml/ed4d9dc6c7cb479881f087fee1217253/config.yml
+  schema10_oof_path: artifacts/surface_student_integration/integration_oof_predictions.parquet
+  progress_interval: 25
+  offset_grid: [-80.0, 80.0, 8.0]
+  dip_grid: [-24.0, 24.0, 6.0]
+  stretch_grid: [0.0, 0.0, 1.0]
+  top_k: 5
+  posterior_temperature: 0.35
+  huber_clip: 4.0
+  w_gr: 1.0
+  w_dgr: 0.20
+  w_surface: 0.35
+  w_known: 0.15
+  w_smooth: 0.04
+  w_tail: 0.35
