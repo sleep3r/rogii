@@ -73,6 +73,16 @@ Fast smoke test on the public sample:
 make quick-train
 ```
 
+Replay the public drift-targeting + NCC tree notebook path:
+
+```bash
+make drift-ncc-quick
+make drift-ncc-train
+```
+
+See `DRIFT_NCC_NOTEBOOK.md` for the Kaggle notebook mapping and the private
+artifact caveat.
+
 Main local training:
 
 ```bash

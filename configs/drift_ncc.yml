@@ -1,0 +1,145 @@
+seed: 42
+project_name: ROGII/Wellbore
+output_uri: s3://s3-basket-cold.wb.ru/ds-experiments
+
+data:
+  data_dir: data
+  train_dir:
+  test_dir:
+  sample_submission:
+  max_train_wells:
+  max_test_wells:
+  target_rows: hidden_only
+  clearml:
+    enabled: false
+    project:
+    name: rogii-wellbore-geology-prediction
+    version:
+    dataset_id:
+    alias:
+    cache_dir: ~/.cache/clearml/rogii
+
+features:
+  tail_windows: [25, 100, 200]
+  rolling_windows: [25, 100]
+  prediction_baseline: last_known_tvt
+  num_workers: 1
+  progress_interval: 25
+  cache:
+    enabled: true
+    dir: artifacts/feature_cache_drift_ncc
+  include_typewell: true
+  include_kaggle_top_signals: true
+  include_direct_path_features: false
+  kaggle_top:
+    beam_configs:
+      - [10, 20.0, 144.0, 2, cons]
+      - [10, 8.0, 64.0, 2, loose]
+      - [8, 35.0, 220.0, 1, vcons]
+      - [10, 14.0, 90.0, 5, sm5]
+    ncc_windows: [8, 15, 25]
+    ncc_stride: 3
+    dtw_enabled: false
+    dwt_enabled: false
+    particle_enabled: true
+    particle_count: 500
+    ancc_particle_count: 500
+    spatial_k: 15
+    dense_k: 20
+    dense_fetch: 5000
+    dense_query_chunk: 512
+    dense_samples_per_well: 60
+    robust_expert_enabled: false
+
+model:
+  base_models:
+    - id: lgb_drift
+      name: lightgbm
+      params:
+        n_estimators: 5000
+        early_stopping_rounds: 50
+        learning_rate: 0.020147779974561783
+        max_depth: 3
+        num_leaves: 577
+        min_child_samples: 367
+        subsample: 0.47604833643961175
+        colsample_bytree: 0.77243808940893
+        reg_alpha: 4.631640975811315e-05
+        reg_lambda: 2.8511185695368515
+        min_split_gain: 1.087137419084871
+    - id: xgb_drift
+      name: xgboost
+      params:
+        n_estimators: 5000
+        early_stopping_rounds: 50
+        learning_rate: 0.013393379176672826
+        max_depth: 4
+        min_child_weight: 32
+        gamma: 1.5717799053816335
+        subsample: 0.8034282764658811
+        colsample_bytree: 0.9445398843556558
+        colsample_bylevel: 0.6246461145744375
+        colsample_bynode: 0.7051914615178149
+        reg_alpha: 0.5994537656798815
+        reg_lambda: 0.0013931273790066697
+        max_delta_step: 0
+        tree_method: hist
+    - id: cb_drift
+      name: catboost
+      params:
+        iterations: 5000
+        early_stopping_rounds: 50
+        learning_rate: 0.09917318220308848
+        depth: 5
+        l2_leaf_reg: 1.906567760856773
+        bagging_temperature: 0.8001395190166533
+        random_strength: 0.03104531690728951
+        border_count: 68
+  blend:
+    method: nnls
+    iterations: 1000
+    allow_negative_weights: false
+
+validation:
+  n_splits: 5
+  fold_safe_context: true
+  final_model_strategy: full_context
+
+postprocess:
+  search_method: grid
+  progress_interval: 50
+  residual_weight: 1.0
+  residual_weight_grid: []
+  residual_clip: 250.0
+  notebook_blend:
+    enabled: true
+    pf_column: pf_ancc
+    alpha: 1.0
+    tau: 100.0
+    w_pf: 0.0
+    candidates:
+      - alpha: 1.0
+        tau: 100.0
+        w_pf: 0.0
+  smoothing:
+    enabled: true
+    window: 7
+    polyorder: 3
+    candidates:
+      - window: 7
+        polyorder: 3
+
+outputs:
+  output_dir: artifacts/drift_ncc
+  submission_path: submission.csv
+
+tracking:
+  clearml:
+    enabled: false
+    project:
+    task_name:
+    output_uri:
+    tags: [rogii, drift-ncc, notebook-replay]
+    log_artifacts: true
+    log_model: true
+    fail_on_error: false

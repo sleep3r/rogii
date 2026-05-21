@@ -207,9 +207,11 @@ class EnsembleRegressor(ResidualModel):
 
         self.oof_stack_ = oof_stack
         blend_cfg = self.model_config.get("blend") or {}
-        self.weights = fit_hill_climb_weights(
+        blend_method = str(blend_cfg.get("method", "hill_climb"))
+        self.weights = fit_blend_weights(
             oof_stack,
             y,
+            method=blend_method,
             iterations=int(blend_cfg.get("iterations", 1000)),
             alpha_grid=blend_cfg.get("alpha_grid"),
             allow_negative_weights=bool(
@@ -224,7 +226,7 @@ class EnsembleRegressor(ResidualModel):
             "type": "ensemble",
             "n_splits": len(folds),
             "base_models": base_metrics,
-            "blend_method": "hill_climb",
+            "blend_method": blend_method,
             "blend_weights": dict(
                 zip(self.base_names, [float(w) for w in self.weights], strict=True)
             ),
@@ -250,9 +252,11 @@ class EnsembleRegressor(ResidualModel):
         self.base_names = list(base_names)
         self.oof_stack_ = np.asarray(oof_stack, dtype=float)
         blend_cfg = self.model_config.get("blend") or {}
-        self.weights = fit_hill_climb_weights(
+        blend_method = str(blend_cfg.get("method", "hill_climb"))
+        self.weights = fit_blend_weights(
             self.oof_stack_,
             y,
+            method=blend_method,
             iterations=int(blend_cfg.get("iterations", 1000)),
             alpha_grid=blend_cfg.get("alpha_grid"),
             allow_negative_weights=bool(
@@ -280,7 +284,7 @@ class EnsembleRegressor(ResidualModel):
                 )
             ),
             "base_models": base_metrics,
-            "blend_method": "hill_climb",
+            "blend_method": blend_method,
             "blend_weights": dict(
                 zip(self.base_names, [float(w) for w in self.weights], strict=True)
             ),
@@ -374,6 +378,44 @@ def model_spec_name(spec: dict[str, Any], index: int) -> str:
         return str(explicit)
     name = str(spec.get("name", "model")).lower()
     return f"{name}_{index + 1}"
+
+
+def fit_blend_weights(
+    stack: np.ndarray,
+    y: np.ndarray,
+    method: str = "hill_climb",
+    iterations: int = 1000,
+    alpha_grid: list[float] | None = None,
+    allow_negative_weights: bool = False,
+) -> np.ndarray:
+    method = str(method).lower().replace("-", "_")
+    if method in {"hill_climb", "hillclimb"}:
+        return fit_hill_climb_weights(
+            stack,
+            y,
+            iterations=iterations,
+            alpha_grid=alpha_grid,
+            allow_negative_weights=allow_negative_weights,
+        )
+    if method in {"nnls", "nonnegative_least_squares"}:
+        return fit_nnls_weights(stack, y)
+    raise ValueError(f"Unsupported blend method: {method!r}.")
+
+
+def fit_nnls_weights(stack: np.ndarray, y: np.ndarray) -> np.ndarray:
+    if stack.ndim != 2 or stack.shape[1] == 0:
+        raise ValueError("NNLS blend requires a non-empty prediction stack.")
+
+    from scipy.optimize import nnls
+
+    weights, _ = nnls(np.asarray(stack, dtype=float), np.asarray(y, dtype=float))
+    total = float(weights.sum())
+    if total <= 1e-12:
+        scores = [rmse(stack[:, idx], y) for idx in range(stack.shape[1])]
+        fallback = np.zeros(stack.shape[1], dtype=float)
+        fallback[int(np.argmin(scores))] = 1.0
+        return fallback
+    return weights / total
 
 
 def fit_hill_climb_weights(
@@ -505,8 +547,35 @@ def make_catboost(params: dict[str, Any], seed: int) -> WrappedRegressor:
         defaults["od_type"] = "Iter"
         defaults["od_wait"] = int(early_stopping_rounds)
     defaults.update(params)
+    normalize_catboost_bootstrap_params(defaults, params)
     defaults["random_seed"] = seed
     return WrappedRegressor(CatBoostRegressor(**defaults), {"kind": "catboost"})
+
+
+def normalize_catboost_bootstrap_params(
+    params: dict[str, Any],
+    explicit_params: dict[str, Any] | None = None,
+) -> None:
+    """Keep CatBoost bootstrap options internally compatible.
+
+    CatBoost accepts `bagging_temperature` only for Bayesian bootstrap and
+    rejects `subsample` for Bayesian bootstrap. The project defaults to
+    Bernoulli bootstrap, while some public-notebook params only specify
+    `bagging_temperature`; normalize that combination before CatBoost sees it.
+    """
+
+    explicit_params = explicit_params or {}
+    has_bagging_temperature = params.get("bagging_temperature") not in (None, "")
+    bootstrap_type = str(params.get("bootstrap_type", "")).lower()
+
+    if has_bagging_temperature and "bootstrap_type" not in explicit_params:
+        params["bootstrap_type"] = "Bayesian"
+        bootstrap_type = "bayesian"
+
+    if bootstrap_type == "bayesian":
+        params.pop("subsample", None)
+    else:
+        params.pop("bagging_temperature", None)
 
 
 def make_single_model(config: dict[str, Any], seed: int) -> ResidualModel:

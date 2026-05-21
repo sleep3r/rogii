@@ -3,6 +3,10 @@
 This file tracks framework changes and modeling experiments. Add every serious
 run here with command, data, CV, LB, runtime, and the next decision.
 
+Note: the Phase 2/Experiments 0.5-3 implementation branch has been archived
+under `old/experiments_0_3`; the active path is now the drift-targeting + NCC
+tree replay described in `DRIFT_NCC_NOTEBOOK.md`.
+
 ## Template
 
 ```text

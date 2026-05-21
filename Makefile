@@ -9,6 +9,8 @@ DATA_DIR ?= data
 CONFIG ?= configs/stack.yml
 QUICK_CONFIG ?= configs/quick.yml
 QUICK_TRAIN_CONFIG := $(if $(filter configs/stack.yml,$(CONFIG)),$(QUICK_CONFIG),$(CONFIG))
+DRIFT_NCC_CONFIG ?= configs/drift_ncc.yml
+DRIFT_NCC_QUICK_CONFIG ?= configs/drift_ncc_quick.yml
 SUBMISSION ?= submission.csv
 MESSAGE ?= Submission
 PROJECT_NAME ?= ROGII/Wellbore
@@ -122,12 +124,12 @@ DISCUSSION_PAGES ?= 6
 DISCUSSION_SORT ?= hot top new recent
 DISCUSSION_MESSAGE_PAGE_SIZE ?= 500
 BRIEF_MAX_IDEAS ?= 160
-BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/stack_gpu_hmm.yml configs/direct_solver_policy.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/direct_solver.py rogii/path_solver_extras.py rogii/path_features.py rogii/cross_well_prior.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
+BUNDLE_SOLUTION_FILES ?= pyproject.toml configs/stack.yml configs/stack_gpu.yml configs/quick.yml configs/quick_hmm.yml configs/drift_ncc.yml configs/drift_ncc_quick.yml configs/stack_gpu_hmm.yml configs/direct_solver_policy.yml rogii/config.py rogii/clearml_data.py rogii/clearml_tracking.py rogii/features.py rogii/hmm_path.py rogii/direct_solver.py rogii/path_solver_extras.py rogii/path_features.py rogii/cross_well_prior.py rogii/top_signals.py rogii/spatial.py rogii/modeling.py rogii/pipeline.py rogii/submission.py rogii/inference.py rogii/kaggle_submit.py rogii/expert_report.py rogii/prediction_guard.py
 BUNDLE_SOLUTION_ARGS := $(foreach file,$(BUNDLE_SOLUTION_FILES),--solution-file $(file))
 BUNDLE_EXCLUDE ?= tests/
 BUNDLE_EXCLUDE_ARGS := $(foreach item,$(BUNDLE_EXCLUDE),--exclude $(item))
 
-.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train expert-report prediction-guard direct-solver-train-eval direct-solver-test direct-solver-guard direct-solver-guard-bold direct-solver-use profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
+.PHONY: install-deps download-data unzip-data ensure-data upload-clearml-data clearml-data-local-path fetch-clearml-model check-server-env train train-local train-server train-spacebridge quick-train drift-ncc-train drift-ncc-quick expert-report prediction-guard direct-solver-train-eval direct-solver-test direct-solver-guard direct-solver-guard-bold direct-solver-use profile profile-quick profile-train profile-features profile-report train-kaggle train-kaggle-dry submit submit-dry status-train logs-train status-submit logs-submit mine-code mine-discussions research-brief best-public-solution model-bundle research-db format check
 
 install-deps:
 	$(UV) sync
@@ -171,6 +173,12 @@ train-server train-spacebridge: check-server-env
 
 quick-train:
 	$(PYTHON) -m rogii --config $(QUICK_TRAIN_CONFIG)
+
+drift-ncc-train: ensure-data
+	$(PYTHON) -m rogii --config $(DRIFT_NCC_CONFIG)
+
+drift-ncc-quick:
+	$(PYTHON) -m rogii --config $(DRIFT_NCC_QUICK_CONFIG)
 
 expert-report: ensure-data
 	$(PYTHON) -m rogii.expert_report --config $(CONFIG) --output $(EXPERT_REPORT) --csv $(EXPERT_REPORT_CSV) --json $(EXPERT_REPORT_JSON) --top-n $(EXPERT_REPORT_TOP_N) $(EXPERT_REPORT_MAX_WELLS_ARG) $(EXPERT_REPORT_CONTEXT_ARG)
