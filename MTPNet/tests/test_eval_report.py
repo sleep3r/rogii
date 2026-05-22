@@ -28,6 +28,11 @@ def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_pa
             "classification_accuracy_best_mode": 0.5,
             "mode_entropy_mean": 0.7,
             "mode_usage_histogram": {"0": 1},
+            "pred_bin_oob_frac": 0.2,
+            "top1_pred_bin_oob_frac": 0.1,
+            "weighted_pred_bin_oob_frac": 0.0,
+            "pred_bin_min": -1.0,
+            "pred_bin_max": 65.0,
         },
         "sanity": {
             "shuffled_gr": {"oracle_topk_rmse_ft": 12.0},
@@ -44,4 +49,5 @@ def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_pa
     report = (run_dir / "geometry_report.md").read_text(encoding="utf-8")
     assert loaded["valid"]["oracle_topk_rmse_ft"] == 8.0
     assert "MTP_V0_GEOMETRY_REPORT" in report
+    assert "pred_bin_oob_frac: 0.2" in report
     assert "parquet rows: 1" in report

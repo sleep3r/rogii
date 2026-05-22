@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from mtpnet.config import MTPConfig, TrainConfig
-from mtpnet.train import _evaluate, resolve_device
+from mtpnet.train import _epoch_progress_record, _evaluate, resolve_device
 from mtpnet.windows import WindowSample
 
 
@@ -27,6 +27,20 @@ class FixedPredictionModel(nn.Module):
             dtype=torch.float32,
             device=x.device,
         )[:batch]
+        return paths, logits
+
+
+class OOBPredictionModel(nn.Module):
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        batch = x.shape[0]
+        paths = torch.tensor(
+            [[[-1.0, 0.0], [1.0, 65.0]]],
+            dtype=torch.float32,
+            device=x.device,
+        ).repeat(batch, 1, 1)
+        logits = torch.tensor([[2.0, 0.0]], dtype=torch.float32, device=x.device).repeat(
+            batch, 1
+        )
         return paths, logits
 
 
@@ -64,8 +78,52 @@ def test_evaluate_reports_best_mode_mae_and_classification_accuracy() -> None:
     assert "target_in_crop_rate" in metrics
 
 
+def test_evaluate_reports_prediction_bin_oob_metrics() -> None:
+    cfg = MTPConfig(train=TrainConfig(batch_size=1, device="cpu"))
+    samples = [make_sample("a", np.array([0.0, 0.0]))]
+
+    metrics, predictions = _evaluate(
+        OOBPredictionModel(), samples, cfg, torch.device("cpu")
+    )
+
+    assert metrics["pred_bin_oob_frac"] == pytest.approx(0.5)
+    assert metrics["top1_pred_bin_oob_frac"] == pytest.approx(0.5)
+    assert metrics["weighted_pred_bin_oob_frac"] == pytest.approx(0.5)
+    assert metrics["pred_bin_min"] == pytest.approx(-1.0)
+    assert metrics["pred_bin_max"] == pytest.approx(65.0)
+    assert predictions.loc[0, "top1_pred_bin_oob_frac"] == pytest.approx(0.5)
+    assert predictions.loc[0, "weighted_pred_bin_oob_frac"] == pytest.approx(0.5)
+
+
 def test_auto_device_prefers_mps_when_cuda_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     assert resolve_device("auto") == torch.device("mps")
+
+
+def test_epoch_progress_record_exposes_training_log_fields() -> None:
+    record = _epoch_progress_record(
+        epoch=3,
+        train_loss=1.25,
+        valid_score=2.5,
+        valid_metrics={
+            "oracle_topk_rmse_bins": 2.0,
+            "weighted_mean_rmse_bins": 3.0,
+            "top1_rmse_bins": 4.0,
+            "oracle_topk_rmse_ft": 10.0,
+        },
+        is_best=True,
+    )
+
+    assert record == {
+        "event": "epoch",
+        "epoch": 3,
+        "train_loss": 1.25,
+        "valid_score": 2.5,
+        "valid_oracle_topk_rmse_bins": 2.0,
+        "valid_weighted_mean_rmse_bins": 3.0,
+        "valid_top1_rmse_bins": 4.0,
+        "valid_oracle_topk_rmse_ft": 10.0,
+        "is_best": True,
+    }

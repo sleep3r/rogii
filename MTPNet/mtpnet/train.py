@@ -144,6 +144,29 @@ def _selection_score(metrics: dict[str, Any]) -> float:
     )
 
 
+def _epoch_progress_record(
+    *,
+    epoch: int,
+    train_loss: float,
+    valid_score: float,
+    valid_metrics: dict[str, Any],
+    is_best: bool,
+) -> dict[str, Any]:
+    return {
+        "event": "epoch",
+        "epoch": int(epoch),
+        "train_loss": float(train_loss),
+        "valid_score": float(valid_score),
+        "valid_oracle_topk_rmse_bins": float(valid_metrics["oracle_topk_rmse_bins"]),
+        "valid_weighted_mean_rmse_bins": float(
+            valid_metrics["weighted_mean_rmse_bins"]
+        ),
+        "valid_top1_rmse_bins": float(valid_metrics["top1_rmse_bins"]),
+        "valid_oracle_topk_rmse_ft": float(valid_metrics["oracle_topk_rmse_ft"]),
+        "is_best": bool(is_best),
+    }
+
+
 def _bins_to_tvt(paths: np.ndarray, crop_tvt: np.ndarray) -> np.ndarray:
     paths_np = np.asarray(paths, dtype=np.float32)
     crops_np = np.asarray(crop_tvt, dtype=np.float32)
@@ -185,6 +208,10 @@ def _evaluate(
     classification_correct: list[float] = []
     mode_entropy: list[float] = []
     target_bin_values: list[float] = []
+    pred_bin_values: list[float] = []
+    pred_bin_oob: list[float] = []
+    top1_pred_bin_oob: list[float] = []
+    weighted_pred_bin_oob: list[float] = []
     best_modes: list[int] = []
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
@@ -200,6 +227,9 @@ def _evaluate(
             top1 = prob.argmax(dim=1)
             batch_idx = torch.arange(paths.shape[0], device=device)
             weighted = (paths * prob[:, :, None]).sum(dim=1)
+            max_bin = float(crop_tvt.shape[1] - 1)
+            path_oob = (paths < 0.0) | (paths > max_bin)
+            weighted_oob = (weighted < 0.0) | (weighted > max_bin)
             top3_idx = torch.topk(prob, k=min(3, prob.shape[1]), dim=1).indices
             top3_err = torch.gather(err, 1, top3_idx).min(dim=1).values
             oracle_err, best_k = err.min(dim=1)
@@ -212,8 +242,14 @@ def _evaluate(
             errors_best_mae.extend(mae[batch_idx, best_k].cpu().tolist())
             classification_correct.extend((top1 == best_k).float().cpu().tolist())
             mode_entropy.extend(entropy.cpu().tolist())
+            pred_bin_oob.extend(path_oob.float().mean(dim=(1, 2)).cpu().tolist())
+            top1_pred_bin_oob.extend(
+                path_oob[batch_idx, top1].float().mean(dim=1).cpu().tolist()
+            )
+            weighted_pred_bin_oob.extend(weighted_oob.float().mean(dim=1).cpu().tolist())
             best_modes.extend(best_k.cpu().tolist())
             paths_np = paths.cpu().numpy()
+            pred_bin_values.extend(paths_np.reshape(-1).tolist())
             target_tvt_np = target_tvt.cpu().numpy()
             crop_tvt_np = crop_tvt.cpu().numpy()
             path_tvt = _bins_to_tvt(paths_np, crop_tvt_np)
@@ -265,6 +301,12 @@ def _evaluate(
                                 ((weighted_tvt[i] - target_tvt_np[i]) ** 2).mean()
                             )
                         ),
+                        "top1_pred_bin_oob_frac": float(
+                            path_oob[i, int(top1_np[i])].float().mean().cpu()
+                        ),
+                        "weighted_pred_bin_oob_frac": float(
+                            weighted_oob[i].float().mean().cpu()
+                        ),
                         "top1_pred_bins": paths_np[i, int(top1_np[i])].tolist(),
                         "best_pred_bins": paths_np[i, int(best_k_np[i])].tolist(),
                         "weighted_pred_bins": weighted_bins_np[i].tolist(),
@@ -297,6 +339,11 @@ def _evaluate(
         "mode_entropy_mean": float(np.mean(mode_entropy)),
         "target_bin_min": float(np.min(target_bin_values)),
         "target_bin_max": float(np.max(target_bin_values)),
+        "pred_bin_oob_frac": float(np.mean(pred_bin_oob)),
+        "top1_pred_bin_oob_frac": float(np.mean(top1_pred_bin_oob)),
+        "weighted_pred_bin_oob_frac": float(np.mean(weighted_pred_bin_oob)),
+        "pred_bin_min": float(np.min(pred_bin_values)),
+        "pred_bin_max": float(np.max(pred_bin_values)),
         "mode_usage_histogram": mode_hist,
     }
     return metrics, pd.DataFrame(rows)
@@ -390,6 +437,14 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('shuffled_gr', 'oracle_topk_rmse_ft'))}",
         "  no_history baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
+        "",
+        "extra:",
+        f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
+        f"  top1_pred_bin_oob_frac: {valid.get('top1_pred_bin_oob_frac', 'n/a')}",
+        "  weighted_pred_bin_oob_frac: "
+        f"{valid.get('weighted_pred_bin_oob_frac', 'n/a')}",
+        f"  pred_bin_min: {valid.get('pred_bin_min', 'n/a')}",
+        f"  pred_bin_max: {valid.get('pred_bin_max', 'n/a')}",
     ]
     if parquet_rows is not None:
         lines.extend(["", f"parquet rows: {parquet_rows}"])
@@ -450,17 +505,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
         valid_metrics, _ = _evaluate(model, valid_samples, cfg, device)
+        train_loss = float(np.mean(losses))
         valid_score = _selection_score(valid_metrics)
-        history.append(
-            {
-                "epoch": float(epoch),
-                "train_loss": float(np.mean(losses)),
-                "valid_score": valid_score,
-                "valid_oracle_topk_rmse_bins": valid_metrics["oracle_topk_rmse_bins"],
-                "valid_weighted_mean_rmse_bins": valid_metrics["weighted_mean_rmse_bins"],
-                "valid_top1_rmse_bins": valid_metrics["top1_rmse_bins"],
-            }
-        )
+        is_best = valid_score < best_valid
         if valid_score < best_valid:
             best_valid = valid_score
             best_epoch = epoch
@@ -473,6 +520,15 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 },
                 checkpoint_dir / "best.pt",
             )
+        progress = _epoch_progress_record(
+            epoch=epoch,
+            train_loss=train_loss,
+            valid_score=valid_score,
+            valid_metrics=valid_metrics,
+            is_best=is_best,
+        )
+        history.append(progress)
+        print(json.dumps(progress), flush=True)
 
     checkpoint = torch.load(checkpoint_dir / "best.pt", map_location=device)
     model.load_state_dict(checkpoint["model"])
