@@ -1,0 +1,44 @@
+data:
+  data_dir: data
+  train_dir: data/train
+  test_dir: data/test
+  k_wells: -1
+  copy_from: ../old/data
+
+window:
+  rows_per_step: 32
+  history_steps: 8
+  future_steps: 16
+  vertical_bins: 64
+  vertical_radius_ft: 160.0
+  stride_steps: 4
+  max_windows_per_well: 64
+  channels: [gr_diff, abs_gr_diff, history_mask, history_sdf, finite_mask]
+
+model:
+  k_modes: 8
+  conv_channels: [16, 32, 64, 128]
+  hidden_dims: [512, 1024]
+  dropout: 0.05
+
+loss:
+  path_loss: mae
+  alpha_cls: 0.2
+  smooth_lambda: 0.01
+
+train:
+  batch_size: 64
+  epochs: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
+  num_workers: 0
+  seed: 42
+
+validation:
+  valid_fraction: 0.2
+  seed: 42
+
+run:
+  name: mtp_v0
+  output_dir: artifacts/mtp_v0
