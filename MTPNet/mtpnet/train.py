@@ -18,6 +18,7 @@ from .config import MTPConfig, load_config
 from .io import discover_wells, load_well
 from .loss import mtp_loss
 from .model import MTPNet
+from .priors import PriorTables, load_prior_tables
 from .windows import (
     WindowDataset,
     WindowSample,
@@ -68,9 +69,16 @@ def resolve_device(name: str) -> torch.device:
 def build_all_windows(cfg: MTPConfig) -> list[WindowSample]:
     samples: list[WindowSample] = []
     skipped: list[str] = []
+    prior_tables = load_prior_tables(cfg.priors)
     for well in discover_wells(cfg.data):
         horizontal, typewell = load_well(well)
-        well_samples = build_windows_for_well(well.well_id, horizontal, typewell, cfg.window)
+        well_samples = build_windows_for_well(
+            well.well_id,
+            horizontal,
+            typewell,
+            cfg.window,
+            prior_tables=prior_tables,
+        )
         if not well_samples:
             skipped.append(well.well_id)
             continue
@@ -86,6 +94,7 @@ def build_windows_for_wells(
     *,
     history_mode: str,
     center_source: str,
+    prior_tables: PriorTables | None = None,
 ) -> list[WindowSample]:
     samples: list[WindowSample] = []
     skipped: list[str] = []
@@ -98,6 +107,7 @@ def build_windows_for_wells(
             cfg.window,
             history_mode=history_mode,
             center_source=center_source,
+            prior_tables=prior_tables,
         )
         if not well_samples:
             skipped.append(well.well_id)
@@ -112,7 +122,11 @@ def build_windows_for_wells(
 
 
 def _build_sample_type_windows(
-    wells: list[Any], cfg: MTPConfig, sample_type: str
+    wells: list[Any],
+    cfg: MTPConfig,
+    sample_type: str,
+    *,
+    prior_tables: PriorTables | None = None,
 ) -> list[WindowSample]:
     if sample_type not in SAMPLE_TYPE_TO_WINDOW_ARGS:
         raise ValueError(f"Unsupported sample_type: {sample_type}")
@@ -122,6 +136,7 @@ def _build_sample_type_windows(
         cfg,
         history_mode=history_mode,
         center_source=center_source,
+        prior_tables=prior_tables,
     )
 
 
@@ -172,6 +187,7 @@ def split_samples(
 
 def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
     wells = discover_wells(cfg.data)
+    prior_tables = load_prior_tables(cfg.priors)
     well_ids = [well.well_id for well in wells]
     train_ids, valid_ids = split_wells(
         well_ids, cfg.validation.valid_fraction, cfg.validation.seed
@@ -181,7 +197,9 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
     valid_wells = [by_id[well_id] for well_id in valid_ids]
     if cfg.window.train_sample_mix:
         train_buckets = {
-            sample_type: _build_sample_type_windows(train_wells, cfg, sample_type)
+            sample_type: _build_sample_type_windows(
+                train_wells, cfg, sample_type, prior_tables=prior_tables
+            )
             for sample_type in cfg.window.train_sample_mix
         }
         train_samples, train_mix_counts = _mix_train_samples(
@@ -193,6 +211,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
             cfg,
             history_mode=cfg.window.train_history_mode,
             center_source=cfg.window.train_center_source,
+            prior_tables=prior_tables,
         )
         train_buckets = {"legacy_train": train_samples}
         train_mix_counts = {"legacy_train": len(train_samples)}
@@ -200,7 +219,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
     if cfg.window.valid_sample_types:
         valid_sets = {
             VALID_SET_NAMES.get(sample_type, f"valid_{sample_type}"): _build_sample_type_windows(
-                valid_wells, cfg, sample_type
+                valid_wells, cfg, sample_type, prior_tables=prior_tables
             )
             for sample_type in cfg.window.valid_sample_types
         }
@@ -216,6 +235,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
             cfg,
             history_mode=cfg.window.valid_history_mode,
             center_source=cfg.window.valid_center_source,
+            prior_tables=prior_tables,
         )
         primary_valid_name = "valid"
         valid_sets = {primary_valid_name: valid_samples}
@@ -296,6 +316,25 @@ def _ensure_parquet_engine() -> None:
     )
 
 
+def _rankdata(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values)
+    ranks = np.empty_like(order, dtype=np.float32)
+    ranks[order] = np.arange(len(values), dtype=np.float32)
+    return ranks
+
+
+def _spearman(x: np.ndarray, y: np.ndarray) -> float:
+    if len(x) < 2:
+        return float("nan")
+    rx = _rankdata(np.asarray(x, dtype=np.float32))
+    ry = _rankdata(np.asarray(y, dtype=np.float32))
+    sx = float(rx.std())
+    sy = float(ry.std())
+    if sx == 0.0 or sy == 0.0:
+        return float("nan")
+    return float(np.corrcoef(rx, ry)[0, 1])
+
+
 def _evaluate(
     model: MTPNet, samples: list[WindowSample], cfg: MTPConfig, device: torch.device
 ) -> tuple[dict[str, Any], pd.DataFrame]:
@@ -305,11 +344,13 @@ def _evaluate(
     errors_weighted: list[float] = []
     errors_oracle: list[float] = []
     errors_top3: list[float] = []
+    errors_top5: list[float] = []
     errors_best_mae: list[float] = []
     errors_top1_ft: list[float] = []
     errors_weighted_ft: list[float] = []
     errors_oracle_ft: list[float] = []
     errors_top3_ft: list[float] = []
+    errors_top5_ft: list[float] = []
     target_in_crop: list[float] = []
     target_at_edge: list[float] = []
     classification_correct: list[float] = []
@@ -321,6 +362,11 @@ def _evaluate(
     top1_pred_bin_oob: list[float] = []
     weighted_pred_bin_oob: list[float] = []
     best_modes: list[int] = []
+    best_mode_ranks: list[float] = []
+    best_mode_top1: list[float] = []
+    best_mode_top3: list[float] = []
+    best_mode_top5: list[float] = []
+    logit_error_spearman: list[float] = []
     bounded_output = bool(getattr(model, "bounded_output", cfg.model.bounded_output))
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
@@ -346,16 +392,30 @@ def _evaluate(
             raw_path_oob_batch = (raw_paths < 0.0) | (raw_paths > max_bin)
             weighted_oob = (weighted < 0.0) | (weighted > max_bin)
             top3_idx = torch.topk(prob, k=min(3, prob.shape[1]), dim=1).indices
+            top5_idx = torch.topk(prob, k=min(5, prob.shape[1]), dim=1).indices
             top3_err = torch.gather(err, 1, top3_idx).min(dim=1).values
+            top5_err = torch.gather(err, 1, top5_idx).min(dim=1).values
             oracle_err, best_k = err.min(dim=1)
+            logit_order = torch.argsort(logits, dim=1, descending=True)
+            rank_positions = torch.empty_like(logit_order)
+            rank_values = torch.arange(logits.shape[1], device=device)[None, :].expand_as(
+                logit_order
+            )
+            rank_positions.scatter_(1, logit_order, rank_values)
+            best_rank = rank_positions[batch_idx, best_k] + 1
             errors_top1.extend(err[batch_idx, top1].cpu().tolist())
             errors_weighted.extend(
                 torch.sqrt(((weighted - target) ** 2).mean(dim=-1)).cpu().tolist()
             )
             errors_oracle.extend(oracle_err.cpu().tolist())
             errors_top3.extend(top3_err.cpu().tolist())
+            errors_top5.extend(top5_err.cpu().tolist())
             errors_best_mae.extend(mae[batch_idx, best_k].cpu().tolist())
             classification_correct.extend((top1 == best_k).float().cpu().tolist())
+            best_mode_ranks.extend(best_rank.float().cpu().tolist())
+            best_mode_top1.extend((best_rank <= 1).float().cpu().tolist())
+            best_mode_top3.extend((best_rank <= 3).float().cpu().tolist())
+            best_mode_top5.extend((best_rank <= 5).float().cpu().tolist())
             mode_entropy.extend(entropy.cpu().tolist())
             pred_bin_oob.extend(path_oob.float().mean(dim=(1, 2)).cpu().tolist())
             raw_path_oob.extend(
@@ -377,6 +437,11 @@ def _evaluate(
             top1_np = top1.cpu().numpy()
             best_k_np = best_k.cpu().numpy()
             top3_idx_np = top3_idx.cpu().numpy()
+            top5_idx_np = top5_idx.cpu().numpy()
+            logits_np = logits.cpu().numpy()
+            err_np = err.cpu().numpy()
+            for i in range(paths_np.shape[0]):
+                logit_error_spearman.append(_spearman(logits_np[i], err_np[i]))
             batch_indices_np = np.arange(paths_np.shape[0])
             errors_top1_ft.extend(ft_err[batch_indices_np, top1_np].tolist())
             errors_weighted_ft.extend(
@@ -385,6 +450,9 @@ def _evaluate(
             errors_oracle_ft.extend(ft_err.min(axis=1).tolist())
             errors_top3_ft.extend(
                 np.take_along_axis(ft_err, top3_idx_np, axis=1).min(axis=1).tolist()
+            )
+            errors_top5_ft.extend(
+                np.take_along_axis(ft_err, top5_idx_np, axis=1).min(axis=1).tolist()
             )
             crop_lo = crop_tvt_np[:, :1]
             crop_hi = crop_tvt_np[:, -1:]
@@ -410,6 +478,7 @@ def _evaluate(
                         "sample_type": batch["sample_type"][i],
                         "top1_mode": int(top1[i].cpu()),
                         "best_mode": int(best_k[i].cpu()),
+                        "best_mode_rank_by_logit": int(best_rank[i].cpu()),
                         "top1_rmse_bins": float(err[i, top1[i]].cpu()),
                         "oracle_rmse_bins": float(oracle_err[i].cpu()),
                         "best_mode_mae_bins": float(mae[i, best_k[i]].cpu()),
@@ -450,14 +519,24 @@ def _evaluate(
         "weighted_mean_rmse_bins": float(np.mean(errors_weighted)),
         "oracle_topk_rmse_bins": float(np.mean(errors_oracle)),
         "oracle_top3_rmse_bins": float(np.mean(errors_top3)),
+        "oracle_top3_by_logit_rmse_bins": float(np.mean(errors_top3)),
+        "oracle_top5_by_logit_rmse_bins": float(np.mean(errors_top5)),
         "best_mode_mae_bins": float(np.mean(errors_best_mae)),
         "top1_rmse_ft": float(np.mean(errors_top1_ft)),
         "weighted_mean_rmse_ft": float(np.mean(errors_weighted_ft)),
         "oracle_topk_rmse_ft": float(np.mean(errors_oracle_ft)),
         "oracle_top3_rmse_ft": float(np.mean(errors_top3_ft)),
+        "oracle_top3_by_logit_rmse_ft": float(np.mean(errors_top3_ft)),
+        "oracle_top5_by_logit_rmse_ft": float(np.mean(errors_top5_ft)),
         "target_in_crop_rate": float(np.mean(target_in_crop)),
         "target_at_crop_edge_frac": float(np.mean(target_at_edge)),
         "classification_accuracy_best_mode": float(np.mean(classification_correct)),
+        "best_mode_rank_by_logit_mean": float(np.mean(best_mode_ranks)),
+        "best_mode_rank_by_logit_median": float(np.median(best_mode_ranks)),
+        "best_mode_top1_rate": float(np.mean(best_mode_top1)),
+        "best_mode_top3_rate": float(np.mean(best_mode_top3)),
+        "best_mode_top5_rate": float(np.mean(best_mode_top5)),
+        "logit_error_spearman": float(np.nanmean(logit_error_spearman)),
         "mode_entropy_mean": float(np.mean(mode_entropy)),
         "target_bin_min": float(np.min(target_bin_values)),
         "target_bin_max": float(np.max(target_bin_values)),
@@ -477,6 +556,50 @@ def _channel_indices(cfg: MTPConfig, names: set[str]) -> list[int]:
     return [index for index, name in enumerate(cfg.window.channels) if name in names]
 
 
+class _StaticModeModel(torch.nn.Module):
+    bounded_output = True
+
+    def __init__(self, cfg: MTPConfig, height: int, future_steps: int) -> None:
+        super().__init__()
+        self.height = height
+        self.future_steps = future_steps
+        k_modes = cfg.model.k_modes
+        max_bin = float(height - 1)
+        center = max_bin / 2.0
+        span = min(float(cfg.model.mode_bias_span_bins), center)
+        self.register_buffer(
+            "centers", torch.linspace(center - span, center + span, k_modes)
+        )
+        self.register_buffer("logits", -torch.abs(self.centers - center))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = x.shape[0]
+        paths = self.centers[None, :, None].expand(
+            batch, len(self.centers), self.future_steps
+        )
+        logits = self.logits[None, :].expand(batch, len(self.centers))
+        return paths.to(x.device), logits.to(x.device)
+
+
+def _static_mode_metrics(
+    samples: list[WindowSample], cfg: MTPConfig, device: torch.device
+) -> dict[str, Any]:
+    first = samples[0]
+    model = _StaticModeModel(
+        cfg, height=first.x.shape[1], future_steps=cfg.window.future_steps
+    ).to(device)
+    metrics, _ = _evaluate(model, samples, cfg, device)
+    return {
+        "static_top1_rmse_ft": metrics["top1_rmse_ft"],
+        "static_weighted_mean_rmse_ft": metrics["weighted_mean_rmse_ft"],
+        "static_oracle_topk_rmse_ft": metrics["oracle_topk_rmse_ft"],
+        "static_oracle_top3_by_logit_rmse_ft": metrics[
+            "oracle_top3_by_logit_rmse_ft"
+        ],
+        "static_best_mode_top3_rate": metrics["best_mode_top3_rate"],
+    }
+
+
 def _sanity_samples(
     samples: list[WindowSample],
     cfg: MTPConfig,
@@ -487,6 +610,18 @@ def _sanity_samples(
         cfg, {"gr_diff", "abs_gr_diff", "gr_z_diff", "dgr_diff"}
     )
     history_channels = _channel_indices(cfg, {"history_mask", "history_sdf"})
+    prior_channels = _channel_indices(
+        cfg,
+        {
+            "base_sdf",
+            "b2_sdf",
+            "a_p50_sdf",
+            "a_density",
+            "a_p10_p90_band",
+            "base_offset_value",
+            "b2_delta_value",
+        },
+    )
     rng = np.random.default_rng(cfg.train.seed + 1009)
     transformed: list[WindowSample] = []
     for sample in samples:
@@ -497,9 +632,20 @@ def _sanity_samples(
                     x[channel_index, row_index] = rng.permutation(
                         x[channel_index, row_index]
                     )
+        elif kind == "no_gr":
+            for channel_index in gr_channels:
+                x[channel_index] = 0.0
         elif kind == "no_history":
             for channel_index in history_channels:
                 x[channel_index] = 0.0
+        elif kind == "no_base_b2_a":
+            for channel_index in prior_channels:
+                x[channel_index] = 0.0
+        elif kind == "base_b2_a_only":
+            keep = set(prior_channels)
+            for channel_index in range(x.shape[0]):
+                if channel_index not in keep:
+                    x[channel_index] = 0.0
         else:
             raise ValueError(f"Unsupported sanity sample kind: {kind}")
         transformed.append(replace(sample, x=x))
@@ -529,7 +675,9 @@ def write_geometry_report(
     sanity = metrics.get("sanity", {})
     run_name = str(metrics.get("run_name", ""))
     title = (
-        "MTP_V0_2_MIXED_REPORT"
+        "MTP_V1_CONDITIONING_REPORT"
+        if "mtp_v1" in run_name
+        else "MTP_V0_2_MIXED_REPORT"
         if "mtp_v0_2" in run_name
         else "MTP_V0_1_DIVERSITY_REPORT"
         if "mtp_v0_1" in run_name
@@ -563,12 +711,50 @@ def write_geometry_report(
         f"{valid.get('classification_accuracy_best_mode', 'n/a')}",
         f"  mode_usage_histogram: {valid.get('mode_usage_histogram', 'n/a')}",
         f"  entropy mean: {valid.get('mode_entropy_mean', 'n/a')}",
+        f"  best_mode_rank_mean: {valid.get('best_mode_rank_by_logit_mean', 'n/a')}",
+        f"  best_mode_rank_median: {valid.get('best_mode_rank_by_logit_median', 'n/a')}",
+        f"  best_mode_top1_rate: {valid.get('best_mode_top1_rate', 'n/a')}",
+        f"  best_mode_top3_rate: {valid.get('best_mode_top3_rate', 'n/a')}",
+        f"  best_mode_top5_rate: {valid.get('best_mode_top5_rate', 'n/a')}",
+        f"  logit_error_spearman: {valid.get('logit_error_spearman', 'n/a')}",
+        "  oracle_top3_by_logit_ft: "
+        f"{valid.get('oracle_top3_by_logit_rmse_ft', 'n/a')}",
+        "  oracle_top5_by_logit_ft: "
+        f"{valid.get('oracle_top5_by_logit_rmse_ft', 'n/a')}",
         "",
         "sanity:",
+        "  no_GR baseline top1_ft: "
+        f"{_metric_value(sanity, ('no_gr', 'top1_rmse_ft'))}",
+        "  no_GR baseline weighted_ft: "
+        f"{_metric_value(sanity, ('no_gr', 'weighted_mean_rmse_ft'))}",
+        "  no_GR baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('no_gr', 'oracle_topk_rmse_ft'))}",
         "  shuffled_GR baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('shuffled_gr', 'oracle_topk_rmse_ft'))}",
         "  no_history baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
+        "  no_base_b2_a baseline top1_ft: "
+        f"{_metric_value(sanity, ('no_base_b2_a', 'top1_rmse_ft'))}",
+        "  no_base_b2_a baseline weighted_ft: "
+        f"{_metric_value(sanity, ('no_base_b2_a', 'weighted_mean_rmse_ft'))}",
+        "  no_base_b2_a baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('no_base_b2_a', 'oracle_topk_rmse_ft'))}",
+        "  base_b2_a_only baseline top1_ft: "
+        f"{_metric_value(sanity, ('base_b2_a_only', 'top1_rmse_ft'))}",
+        "  base_b2_a_only baseline weighted_ft: "
+        f"{_metric_value(sanity, ('base_b2_a_only', 'weighted_mean_rmse_ft'))}",
+        "  base_b2_a_only baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('base_b2_a_only', 'oracle_topk_rmse_ft'))}",
+        "",
+        "static modes:",
+        "  static_top1_ft: "
+        f"{_metric_value(metrics, ('static_modes', 'static_top1_rmse_ft'))}",
+        "  static_weighted_ft: "
+        f"{_metric_value(metrics, ('static_modes', 'static_weighted_mean_rmse_ft'))}",
+        "  static_oracle_topK_ft: "
+        f"{_metric_value(metrics, ('static_modes', 'static_oracle_topk_rmse_ft'))}",
+        "  static_oracle_top3_by_logit_ft: "
+        f"{_metric_value(metrics, ('static_modes', 'static_oracle_top3_by_logit_rmse_ft'))}",
         "",
         "extra:",
         "  bounded_output: "
@@ -578,6 +764,8 @@ def write_geometry_report(
         f"  cls_warmup_epochs: {_metric_value(metrics, ('loss', 'cls_warmup_epochs'))}",
         f"  entropy_lambda: {_metric_value(metrics, ('loss', 'entropy_lambda'))}",
         f"  diversity_lambda: {_metric_value(metrics, ('loss', 'diversity_lambda'))}",
+        f"  soft_prob_alpha: {_metric_value(metrics, ('loss', 'soft_prob_alpha'))}",
+        f"  soft_prob_tau_bins: {_metric_value(metrics, ('loss', 'soft_prob_tau_bins'))}",
         "  raw_path_oob_frac_before_bound: "
         f"{valid.get('raw_path_oob_frac_before_bound', 'n/a')}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
@@ -704,6 +892,12 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         )
     train_metrics, _ = _evaluate(model, train_samples, cfg, device)
     sanity_metrics = {
+        "no_gr": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="no_gr"),
+            cfg,
+            device,
+        )[0],
         "shuffled_gr": _evaluate(
             model,
             _sanity_samples(valid_samples, cfg, kind="shuffled_gr"),
@@ -713,6 +907,18 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         "no_history": _evaluate(
             model,
             _sanity_samples(valid_samples, cfg, kind="no_history"),
+            cfg,
+            device,
+        )[0],
+        "no_base_b2_a": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="no_base_b2_a"),
+            cfg,
+            device,
+        )[0],
+        "base_b2_a_only": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="base_b2_a_only"),
             cfg,
             device,
         )[0],
@@ -745,7 +951,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             "entropy_final_lambda": cfg.loss.entropy_final_lambda,
             "diversity_lambda": cfg.loss.diversity_lambda,
             "diversity_margin_bins": cfg.loss.diversity_margin_bins,
+            "soft_prob_alpha": cfg.loss.soft_prob_alpha,
+            "soft_prob_tau_bins": cfg.loss.soft_prob_tau_bins,
         },
+        "priors": _json_safe_config(cfg)["priors"],
+        "static_modes": _static_mode_metrics(valid_samples, cfg, device),
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),
         "best_valid_oracle_topk_rmse_bins": valid_metrics[

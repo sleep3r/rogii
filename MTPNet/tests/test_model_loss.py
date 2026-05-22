@@ -127,3 +127,28 @@ def test_mtp_loss_entropy_reward_and_diversity_margin() -> None:
     assert high_metrics["entropy_loss"] > low_metrics["entropy_loss"]
     assert high_loss.item() < low_loss.item()
     assert high_metrics["diversity_loss"] == pytest.approx(3.0)
+
+
+def test_mtp_loss_soft_probability_calibration_prefers_error_order() -> None:
+    target = torch.tensor([[0.0, 0.0]])
+    pred = torch.tensor([[[0.0, 0.0], [2.0, 2.0], [6.0, 6.0]]], requires_grad=True)
+    aligned_logits = torch.tensor([[3.0, 1.0, -2.0]], requires_grad=True)
+    reversed_logits = torch.tensor([[-2.0, 1.0, 3.0]], requires_grad=True)
+    cfg = LossConfig(
+        alpha_cls=0.0,
+        smooth_lambda=0.0,
+        soft_prob_alpha=0.5,
+        soft_prob_tau_bins=2.0,
+    )
+
+    aligned_loss, aligned_metrics = mtp_loss(
+        pred, aligned_logits, target, cfg, epoch=1
+    )
+    reversed_loss, reversed_metrics = mtp_loss(
+        pred, reversed_logits, target, cfg, epoch=1
+    )
+
+    assert aligned_metrics["soft_prob_loss"] < reversed_metrics["soft_prob_loss"]
+    assert aligned_loss.item() < reversed_loss.item()
+    aligned_loss.backward()
+    assert aligned_logits.grad is not None

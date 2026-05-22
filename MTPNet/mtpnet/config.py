@@ -21,6 +21,22 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
+class PriorConfig:
+    enabled: bool = False
+    id_column: str = "id"
+    base_path: Path | None = None
+    b2_path: Path | None = None
+    a_path: Path | None = None
+    base_column: str = "schema10_oof_pp"
+    b2_column: str = "b2_guarded_submit"
+    b2_danger_column: str = "b2_submit_danger_score"
+    a_p50_column: str = "formation_sample_median"
+    a_p10_column: str = "formation_sample_p10"
+    a_p90_column: str = "formation_sample_p90"
+    strict: bool = True
+
+
+@dataclass(frozen=True)
 class WindowConfig:
     rows_per_step: int = 32
     history_steps: int = 8
@@ -67,6 +83,8 @@ class LossConfig:
     entropy_final_lambda: float = 0.0
     diversity_lambda: float = 0.0
     diversity_margin_bins: float = 0.0
+    soft_prob_alpha: float = 0.0
+    soft_prob_tau_bins: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,7 @@ class RunConfig:
 @dataclass(frozen=True)
 class MTPConfig:
     data: DataConfig = field(default_factory=DataConfig)
+    priors: PriorConfig = field(default_factory=PriorConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -138,6 +157,31 @@ def load_config(path: str | Path) -> MTPConfig:
         test_dir=_as_path(data_raw.get("test_dir")),
         k_wells=k_wells,
         copy_from=_as_path(data_raw.get("copy_from")),
+    )
+
+    priors_raw = _section(raw, "priors")
+    default_priors = PriorConfig()
+    priors = PriorConfig(
+        enabled=bool(priors_raw.get("enabled", default_priors.enabled)),
+        id_column=str(priors_raw.get("id_column", default_priors.id_column)),
+        base_path=_as_path(priors_raw.get("base_path")),
+        b2_path=_as_path(priors_raw.get("b2_path")),
+        a_path=_as_path(priors_raw.get("a_path")),
+        base_column=str(priors_raw.get("base_column", default_priors.base_column)),
+        b2_column=str(priors_raw.get("b2_column", default_priors.b2_column)),
+        b2_danger_column=str(
+            priors_raw.get("b2_danger_column", default_priors.b2_danger_column)
+        ),
+        a_p50_column=str(
+            priors_raw.get("a_p50_column", default_priors.a_p50_column)
+        ),
+        a_p10_column=str(
+            priors_raw.get("a_p10_column", default_priors.a_p10_column)
+        ),
+        a_p90_column=str(
+            priors_raw.get("a_p90_column", default_priors.a_p90_column)
+        ),
+        strict=bool(priors_raw.get("strict", default_priors.strict)),
     )
 
     window_raw = _section(raw, "window")
@@ -252,6 +296,12 @@ def load_config(path: str | Path) -> MTPConfig:
         diversity_margin_bins=float(
             loss_raw.get("diversity_margin_bins", default_loss.diversity_margin_bins)
         ),
+        soft_prob_alpha=float(
+            loss_raw.get("soft_prob_alpha", default_loss.soft_prob_alpha)
+        ),
+        soft_prob_tau_bins=float(
+            loss_raw.get("soft_prob_tau_bins", default_loss.soft_prob_tau_bins)
+        ),
     )
 
     train_raw = _section(raw, "train")
@@ -286,6 +336,7 @@ def load_config(path: str | Path) -> MTPConfig:
 
     return MTPConfig(
         data=data,
+        priors=priors,
         window=window,
         model=model,
         loss=loss,

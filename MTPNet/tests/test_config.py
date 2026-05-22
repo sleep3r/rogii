@@ -128,6 +128,62 @@ def test_mtp_v0_2_mixed_config_loads() -> None:
     )
 
 
+def test_v1_prior_and_soft_probability_config_loads(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "priors": {
+                    "enabled": True,
+                    "base_path": "../old/artifacts/oof_baseline/schema10_oof.parquet",
+                    "b2_path": "../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet",
+                    "a_path": "../old/artifacts/formation_plane_knn/oof_candidates.parquet",
+                    "base_column": "schema10_oof_pp",
+                    "b2_column": "b2_guarded_submit",
+                    "a_p50_column": "formation_sample_median",
+                    "a_p10_column": "formation_sample_p10",
+                    "a_p90_column": "formation_sample_p90",
+                },
+                "window": {
+                    "vertical_bins": 96,
+                    "vertical_radius_ft": 240.0,
+                    "channels": ["base_sdf", "b2_sdf", "a_density"],
+                },
+                "loss": {
+                    "alpha_cls": 0.0,
+                    "soft_prob_alpha": 0.2,
+                    "soft_prob_tau_bins": 2.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.priors.enabled is True
+    assert cfg.priors.base_column == "schema10_oof_pp"
+    assert cfg.priors.b2_column == "b2_guarded_submit"
+    assert cfg.window.vertical_bins == 96
+    assert cfg.window.vertical_radius_ft == pytest.approx(240.0)
+    assert cfg.loss.soft_prob_alpha == pytest.approx(0.2)
+    assert cfg.loss.soft_prob_tau_bins == pytest.approx(2.0)
+
+
+def test_mtp_v1_prior_conditioned_config_loads() -> None:
+    cfg = load_config(Path("configs/mtp_v1_prior_conditioned.yml"))
+
+    assert cfg.run.name == "mtp_v1_prior_conditioned"
+    assert cfg.priors.enabled is True
+    assert cfg.window.vertical_bins == 96
+    assert cfg.window.vertical_radius_ft == pytest.approx(240.0)
+    assert "base_sdf" in cfg.window.channels
+    assert "b2_sdf" in cfg.window.channels
+    assert "a_density" in cfg.window.channels
+    assert cfg.loss.alpha_cls == pytest.approx(0.0)
+    assert cfg.loss.soft_prob_alpha == pytest.approx(0.2)
+
+
 def test_zero_k_wells_fails(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError, match="data.k_wells must be -1 or a positive integer"

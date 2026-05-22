@@ -3,8 +3,14 @@ import pytest
 import torch
 from torch import Tensor, nn
 
-from mtpnet.config import MTPConfig, TrainConfig
-from mtpnet.train import _epoch_progress_record, _evaluate, resolve_device
+from mtpnet.config import MTPConfig, TrainConfig, WindowConfig
+from mtpnet.train import (
+    _epoch_progress_record,
+    _evaluate,
+    _sanity_samples,
+    _static_mode_metrics,
+    resolve_device,
+)
 from mtpnet.windows import WindowSample
 
 
@@ -101,6 +107,30 @@ def test_evaluate_reports_best_mode_mae_and_classification_accuracy() -> None:
     assert "target_in_crop_rate" in metrics
 
 
+def test_evaluate_reports_logit_ranking_metrics() -> None:
+    cfg = MTPConfig(train=TrainConfig(batch_size=2, device="cpu"))
+    samples = [
+        make_sample("a", np.array([0.0, 0.0])),
+        make_sample("b", np.array([10.0, 10.0])),
+    ]
+
+    metrics, predictions = _evaluate(FixedPredictionModel(), samples, cfg, torch.device("cpu"))
+
+    assert metrics["oracle_top3_by_logit_rmse_ft"] == pytest.approx(
+        metrics["oracle_topk_rmse_ft"]
+    )
+    assert metrics["oracle_top5_by_logit_rmse_ft"] == pytest.approx(
+        metrics["oracle_topk_rmse_ft"]
+    )
+    assert metrics["best_mode_rank_by_logit_mean"] == pytest.approx(1.5)
+    assert metrics["best_mode_rank_by_logit_median"] == pytest.approx(1.5)
+    assert metrics["best_mode_top1_rate"] == pytest.approx(0.5)
+    assert metrics["best_mode_top3_rate"] == pytest.approx(1.0)
+    assert metrics["best_mode_top5_rate"] == pytest.approx(1.0)
+    assert metrics["logit_error_spearman"] == pytest.approx(0.0)
+    assert "best_mode_rank_by_logit" in predictions.columns
+
+
 def test_evaluate_reports_prediction_bin_oob_metrics() -> None:
     cfg = MTPConfig(train=TrainConfig(batch_size=1, device="cpu"))
     samples = [make_sample("a", np.array([0.0, 0.0]))]
@@ -130,6 +160,59 @@ def test_evaluate_reports_raw_prediction_oob_before_bound() -> None:
     assert metrics["pred_bin_oob_frac"] == pytest.approx(0.0)
     assert metrics["raw_path_oob_frac_before_bound"] == pytest.approx(0.5)
     assert predictions.loc[0, "raw_path_oob_frac_before_bound"] == pytest.approx(0.5)
+
+
+def test_static_mode_baseline_reports_fixed_mode_oracle() -> None:
+    cfg = MTPConfig(
+        train=TrainConfig(batch_size=2, device="cpu"),
+        window=WindowConfig(vertical_bins=64, future_steps=2),
+    )
+    samples = [
+        make_sample("a", np.array([0.0, 0.0])),
+        make_sample("b", np.array([63.0, 63.0])),
+    ]
+
+    metrics = _static_mode_metrics(samples, cfg, torch.device("cpu"))
+
+    assert metrics["static_top1_rmse_ft"] > metrics["static_oracle_topk_rmse_ft"]
+    assert metrics["static_weighted_mean_rmse_ft"] < metrics["static_top1_rmse_ft"]
+    assert metrics["static_oracle_topk_rmse_ft"] > 0.0
+
+
+def test_sanity_samples_can_ablate_gr_history_and_prior_channels() -> None:
+    cfg = MTPConfig(
+        train=TrainConfig(seed=11),
+        window=WindowConfig(
+            channels=(
+                "gr_diff",
+                "history_mask",
+                "base_sdf",
+                "b2_sdf",
+                "a_density",
+            )
+        ),
+    )
+    sample = WindowSample(
+        x=np.ones((5, 4, 2), dtype=np.float32),
+        target_bins=np.array([0.0, 0.0], dtype=np.float32),
+        target_tvt=np.array([0.0, 0.0], dtype=np.float32),
+        history_tvt=np.array([0.0], dtype=np.float32),
+        crop_tvt=np.arange(64, dtype=np.float32),
+        well_id="a",
+        start_step=0,
+        center_tvt=0.0,
+    )
+
+    no_gr = _sanity_samples([sample], cfg, kind="no_gr")[0]
+    no_prior = _sanity_samples([sample], cfg, kind="no_base_b2_a")[0]
+    prior_only = _sanity_samples([sample], cfg, kind="base_b2_a_only")[0]
+
+    assert np.all(no_gr.x[0] == 0.0)
+    assert np.all(no_gr.x[1:] == 1.0)
+    assert np.all(no_prior.x[2:] == 0.0)
+    assert np.all(no_prior.x[:2] == 1.0)
+    assert np.all(prior_only.x[:2] == 0.0)
+    assert np.all(prior_only.x[2:] == 1.0)
 
 
 def test_auto_device_prefers_mps_when_cuda_unavailable(monkeypatch) -> None:

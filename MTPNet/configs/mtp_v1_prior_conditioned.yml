@@ -1,0 +1,89 @@
+data:
+  data_dir: data
+  train_dir: data/train
+  test_dir: data/test
+  k_wells: -1
+  copy_from: ../old/data
+
+priors:
+  enabled: true
+  base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+  b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+  a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+  base_column: schema10_oof_pp
+  b2_column: b2_guarded_submit
+  b2_danger_column: b2_submit_danger_score
+  a_p50_column: formation_sample_median
+  a_p10_column: formation_sample_p10
+  a_p90_column: formation_sample_p90
+
+window:
+  rows_per_step: 32
+  history_steps: 8
+  future_steps: 16
+  vertical_bins: 96
+  vertical_radius_ft: 240.0
+  stride_steps: 4
+  max_windows_per_well: 64
+  train_sample_mix:
+    teacher_forcing_hidden: 0.5
+    known_tail_start: 0.25
+    base_center_hidden: 0.25
+  valid_sample_types:
+    - known_tail_start
+    - base_center_hidden
+  channels:
+    - gr_diff
+    - gr_z_diff
+    - dgr_diff
+    - abs_gr_diff
+    - history_mask
+    - history_sdf
+    - finite_mask
+    - base_sdf
+    - b2_sdf
+    - a_p50_sdf
+    - a_density
+    - a_p10_p90_band
+    - base_offset_value
+    - b2_delta_value
+
+model:
+  k_modes: 8
+  conv_channels: [16, 32, 64, 128]
+  hidden_dims: [512, 1024]
+  dropout: 0.05
+  bounded_output: true
+  mode_bias_init: true
+  mode_bias_span_bins: 36.0
+
+loss:
+  path_loss: mae
+  alpha_cls: 0.0
+  cls_warmup_epochs: 0
+  alpha_cls_warmup_value: 0.0
+  soft_prob_alpha: 0.2
+  soft_prob_tau_bins: 2.0
+  smooth_lambda: 0.01
+  entropy_lambda: 0.004
+  entropy_warmup_epochs: 3
+  entropy_final_lambda: 0.001
+  diversity_lambda: 0.01
+  diversity_margin_bins: 3.0
+
+train:
+  batch_size: 64
+  epochs: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
+  num_workers: 0
+  seed: 42
+
+validation:
+  valid_fraction: 0.2
+  seed: 42
+
+run:
+  name: mtp_v1_prior_conditioned
+  output_dir: artifacts/mtp_v1_prior_conditioned
