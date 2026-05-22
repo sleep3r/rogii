@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 
 from mtpnet.eval import evaluate_run
+from mtpnet.train import write_geometry_report
 
 
 def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_path: Path) -> None:
@@ -51,3 +52,16 @@ def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_pa
     assert "MTP_V0_GEOMETRY_REPORT" in report
     assert "pred_bin_oob_frac: 0.2" in report
     assert "parquet rows: 1" in report
+
+
+def test_geometry_report_uses_v0_1_diversity_title(tmp_path: Path) -> None:
+    metrics = {
+        "run_name": "mtp_v0_1_diverse",
+        "valid": {"num_windows": 0},
+        "train": {"num_windows": 0},
+    }
+
+    write_geometry_report(metrics, tmp_path)
+
+    report = (tmp_path / "geometry_report.md").read_text(encoding="utf-8")
+    assert report.startswith("MTP_V0_1_DIVERSITY_REPORT")

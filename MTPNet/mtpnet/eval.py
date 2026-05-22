@@ -14,6 +14,7 @@ def evaluate_run(run_dir: str | Path) -> dict[str, object]:
     if not path.exists():
         raise FileNotFoundError(f"Missing metrics file: {path}")
     metrics = json.loads(path.read_text(encoding="utf-8"))
+    metrics.setdefault("run_name", run_path.name)
     predictions_path = run_path / "window_predictions.parquet"
     parquet_rows = None
     if predictions_path.exists():

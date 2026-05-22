@@ -48,13 +48,23 @@ class ModelConfig:
     conv_channels: tuple[int, ...] = (16, 32, 64, 128)
     hidden_dims: tuple[int, ...] = (512, 1024)
     dropout: float = 0.05
+    bounded_output: bool = False
+    mode_bias_init: bool = False
+    mode_bias_span_bins: float = 20.0
 
 
 @dataclass(frozen=True)
 class LossConfig:
     path_loss: str = "mae"
     alpha_cls: float = 0.2
+    cls_warmup_epochs: int = 0
+    alpha_cls_warmup_value: float = 0.0
     smooth_lambda: float = 0.01
+    entropy_lambda: float = 0.0
+    entropy_warmup_epochs: int = 0
+    entropy_final_lambda: float = 0.0
+    diversity_lambda: float = 0.0
+    diversity_margin_bins: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -186,6 +196,15 @@ def load_config(path: str | Path) -> MTPConfig:
             for v in _tuple(model_raw.get("hidden_dims"), default_model.hidden_dims)
         ),
         dropout=float(model_raw.get("dropout", default_model.dropout)),
+        bounded_output=bool(
+            model_raw.get("bounded_output", default_model.bounded_output)
+        ),
+        mode_bias_init=bool(
+            model_raw.get("mode_bias_init", default_model.mode_bias_init)
+        ),
+        mode_bias_span_bins=float(
+            model_raw.get("mode_bias_span_bins", default_model.mode_bias_span_bins)
+        ),
     )
 
     loss_raw = _section(raw, "loss")
@@ -193,7 +212,32 @@ def load_config(path: str | Path) -> MTPConfig:
     loss = LossConfig(
         path_loss=str(loss_raw.get("path_loss", default_loss.path_loss)),
         alpha_cls=float(loss_raw.get("alpha_cls", default_loss.alpha_cls)),
+        cls_warmup_epochs=int(
+            loss_raw.get("cls_warmup_epochs", default_loss.cls_warmup_epochs)
+        ),
+        alpha_cls_warmup_value=float(
+            loss_raw.get(
+                "alpha_cls_warmup_value", default_loss.alpha_cls_warmup_value
+            )
+        ),
         smooth_lambda=float(loss_raw.get("smooth_lambda", default_loss.smooth_lambda)),
+        entropy_lambda=float(
+            loss_raw.get("entropy_lambda", default_loss.entropy_lambda)
+        ),
+        entropy_warmup_epochs=int(
+            loss_raw.get(
+                "entropy_warmup_epochs", default_loss.entropy_warmup_epochs
+            )
+        ),
+        entropy_final_lambda=float(
+            loss_raw.get("entropy_final_lambda", default_loss.entropy_final_lambda)
+        ),
+        diversity_lambda=float(
+            loss_raw.get("diversity_lambda", default_loss.diversity_lambda)
+        ),
+        diversity_margin_bins=float(
+            loss_raw.get("diversity_margin_bins", default_loss.diversity_margin_bins)
+        ),
     )
 
     train_raw = _section(raw, "train")

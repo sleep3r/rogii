@@ -25,8 +25,45 @@ def _smoothness(paths: Tensor) -> Tensor:
     return torch.abs(second).mean()
 
 
+def _effective_alpha_cls(cfg: LossConfig, epoch: int | None) -> float:
+    if epoch is not None and cfg.cls_warmup_epochs > 0 and epoch <= cfg.cls_warmup_epochs:
+        return cfg.alpha_cls_warmup_value
+    return cfg.alpha_cls
+
+
+def _effective_entropy_lambda(cfg: LossConfig, epoch: int | None) -> float:
+    if cfg.entropy_warmup_epochs > 0:
+        if epoch is None or epoch <= cfg.entropy_warmup_epochs:
+            return cfg.entropy_lambda
+        return cfg.entropy_final_lambda
+    return cfg.entropy_lambda
+
+
+def _entropy(logits: Tensor) -> Tensor:
+    prob = F.softmax(logits, dim=1)
+    return -(prob * torch.log(prob.clamp_min(1e-8))).sum(dim=1).mean()
+
+
+def _diversity_margin(paths: Tensor, margin_bins: float) -> Tensor:
+    if paths.shape[1] < 2 or margin_bins <= 0.0:
+        return paths.new_tensor(0.0)
+    pair_dist = torch.abs(paths[:, :, None, :] - paths[:, None, :, :]).mean(dim=-1)
+    k_modes = paths.shape[1]
+    pair_mask = torch.triu(
+        torch.ones(k_modes, k_modes, dtype=torch.bool, device=paths.device),
+        diagonal=1,
+    )
+    pair_dist = pair_dist[:, pair_mask]
+    return F.relu(float(margin_bins) - pair_dist).mean()
+
+
 def mtp_loss(
-    pred: Tensor, logits: Tensor, target: Tensor, cfg: LossConfig
+    pred: Tensor,
+    logits: Tensor,
+    target: Tensor,
+    cfg: LossConfig,
+    *,
+    epoch: int | None = None,
 ) -> tuple[Tensor, dict[str, Any]]:
     errors = _path_error(pred, target, cfg.path_loss)
     best_k = errors.argmin(dim=1)
@@ -35,12 +72,26 @@ def mtp_loss(
     reg_loss = _path_error(best_paths[:, None, :], target, cfg.path_loss).mean()
     cls_loss = F.cross_entropy(logits, best_k)
     smooth_loss = _smoothness(best_paths)
-    loss = reg_loss + cfg.alpha_cls * cls_loss + cfg.smooth_lambda * smooth_loss
+    entropy_loss = _entropy(logits)
+    diversity_loss = _diversity_margin(pred, cfg.diversity_margin_bins)
+    alpha_cls = _effective_alpha_cls(cfg, epoch)
+    entropy_lambda = _effective_entropy_lambda(cfg, epoch)
+    loss = (
+        reg_loss
+        + alpha_cls * cls_loss
+        + cfg.smooth_lambda * smooth_loss
+        - entropy_lambda * entropy_loss
+        + cfg.diversity_lambda * diversity_loss
+    )
     metrics = {
         "loss": float(loss.detach().cpu()),
         "reg_loss": float(reg_loss.detach().cpu()),
         "cls_loss": float(cls_loss.detach().cpu()),
         "smooth_loss": float(smooth_loss.detach().cpu()),
+        "entropy_loss": float(entropy_loss.detach().cpu()),
+        "diversity_loss": float(diversity_loss.detach().cpu()),
+        "alpha_cls_effective": float(alpha_cls),
+        "entropy_lambda_effective": float(entropy_lambda),
         "best_k": best_k.detach().cpu(),
         "best_error": errors[batch_index, best_k].detach().cpu(),
     }

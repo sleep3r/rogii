@@ -403,8 +403,14 @@ def write_geometry_report(
     valid = metrics.get("valid", metrics)
     train = metrics.get("train", {})
     sanity = metrics.get("sanity", {})
+    run_name = str(metrics.get("run_name", ""))
+    title = (
+        "MTP_V0_1_DIVERSITY_REPORT"
+        if "mtp_v0_1" in run_name
+        else "MTP_V0_GEOMETRY_REPORT"
+    )
     lines = [
-        "MTP_V0_GEOMETRY_REPORT",
+        title,
         "",
         "data:",
         f"  train wells: {metrics.get('num_train_wells', 'n/a')}",
@@ -439,6 +445,12 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
         "",
         "extra:",
+        f"  bounded_output: {_metric_value(metrics, ('model', 'bounded_output'))}",
+        f"  mode_bias_init: {_metric_value(metrics, ('model', 'mode_bias_init'))}",
+        f"  alpha_cls: {_metric_value(metrics, ('loss', 'alpha_cls'))}",
+        f"  cls_warmup_epochs: {_metric_value(metrics, ('loss', 'cls_warmup_epochs'))}",
+        f"  entropy_lambda: {_metric_value(metrics, ('loss', 'entropy_lambda'))}",
+        f"  diversity_lambda: {_metric_value(metrics, ('loss', 'diversity_lambda'))}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
         f"  top1_pred_bin_oob_frac: {valid.get('top1_pred_bin_oob_frac', 'n/a')}",
         "  weighted_pred_bin_oob_frac: "
@@ -500,7 +512,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             x = batch["x"].to(device)
             target = batch["target_bins"].to(device)
             paths, logits = model(x)
-            loss, _ = mtp_loss(paths, logits, target, cfg.loss)
+            loss, _ = mtp_loss(paths, logits, target, cfg.loss, epoch=epoch)
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
@@ -551,10 +563,26 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     valid_metrics["checkpoint_epoch"] = int(checkpoint["best_epoch"])
     valid_metrics["checkpoint_score"] = float(checkpoint["best_valid_score"])
     summary = {
+        "run_name": cfg.run.name,
         "train": train_metrics,
         "valid": valid_metrics,
         "history": history,
         "sanity": sanity_metrics,
+        "model": {
+            "bounded_output": cfg.model.bounded_output,
+            "mode_bias_init": cfg.model.mode_bias_init,
+            "mode_bias_span_bins": cfg.model.mode_bias_span_bins,
+        },
+        "loss": {
+            "alpha_cls": cfg.loss.alpha_cls,
+            "cls_warmup_epochs": cfg.loss.cls_warmup_epochs,
+            "alpha_cls_warmup_value": cfg.loss.alpha_cls_warmup_value,
+            "entropy_lambda": cfg.loss.entropy_lambda,
+            "entropy_warmup_epochs": cfg.loss.entropy_warmup_epochs,
+            "entropy_final_lambda": cfg.loss.entropy_final_lambda,
+            "diversity_lambda": cfg.loss.diversity_lambda,
+            "diversity_margin_bins": cfg.loss.diversity_margin_bins,
+        },
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),
         "best_valid_oracle_topk_rmse_bins": valid_metrics[

@@ -31,6 +31,8 @@ class MTPNet(nn.Module):
         super().__init__()
         self.k_modes = cfg.k_modes
         self.future_steps = future_steps
+        self.height = height
+        self.bounded_output = cfg.bounded_output
         blocks: list[nn.Module] = []
         c_in = in_channels
         for index, c_out in enumerate(cfg.conv_channels):
@@ -58,11 +60,37 @@ class MTPNet(nn.Module):
         self.head = nn.Sequential(*head)
         self.path_head = nn.Linear(in_dim, cfg.k_modes * future_steps)
         self.logit_head = nn.Linear(in_dim, cfg.k_modes)
+        if cfg.mode_bias_init:
+            self._init_mode_bias(cfg.mode_bias_span_bins)
+
+    def _init_mode_bias(self, span_bins: float) -> None:
+        max_bin = float(self.height - 1)
+        center = max_bin / 2.0
+        span = min(float(span_bins), center - 1e-3)
+        centers = torch.linspace(
+            center - span,
+            center + span,
+            self.k_modes,
+            dtype=self.path_head.bias.dtype,
+            device=self.path_head.bias.device,
+        )
+        if self.bounded_output:
+            norm = (centers / max_bin).clamp(0.02, 0.98)
+            centers = torch.logit(norm)
+        bias = centers[:, None].repeat(1, self.future_steps).reshape(-1)
+        with torch.no_grad():
+            self.path_head.bias.copy_(bias)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         batch = x.shape[0]
         features = self.encoder(x).reshape(batch, -1)
         hidden = self.head(features)
-        paths = self.path_head(hidden).reshape(batch, self.k_modes, self.future_steps)
+        raw_paths = self.path_head(hidden).reshape(
+            batch, self.k_modes, self.future_steps
+        )
+        if self.bounded_output:
+            paths = float(self.height - 1) * torch.sigmoid(raw_paths)
+        else:
+            paths = raw_paths
         logits = self.logit_head(hidden)
         return paths, logits
