@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_parser = sub.add_parser("eval", help="Evaluate a trained MTPNet run")
     eval_parser.add_argument("--run-dir", type=Path, required=True)
+
+    stitch_parser = sub.add_parser(
+        "stitch", help="Stitch window predictions into row-level OOF candidates"
+    )
+    stitch_parser.add_argument("--run-dir", type=Path, required=True)
     return parser
 
 
@@ -38,6 +43,11 @@ def main(argv: list[str] | None = None) -> None:
         from .eval import evaluate_run
 
         evaluate_run(args.run_dir)
+        return
+    if args.command == "stitch":
+        from .stitch import run_stitch
+
+        run_stitch(args.run_dir)
         return
     raise SystemExit(f"Unknown command: {args.command}")
 
