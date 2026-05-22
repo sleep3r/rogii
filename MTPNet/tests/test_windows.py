@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from mtpnet.config import WindowConfig
+from mtpnet.heatmap import build_channels
 from mtpnet.windows import build_windows_for_well, split_wells
 
 
@@ -78,13 +79,27 @@ def test_valid_window_mode_uses_only_known_tail_history() -> None:
         horizontal,
         synthetic_typewell(),
         cfg,
-        history_mode="known_tail_start",
+        history_mode="known_tail_only",
         center_source="tvt_input_tail",
     )
 
     assert [sample.start_step for sample in windows] == [first_hidden_step - cfg.history_steps]
     assert windows[0].start_step + cfg.history_steps == first_hidden_step
     assert windows[0].center_tvt == windows[0].history_tvt[-1]
+
+
+def test_build_channels_supports_robust_z_and_derivative_diff() -> None:
+    channels = build_channels(
+        horizontal_gr=np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        typewell_gr=np.array([5.0, 15.0, 25.0, 35.0], dtype=np.float32),
+        history_bins=np.array([1.0, np.nan, np.nan], dtype=np.float32),
+        finite_steps=np.ones(3, dtype=np.float32),
+        channels=("gr_z_diff", "dgr_diff"),
+    )
+
+    assert channels.shape == (2, 4, 3)
+    assert np.isfinite(channels).all()
+    assert abs(float(channels[0].mean())) < 1.0
 
 
 def test_split_wells_keeps_well_boundaries() -> None:

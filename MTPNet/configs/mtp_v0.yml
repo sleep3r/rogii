@@ -13,7 +13,11 @@ window:
   vertical_radius_ft: 160.0
   stride_steps: 4
   max_windows_per_well: 64
-  channels: [gr_diff, abs_gr_diff, history_mask, history_sdf, finite_mask]
+  train_history_mode: teacher_forcing
+  valid_history_mode: known_tail_only
+  train_center_source: true_tvt
+  valid_center_source: tvt_input_tail
+  channels: [gr_diff, gr_z_diff, dgr_diff, abs_gr_diff, history_mask, history_sdf, finite_mask]
 
 model:
   k_modes: 8

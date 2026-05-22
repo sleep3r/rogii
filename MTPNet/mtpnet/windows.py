@@ -104,6 +104,8 @@ def build_windows_for_well(
     if len(hidden_steps) == 0:
         return []
     first_hidden = int(hidden_steps[0])
+    if history_mode == "known_tail_only":
+        history_mode = "known_tail_start"
     if history_mode not in {"teacher_forcing", "known_tail_start"}:
         raise ValueError(f"Unsupported history_mode: {history_mode}")
     if center_source not in {"true_tvt", "tvt_input_tail"}:
@@ -139,7 +141,11 @@ def build_windows_for_well(
         path_all = _target_bins(comp_tvt[start : start + total_steps], crop_tvt)
         history_bins = np.full(total_steps, np.nan, dtype=np.float32)
         history_bins[: cfg.history_steps] = path_all[: cfg.history_steps]
-        history_tvt = comp_tvt_input[hist_slice] if history_mode == "known_tail_start" else comp_tvt[hist_slice]
+        history_tvt = (
+            comp_tvt_input[hist_slice]
+            if history_mode == "known_tail_start"
+            else comp_tvt[hist_slice]
+        )
         x = build_channels(
             horizontal_gr=comp_gr[start : start + total_steps],
             typewell_gr=crop_gr,

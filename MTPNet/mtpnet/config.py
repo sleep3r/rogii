@@ -29,6 +29,10 @@ class WindowConfig:
     vertical_radius_ft: float = 160.0
     stride_steps: int = 4
     max_windows_per_well: int = 64
+    train_history_mode: str = "teacher_forcing"
+    valid_history_mode: str = "known_tail_only"
+    train_center_source: str = "true_tvt"
+    valid_center_source: str = "tvt_input_tail"
     channels: tuple[str, ...] = (
         "gr_diff",
         "abs_gr_diff",
@@ -144,6 +148,26 @@ def load_config(path: str | Path) -> MTPConfig:
         max_windows_per_well=int(
             window_raw.get(
                 "max_windows_per_well", default_window.max_windows_per_well
+            )
+        ),
+        train_history_mode=str(
+            window_raw.get(
+                "train_history_mode", default_window.train_history_mode
+            )
+        ),
+        valid_history_mode=str(
+            window_raw.get(
+                "valid_history_mode", default_window.valid_history_mode
+            )
+        ),
+        train_center_source=str(
+            window_raw.get(
+                "train_center_source", default_window.train_center_source
+            )
+        ),
+        valid_center_source=str(
+            window_raw.get(
+                "valid_center_source", default_window.valid_center_source
             )
         ),
         channels=tuple(window_raw.get("channels", default_window.channels)),

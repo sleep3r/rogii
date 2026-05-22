@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -114,14 +115,14 @@ def prepare_train_valid_samples(cfg: MTPConfig) -> tuple[list[WindowSample], lis
     train_samples = build_windows_for_wells(
         train_wells,
         cfg,
-        history_mode="teacher_forcing",
-        center_source="true_tvt",
+        history_mode=cfg.window.train_history_mode,
+        center_source=cfg.window.train_center_source,
     )
     valid_samples = build_windows_for_wells(
         valid_wells,
         cfg,
-        history_mode="known_tail_start",
-        center_source="tvt_input_tail",
+        history_mode=cfg.window.valid_history_mode,
+        center_source=cfg.window.valid_center_source,
     )
     return train_samples, valid_samples
 
@@ -156,6 +157,15 @@ def _bins_to_tvt(paths: np.ndarray, crop_tvt: np.ndarray) -> np.ndarray:
     return out
 
 
+def _ensure_parquet_engine() -> None:
+    if find_spec("pyarrow") is not None or find_spec("fastparquet") is not None:
+        return
+    raise RuntimeError(
+        "Writing window_predictions.parquet requires pyarrow or fastparquet. "
+        "Install pyarrow or run `uv sync --extra dev` for the MTPNet environment."
+    )
+
+
 def _evaluate(
     model: MTPNet, samples: list[WindowSample], cfg: MTPConfig, device: torch.device
 ) -> tuple[dict[str, Any], pd.DataFrame]:
@@ -173,6 +183,8 @@ def _evaluate(
     target_in_crop: list[float] = []
     target_at_edge: list[float] = []
     classification_correct: list[float] = []
+    mode_entropy: list[float] = []
+    target_bin_values: list[float] = []
     best_modes: list[int] = []
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
@@ -182,6 +194,7 @@ def _evaluate(
             crop_tvt = batch["crop_tvt"].to(device)
             paths, logits = model(x)
             prob = F.softmax(logits, dim=1)
+            entropy = -(prob * torch.log(prob.clamp_min(1e-8))).sum(dim=1)
             err = torch.sqrt(((paths - target[:, None, :]) ** 2).mean(dim=-1))
             mae = torch.abs(paths - target[:, None, :]).mean(dim=-1)
             top1 = prob.argmax(dim=1)
@@ -198,6 +211,7 @@ def _evaluate(
             errors_top3.extend(top3_err.cpu().tolist())
             errors_best_mae.extend(mae[batch_idx, best_k].cpu().tolist())
             classification_correct.extend((top1 == best_k).float().cpu().tolist())
+            mode_entropy.extend(entropy.cpu().tolist())
             best_modes.extend(best_k.cpu().tolist())
             paths_np = paths.cpu().numpy()
             target_tvt_np = target_tvt.cpu().numpy()
@@ -227,6 +241,7 @@ def _evaluate(
                 .tolist()
             )
             target_bins_np = target.cpu().numpy()
+            target_bin_values.extend(target_bins_np.reshape(-1).tolist())
             target_at_edge.extend(
                 ((target_bins_np <= 1.0) | (target_bins_np >= crop_tvt_np.shape[1] - 2))
                 .astype(np.float32)
@@ -245,6 +260,11 @@ def _evaluate(
                         "best_mode_mae_bins": float(mae[i, best_k[i]].cpu()),
                         "top1_rmse_ft": float(ft_err[i, int(top1_np[i])]),
                         "oracle_rmse_ft": float(ft_err[i, int(best_k_np[i])]),
+                        "weighted_rmse_ft": float(
+                            np.sqrt(
+                                ((weighted_tvt[i] - target_tvt_np[i]) ** 2).mean()
+                            )
+                        ),
                         "top1_pred_bins": paths_np[i, int(top1_np[i])].tolist(),
                         "best_pred_bins": paths_np[i, int(best_k_np[i])].tolist(),
                         "weighted_pred_bins": weighted_bins_np[i].tolist(),
@@ -252,6 +272,8 @@ def _evaluate(
                         "best_pred_tvt": path_tvt[i, int(best_k_np[i])].tolist(),
                         "weighted_pred_tvt": weighted_tvt[i].tolist(),
                         "target_tvt": target_tvt_np[i].tolist(),
+                        "target_bins": target_bins_np[i].tolist(),
+                        "crop_tvt": crop_tvt_np[i].tolist(),
                     }
                 )
     unique_modes, mode_counts = np.unique(np.array(best_modes), return_counts=True)
@@ -272,9 +294,108 @@ def _evaluate(
         "target_in_crop_rate": float(np.mean(target_in_crop)),
         "target_at_crop_edge_frac": float(np.mean(target_at_edge)),
         "classification_accuracy_best_mode": float(np.mean(classification_correct)),
+        "mode_entropy_mean": float(np.mean(mode_entropy)),
+        "target_bin_min": float(np.min(target_bin_values)),
+        "target_bin_max": float(np.max(target_bin_values)),
         "mode_usage_histogram": mode_hist,
     }
     return metrics, pd.DataFrame(rows)
+
+
+def _channel_indices(cfg: MTPConfig, names: set[str]) -> list[int]:
+    return [index for index, name in enumerate(cfg.window.channels) if name in names]
+
+
+def _sanity_samples(
+    samples: list[WindowSample],
+    cfg: MTPConfig,
+    *,
+    kind: str,
+) -> list[WindowSample]:
+    gr_channels = _channel_indices(
+        cfg, {"gr_diff", "abs_gr_diff", "gr_z_diff", "dgr_diff"}
+    )
+    history_channels = _channel_indices(cfg, {"history_mask", "history_sdf"})
+    rng = np.random.default_rng(cfg.train.seed + 1009)
+    transformed: list[WindowSample] = []
+    for sample in samples:
+        x = sample.x.copy()
+        if kind == "shuffled_gr":
+            for channel_index in gr_channels:
+                for row_index in range(x.shape[1]):
+                    x[channel_index, row_index] = rng.permutation(
+                        x[channel_index, row_index]
+                    )
+        elif kind == "no_history":
+            for channel_index in history_channels:
+                x[channel_index] = 0.0
+        else:
+            raise ValueError(f"Unsupported sanity sample kind: {kind}")
+        transformed.append(replace(sample, x=x))
+    return transformed
+
+
+def _metric_value(
+    metrics: dict[str, Any], path: tuple[str, ...], default: str = "n/a"
+) -> Any:
+    current: Any = metrics
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def write_geometry_report(
+    metrics: dict[str, Any],
+    run_dir: str | Path,
+    *,
+    parquet_rows: int | None = None,
+) -> Path:
+    run_path = Path(run_dir)
+    valid = metrics.get("valid", metrics)
+    train = metrics.get("train", {})
+    sanity = metrics.get("sanity", {})
+    lines = [
+        "MTP_V0_GEOMETRY_REPORT",
+        "",
+        "data:",
+        f"  train wells: {metrics.get('num_train_wells', 'n/a')}",
+        f"  valid wells: {metrics.get('num_valid_wells', 'n/a')}",
+        f"  train windows: {train.get('num_windows', 'n/a')}",
+        f"  valid windows: {valid.get('num_windows', 'n/a')}",
+        f"  target_in_crop_rate: {valid.get('target_in_crop_rate', 'n/a')}",
+        f"  share target at edge: {valid.get('target_at_crop_edge_frac', 'n/a')}",
+        "",
+        "metrics bins:",
+        f"  top1: {valid.get('top1_rmse_bins', 'n/a')}",
+        f"  weighted: {valid.get('weighted_mean_rmse_bins', 'n/a')}",
+        f"  top3 oracle: {valid.get('oracle_top3_rmse_bins', 'n/a')}",
+        f"  topK oracle: {valid.get('oracle_topk_rmse_bins', 'n/a')}",
+        "",
+        "metrics ft:",
+        f"  top1: {valid.get('top1_rmse_ft', 'n/a')}",
+        f"  weighted: {valid.get('weighted_mean_rmse_ft', 'n/a')}",
+        f"  top3 oracle: {valid.get('oracle_top3_rmse_ft', 'n/a')}",
+        f"  topK oracle: {valid.get('oracle_topk_rmse_ft', 'n/a')}",
+        "",
+        "mode:",
+        "  classification_accuracy_best_mode: "
+        f"{valid.get('classification_accuracy_best_mode', 'n/a')}",
+        f"  mode_usage_histogram: {valid.get('mode_usage_histogram', 'n/a')}",
+        f"  entropy mean: {valid.get('mode_entropy_mean', 'n/a')}",
+        "",
+        "sanity:",
+        "  shuffled_GR baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('shuffled_gr', 'oracle_topk_rmse_ft'))}",
+        "  no_history baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
+    ]
+    if parquet_rows is not None:
+        lines.extend(["", f"parquet rows: {parquet_rows}"])
+    report_path = run_path / "geometry_report.md"
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
 
 
 def _json_safe_config(cfg: MTPConfig) -> dict[str, Any]:
@@ -357,14 +478,32 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     model.load_state_dict(checkpoint["model"])
     valid_metrics, pred_frame = _evaluate(model, valid_samples, cfg, device)
     train_metrics, _ = _evaluate(model, train_samples, cfg, device)
+    sanity_metrics = {
+        "shuffled_gr": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="shuffled_gr"),
+            cfg,
+            device,
+        )[0],
+        "no_history": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="no_history"),
+            cfg,
+            device,
+        )[0],
+    }
     valid_metrics["checkpoint_epoch"] = int(checkpoint["best_epoch"])
     valid_metrics["checkpoint_score"] = float(checkpoint["best_valid_score"])
     summary = {
         "train": train_metrics,
         "valid": valid_metrics,
         "history": history,
+        "sanity": sanity_metrics,
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),
+        "best_valid_oracle_topk_rmse_bins": valid_metrics[
+            "oracle_topk_rmse_bins"
+        ],
         "num_train_wells": len({sample.well_id for sample in train_samples}),
         "num_valid_wells": len({sample.well_id for sample in valid_samples}),
     }
@@ -376,6 +515,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     (output_dir / "metrics.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
+    _ensure_parquet_engine()
     pred_frame.to_parquet(output_dir / "window_predictions.parquet", index=False)
+    write_geometry_report(summary, output_dir, parquet_rows=len(pred_frame))
     print(json.dumps(summary["valid"], indent=2), flush=True)
     return summary

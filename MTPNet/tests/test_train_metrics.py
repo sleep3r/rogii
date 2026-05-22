@@ -57,6 +57,9 @@ def test_evaluate_reports_best_mode_mae_and_classification_accuracy() -> None:
     assert metrics["classification_accuracy_best_mode"] == pytest.approx(0.5)
     assert metrics["oracle_topk_rmse_ft"] == pytest.approx(np.mean([np.sqrt(200.0), 10.0]))
     assert metrics["weighted_mean_rmse_ft"] > 0.0
+    assert metrics["mode_entropy_mean"] > 0.0
+    assert metrics["target_bin_min"] == pytest.approx(0.0)
+    assert metrics["target_bin_max"] == pytest.approx(10.0)
     assert "top1_pred_tvt" in predictions.columns
     assert "target_in_crop_rate" in metrics
 

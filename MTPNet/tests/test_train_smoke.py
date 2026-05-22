@@ -41,7 +41,11 @@ def test_train_from_config_writes_metrics(tmp_path: Path) -> None:
             "vertical_radius_ft": 60.0,
             "stride_steps": 4,
             "max_windows_per_well": 4,
-            "channels": ["gr_diff", "abs_gr_diff", "history_mask", "history_sdf", "finite_mask"],
+            "channels": ["gr_diff", "gr_z_diff", "dgr_diff", "abs_gr_diff", "history_mask", "history_sdf", "finite_mask"],
+            "train_history_mode": "teacher_forcing",
+            "valid_history_mode": "known_tail_only",
+            "train_center_source": "true_tvt",
+            "valid_center_source": "tvt_input_tail",
         },
         "model": {"k_modes": 3, "conv_channels": [8, 16], "hidden_dims": [32], "dropout": 0.0},
         "train": {
@@ -61,5 +65,10 @@ def test_train_from_config_writes_metrics(tmp_path: Path) -> None:
     assert summary["valid"]["num_windows"] > 0
     assert summary["best_epoch"] >= 1
     assert summary["best_valid_score"] == summary["valid"]["checkpoint_score"]
+    assert summary["best_valid_oracle_topk_rmse_bins"] == summary["valid"]["oracle_topk_rmse_bins"]
+    assert summary["sanity"]["shuffled_gr"]["oracle_topk_rmse_ft"] >= 0.0
+    assert summary["sanity"]["no_history"]["oracle_topk_rmse_ft"] >= 0.0
     assert (tmp_path / "artifacts" / "unit" / "metrics.json").exists()
     assert (tmp_path / "artifacts" / "unit" / "checkpoints" / "best.pt").exists()
+    report = tmp_path / "artifacts" / "unit" / "geometry_report.md"
+    assert "MTP_V0_GEOMETRY_REPORT" in report.read_text(encoding="utf-8")
