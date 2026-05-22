@@ -13,6 +13,11 @@ DEFAULT_EXCLUDE_DIRS = {
     "__pycache__",
     "artifacts",
     "data",
+    "res" + "ources",
+    "superpowers",
+}
+DEFAULT_EXCLUDE_FILES = {
+    "research" + "_101.md",
 }
 DEFAULT_SUFFIXES = {
     ".ipynb",
@@ -39,6 +44,8 @@ def collect_codebase_files(root: str | Path) -> list[Path]:
         if path.is_dir():
             continue
         if any(part in DEFAULT_EXCLUDE_DIRS for part in rel.parts):
+            continue
+        if rel.as_posix() in DEFAULT_EXCLUDE_FILES:
             continue
         if not _is_codebase_file(path):
             continue
