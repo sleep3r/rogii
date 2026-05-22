@@ -33,7 +33,11 @@ def set_seed(seed: int) -> None:
 
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     return torch.device(name)
 
 
@@ -85,6 +89,8 @@ def _evaluate(
     errors_weighted: list[float] = []
     errors_oracle: list[float] = []
     errors_top3: list[float] = []
+    errors_best_mae: list[float] = []
+    classification_correct: list[float] = []
     best_modes: list[int] = []
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
@@ -93,6 +99,7 @@ def _evaluate(
             paths, logits = model(x)
             prob = F.softmax(logits, dim=1)
             err = torch.sqrt(((paths - target[:, None, :]) ** 2).mean(dim=-1))
+            mae = torch.abs(paths - target[:, None, :]).mean(dim=-1)
             top1 = prob.argmax(dim=1)
             batch_idx = torch.arange(paths.shape[0], device=device)
             weighted = (paths * prob[:, :, None]).sum(dim=1)
@@ -105,6 +112,8 @@ def _evaluate(
             )
             errors_oracle.extend(oracle_err.cpu().tolist())
             errors_top3.extend(top3_err.cpu().tolist())
+            errors_best_mae.extend(mae[batch_idx, best_k].cpu().tolist())
+            classification_correct.extend((top1 == best_k).float().cpu().tolist())
             best_modes.extend(best_k.cpu().tolist())
             for i in range(paths.shape[0]):
                 rows.append(
@@ -115,6 +124,7 @@ def _evaluate(
                         "best_mode": int(best_k[i].cpu()),
                         "top1_rmse_bins": float(err[i, top1[i]].cpu()),
                         "oracle_rmse_bins": float(oracle_err[i].cpu()),
+                        "best_mode_mae_bins": float(mae[i, best_k[i]].cpu()),
                     }
                 )
     unique_modes, mode_counts = np.unique(np.array(best_modes), return_counts=True)
@@ -127,7 +137,8 @@ def _evaluate(
         "weighted_mean_rmse_bins": float(np.mean(errors_weighted)),
         "oracle_topk_rmse_bins": float(np.mean(errors_oracle)),
         "oracle_top3_rmse_bins": float(np.mean(errors_top3)),
-        "best_mode_mae_bins": float(np.mean(errors_oracle)),
+        "best_mode_mae_bins": float(np.mean(errors_best_mae)),
+        "classification_accuracy_best_mode": float(np.mean(classification_correct)),
         "mode_usage_histogram": mode_hist,
     }
     return metrics, pd.DataFrame(rows)
