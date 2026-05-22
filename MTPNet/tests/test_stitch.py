@@ -3,10 +3,15 @@ import pandas as pd
 import pytest
 
 from mtpnet.stitch import (
+    _is_oracle_candidate,
     _serializable_mode_windows,
     aggregate_mode_windows,
+    aggregate_window_oracle,
+    attach_gr_rerank_scores,
     dp_decode_mode_windows,
     evaluate_row_predictions,
+    evaluate_with_b2_fallback,
+    row_oracle_predictions,
     triangular_weights,
 )
 
@@ -126,3 +131,113 @@ def test_serializable_mode_windows_converts_nested_arrays_to_lists() -> None:
 
     assert serializable.loc[0, "logits"] == [1.0, 2.0]
     assert serializable.loc[0, "path_tvt"] == [[10.0, 11.0], [12.0, 13.0]]
+
+
+def test_window_oracle_overlap_uses_true_future_to_pick_mode() -> None:
+    windows = pd.DataFrame(
+        [
+            {
+                "well_id": "a",
+                "start_step": 0,
+                "logits": np.array([3.0, 1.0], dtype=np.float32),
+                "path_tvt": np.array([[50.0, 51.0], [10.0, 11.0]], dtype=np.float32),
+                "target_tvt": np.array([10.5, 11.5], dtype=np.float32),
+            }
+        ]
+    )
+
+    oracle = aggregate_window_oracle(windows, history_steps=1, future_steps=2)
+
+    assert oracle["pred_tvt"].tolist() == pytest.approx([10.0, 11.0])
+
+
+def test_row_oracle_can_recover_best_overlapping_mode_per_row() -> None:
+    hidden_rows = pd.DataFrame(
+        {
+            "id": ["a_1", "a_2"],
+            "well_id": ["a", "a"],
+            "row_idx": [1, 2],
+            "step": [1, 2],
+            "TVT": [10.0, 20.0],
+            "GR": [1.0, 2.0],
+            "base_tvt": [10.0, 20.0],
+            "b2_tvt": [11.0, 21.0],
+        }
+    )
+    windows = pd.DataFrame(
+        [
+            {
+                "well_id": "a",
+                "start_step": 0,
+                "logits": np.array([3.0, 1.0], dtype=np.float32),
+                "path_tvt": np.array([[30.0, 31.0], [10.0, 20.0]], dtype=np.float32),
+            }
+        ]
+    )
+
+    oracle = row_oracle_predictions(
+        windows, hidden_rows, history_steps=1, future_steps=2
+    )
+
+    assert oracle["pred_tvt"].tolist() == pytest.approx([10.0, 20.0])
+
+
+def test_evaluate_with_b2_fallback_scores_uncovered_rows() -> None:
+    hidden_rows = pd.DataFrame(
+        {
+            "id": ["a_1", "a_2"],
+            "well_id": ["a", "a"],
+            "row_idx": [1, 2],
+            "step": [1, 2],
+            "TVT": [10.0, 20.0],
+            "GR": [1.0, 2.0],
+            "base_tvt": [10.0, 20.0],
+            "b2_tvt": [12.0, 22.0],
+        }
+    )
+    predictions = hidden_rows.iloc[:1].copy()
+    predictions["pred_tvt"] = [10.0]
+
+    metrics = evaluate_with_b2_fallback(hidden_rows, predictions, "fallback")
+
+    assert metrics["rows"] == 2
+    assert metrics["covered_rows"] == 1
+    assert metrics["uncovered_rows"] == 1
+    assert metrics["rmse"] == pytest.approx(np.sqrt(2.0))
+
+
+def test_attach_gr_rerank_scores_boosts_logit_for_better_gr_match() -> None:
+    windows = pd.DataFrame(
+        [
+            {
+                "well_id": "a",
+                "start_step": 0,
+                "logits": np.array([0.0, 0.0], dtype=np.float32),
+                "path_tvt": np.array([[10.0, 11.0, 12.0], [30.0, 31.0, 32.0]], dtype=np.float32),
+            }
+        ]
+    )
+    context = {
+        "a": {
+            "horizontal_gr": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+            "typewell_tvt": np.array([10.0, 11.0, 12.0, 30.0, 31.0, 32.0], dtype=np.float32),
+            "typewell_gr": np.array([2.0, 3.0, 4.0, 100.0, 90.0, 80.0], dtype=np.float32),
+        }
+    }
+
+    reranked = attach_gr_rerank_scores(
+        windows,
+        context,
+        history_steps=1,
+        future_steps=3,
+        beta=1.0,
+    )
+
+    assert reranked.loc[0, "logits"][0] > reranked.loc[0, "logits"][1]
+    assert reranked.loc[0, "gr_scores"][0] > reranked.loc[0, "gr_scores"][1]
+
+
+def test_is_oracle_candidate_marks_diagnostics_as_non_deployable() -> None:
+    assert _is_oracle_candidate("mtp_row_oracle") is True
+    assert _is_oracle_candidate("b2_plus_mtp_oracle_a0.3_clip20") is True
+    assert _is_oracle_candidate("b2_plus_mtp_weighted_overlap_a0.1_clip20") is False
