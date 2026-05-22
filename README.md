@@ -83,6 +83,97 @@ make drift-ncc-train
 See `DRIFT_NCC_NOTEBOOK.md` for the Kaggle notebook mapping and the private
 artifact caveat.
 
+Run the deterministic local FormationPlaneKNN surface solver experiment:
+
+```bash
+make formation-plane-knn-quick
+make formation-plane-knn
+```
+
+See `FORMATION_PLANE_KNN.md` for outputs and validation notes.
+
+Run the A2 target-free selector/scorer on generated FormationPlaneKNN OOF
+candidates:
+
+```bash
+make formation-selector-quick
+make formation-selector
+```
+
+Pass an OOF schema10 file for safety blends when available:
+
+```bash
+make formation-selector FORMATION_SELECTOR_SCHEMA10=artifacts/schema10_oof_raw.parquet
+```
+
+Run the B-lite GR/NCC scorer over A candidates:
+
+```bash
+make formation-b-lite-quick
+make formation-b-lite
+```
+
+Run the B2 constrained reranker over existing A + B-lite artifacts:
+
+```bash
+make formation-b2-quick
+make formation-b2
+```
+
+If the old schema10 OOF parquet is gone, rebuild a compatible row-level OOF
+baseline from the saved model artifact:
+
+```bash
+make export-oof-baseline \
+  OOF_BASELINE_MODEL_DIR=artifacts/clearml/c11ac4df327f49f3b91ad293c69bc91e \
+  OOF_BASELINE_OUTPUT=artifacts/oof_baseline/schema10_oof.parquet
+```
+
+Full A2/B2 chain on the current full artifacts:
+
+```bash
+make formation-b2 \
+  FORMATION_B2_INPUT=artifacts/formation_plane_knn_a2_full/oof_candidates.parquet \
+  FORMATION_B2_B_SCORES=artifacts/formation_b_lite_a2_full/b_candidate_scores.parquet \
+  FORMATION_B2_OUTPUT=artifacts/formation_b2_a2_full_schema10 \
+  FORMATION_B2_SCHEMA10=artifacts/oof_baseline/schema10_oof.parquet \
+  FORMATION_B2_SCHEMA10_COLUMN=schema10_oof_pp
+```
+
+Search guarded B2 policies and freeze the current bounded submit candidate:
+
+```bash
+make formation-b2-guarded \
+  FORMATION_B2_OUTPUT=artifacts/formation_b2_a2_full_schema10 \
+  FORMATION_B2_GUARDED_INPUT=artifacts/formation_plane_knn_a2_full/oof_candidates.parquet \
+  FORMATION_B2_GUARDED_OUTPUT=artifacts/formation_b2_danger_guard_a2_full_schema10 \
+  FORMATION_B2_GUARDED_SCHEMA10=artifacts/oof_baseline/schema10_oof.parquet \
+  FORMATION_B2_GUARDED_SCHEMA10_COLUMN=schema10_oof_pp
+```
+
+Replay the frozen inference policy and verify exact parity against the guarded
+OOF artifact:
+
+```bash
+make formation-b2-infer-oof-replay \
+  FORMATION_B2_INFER_INPUT=artifacts/formation_plane_knn_a2_full/oof_candidates.parquet \
+  FORMATION_B2_INFER_CHOICES=artifacts/formation_b2_a2_full_schema10/b2_selector_choices.csv \
+  FORMATION_B2_INFER_METADATA=artifacts/formation_b2_a2_full_schema10/b2_candidate_metadata.parquet \
+  FORMATION_B2_INFER_OUTPUT=artifacts/formation_b2_infer_oof_replay \
+  FORMATION_B2_INFER_SCHEMA10=artifacts/oof_baseline/schema10_oof.parquet \
+  FORMATION_B2_INFER_SCHEMA10_COLUMN=schema10_oof_pp \
+  FORMATION_B2_INFER_REFERENCE=artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+```
+
+Apply the frozen B2 correction to hidden test rows after producing a base
+submission from the same c11/schema10 artifact:
+
+```bash
+make formation-b2-infer-test \
+  FORMATION_B2_TEST_BASE_SUBMISSION=artifacts/kaggle_submit_output/submission.csv \
+  FORMATION_B2_TEST_OUTPUT=artifacts/formation_b2_test_submit
+```
+
 Main local training:
 
 ```bash
@@ -221,18 +312,26 @@ make train-kaggle
 The full `stack.yml` train run exceeds Kaggle's 9-hour CPU notebook limit. The
 working path is local training followed by an inference-only Kaggle run.
 
-Inference-only Kaggle run from a ClearML artifact:
+Inference-only Kaggle run from the current c11 ClearML artifact:
 
 ```bash
-make submit MESSAGE="cml 2b77 infer"
+make submit MESSAGE="c11 b2 guarded infer"
 ```
 
 By default, `make submit` downloads model artifacts from ClearML task
-`2b77f48a1a294304bf859ea798666d65` into
+`c11ac4df327f49f3b91ad293c69bc91e` into
 `artifacts/clearml/<CML_ID>/`, publishes that directory as a private Kaggle
 dataset, pushes a private Kaggle script, waits for `submission.csv`, validates
 it, and stops before the competition submit API call. Submit the notebook
 version manually from the Kaggle UI when you are happy with it.
+
+`make submit` also applies the frozen B2 guarded correction from
+`configs/formation_b2_guarded_submit.yml` inside the Kaggle inference kernel.
+To submit the plain base model instead:
+
+```bash
+make submit B2_SUBMIT_CONFIG=
+```
 
 Use another ClearML run:
 

@@ -6,6 +6,7 @@ import pickle
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import yaml
 
 from .clearml_data import apply_data_clearml_overrides, prepare_clearml_data_if_needed
@@ -49,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Override outputs.submission_path.",
+    )
+    parser.add_argument(
+        "--b2-config",
+        type=Path,
+        default=None,
+        help="Optional frozen B2 guarded correction config to apply after base inference.",
     )
     parser.add_argument(
         "--data-clearml-enabled", "--data_clearml_enabled", default=None
@@ -286,12 +293,38 @@ def main() -> None:
     if submission["tvt"].isna().any():
         raise ValueError("Submission contains NaN predictions.")
 
+    output_dir = Path(config["outputs"]["output_dir"])
+    b2_metrics: dict[str, Any] | None = None
+    if args.b2_config is not None:
+        from .formation_b2_inference import run_test_inference
+
+        base_submission_path = output_dir / "base_submission.csv"
+        b2_output_dir = output_dir / "b2_guarded"
+        with logger.step("Write base submission before B2", path=base_submission_path):
+            base_submission_path.parent.mkdir(parents=True, exist_ok=True)
+            submission.to_csv(base_submission_path, index=False)
+        with logger.step("Apply B2 guarded correction", config=args.b2_config):
+            b2_metrics = run_test_inference(
+                argparse.Namespace(
+                    output_dir=b2_output_dir,
+                    config=args.b2_config,
+                    data_dir=data_dir,
+                    train_dir=train_dir,
+                    test_dir=test_dir,
+                    base_submission=base_submission_path,
+                    base_column="tvt",
+                    progress_interval=1,
+                )
+            )
+            submission = pd.read_csv(b2_output_dir / "submission.csv")
+        if submission["tvt"].isna().any():
+            raise ValueError("B2 submission contains NaN predictions.")
+
     submission_path = Path(config["outputs"]["submission_path"])
     with logger.step("Write submission", path=submission_path, rows=len(submission)):
         submission_path.parent.mkdir(parents=True, exist_ok=True)
         submission.to_csv(submission_path, index=False)
 
-    output_dir = Path(config["outputs"]["output_dir"])
     with logger.step("Save inference metadata", output_dir=output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "inference.json").open("w", encoding="utf-8") as file:
@@ -303,6 +336,8 @@ def main() -> None:
                     "submission_rows": int(len(submission)),
                     "source_cv_rmse": metrics.get("cv", {}).get("rmse"),
                     "residual_weight": config["postprocess"].get("residual_weight"),
+                    "b2_config": str(args.b2_config) if args.b2_config else None,
+                    "b2_metrics": b2_metrics,
                 },
                 file,
                 indent=2,

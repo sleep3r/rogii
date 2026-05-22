@@ -107,10 +107,13 @@ def source_zip_bytes(extra_paths: list[Path] | None = None) -> bytes:
 def encoded_source_zip(
     config: Path,
     mode: str,
+    b2_config: Path | None = None,
     model_dir: Path | None = None,
     bundle_model: bool = False,
 ) -> str:
     extra_paths = [] if config.parent == Path("configs") else [config]
+    if b2_config is not None and b2_config.parent != Path("configs"):
+        extra_paths.append(b2_config)
     if mode == "infer" and bundle_model:
         if model_dir is None:
             raise ValueError("Inference mode requires model_dir.")
@@ -122,6 +125,7 @@ def encoded_source_zip(
 def runner_script(
     *,
     config: Path,
+    b2_config: Path | None,
     data_dir: Path,
     artifact_dir: Path,
     model_dir: Path | None,
@@ -130,6 +134,7 @@ def runner_script(
     submission_file: str,
 ) -> str:
     config_rel = relpath(config).as_posix()
+    b2_config_rel = relpath(b2_config).as_posix() if b2_config is not None else ""
     bundle_model = mode == "infer" and not model_dataset
     model_rel = (
         relpath(model_dir).as_posix() if bundle_model and model_dir is not None else ""
@@ -138,7 +143,11 @@ def runner_script(
     if mode == "infer" and model_dataset:
         model_arg = dataset_input_dir(model_dataset)
     encoded = encoded_source_zip(
-        config, mode=mode, model_dir=model_dir, bundle_model=bundle_model
+        config,
+        b2_config=b2_config,
+        mode=mode,
+        model_dir=model_dir,
+        bundle_model=bundle_model,
     )
     return f'''from __future__ import annotations
 
@@ -248,6 +257,8 @@ def main() -> None:
     sys.argv = ["run.py"]
     if "{mode}" != "infer":
         sys.argv.extend(["--config", str(source_dir / "{config_rel}")])
+    elif "{b2_config_rel}":
+        sys.argv.extend(["--b2-config", str(source_dir / "{b2_config_rel}")])
     sys.argv.extend([
         "--data-dir",
         str(resolved_data_dir),
@@ -471,6 +482,7 @@ def prepare_kernel(args: argparse.Namespace) -> Path:
 
     run_py = runner_script(
         config=config,
+        b2_config=Path(args.b2_config) if args.b2_config else None,
         data_dir=Path(args.data_dir),
         artifact_dir=Path(args.artifact_dir),
         model_dir=model_dir,
@@ -498,6 +510,8 @@ def prepare_kernel(args: argparse.Namespace) -> Path:
     log(f"Config: {config}")
     if args.mode == "infer":
         log("Mode: inference-only")
+        if args.b2_config:
+            log(f"B2 guarded config: {args.b2_config}")
         if args.model_dataset:
             log(f"Model dataset source: {args.model_dataset}")
         else:
@@ -805,6 +819,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--publish-model-dataset", action="store_true")
     parser.add_argument("--mode", choices=["train", "infer"], default="train")
     parser.add_argument("--submission-file", default=DEFAULT_SUBMISSION)
+    parser.add_argument("--b2-config", type=Path, default=None)
     parser.add_argument(
         "--private", action=argparse.BooleanOptionalAction, default=True
     )

@@ -1,0 +1,36 @@
+policy_name: A_among_B_top10__clip15_boost30_danger_le1
+
+base:
+  source: schema10_pp
+  artifact: c11_schema10
+  oof_column: schema10_oof_pp
+
+formation_a:
+  k_wells: 15
+  sample_rows_per_well: 80
+  min_points: 80
+  dense_k: 120
+  weight_power: 1.0
+  eps: 0.001
+  bootstrap_samples: 64
+  bootstrap_fraction: 0.75
+  query_chunk: 2048
+  seed: 42
+
+b_selector:
+  selector: A_among_B_top10
+  top_k: 10
+
+safe_blend:
+  alpha: 0.3
+  clip: 30.0
+
+danger_guard:
+  mode: danger_clip15_boost
+  current_policy: none
+  boost_max_danger: 1
+  kill_threshold: 4
+  clip_high: 30.0
+  clip_low: 15.0
+  delta_p95_downgrade: 20.0
+  endpoint_downgrade: 25.0

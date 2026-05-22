@@ -22,6 +22,111 @@ tree replay described in `DRIFT_NCC_NOTEBOOK.md`.
 - Next:
 ```
 
+## 2026-05-22
+
+### EXP-B2-DANGER-GUARDED - Bounded correction submit candidate
+
+- Command/config:
+  - `make export-oof-baseline OOF_BASELINE_MODEL_DIR=artifacts/clearml/c11ac4df327f49f3b91ad293c69bc91e OOF_BASELINE_OUTPUT=artifacts/oof_baseline/schema10_oof.parquet`;
+  - `make formation-b2 ... FORMATION_B2_SCHEMA10=artifacts/oof_baseline/schema10_oof.parquet FORMATION_B2_SCHEMA10_COLUMN=schema10_oof_pp`;
+  - `make formation-b2-guarded ... FORMATION_B2_GUARDED_SCHEMA10_COLUMN=schema10_oof_pp`.
+- Base:
+  - `c11 schema10_oof_pp`;
+  - RMSE `10.90313`;
+  - P95 well RMSE `21.75386`;
+  - worst well RMSE `54.72078`.
+- Candidate:
+  - policy `B_among_A_top10__danger_current_kill_ge4`;
+  - RMSE `10.42167`;
+  - gain `+0.48146`;
+  - P95 well RMSE `20.10851`;
+  - worst well RMSE `54.72078`;
+  - P95 shift `4.5`;
+  - disabled wells `26`;
+  - `389ae58f` alpha `0.0`.
+- Fixed cross-fold check:
+  - fold gains: `+0.43159`, `+0.71592`, `+0.45035`, `+0.18839`, `+0.61203`;
+  - positive on all folds.
+- What changed:
+  - added danger-kill guard around B2 safe correction;
+  - `guarded_predictions.parquet` now includes `b2_guarded_submit`, the
+    worst-safe submit column, separate from the relaxed best-RMSE column.
+- Decision:
+  - **GO as first serious bounded correction submit candidate**;
+  - not a standalone solver.
+- Next:
+  - freeze config in `configs/formation_b2_guarded_submit.yml`;
+  - verify `formation-b2-infer-oof-replay` parity before Kaggle submit.
+
+#### B2 inference parity pass
+
+- Added `configs/formation_b2_guarded_submit.yml` with the fixed submit policy:
+  `B_among_A_top10__danger_current_kill_ge4`.
+- Added `rogii/formation_b2_inference.py`:
+  - `oof-replay` command applies the frozen policy from A/B2 artifacts;
+  - `test` command builds full-train A candidates for hidden test wells, scores
+    them with B-lite, applies the fixed guard, and writes `submission.csv`.
+- Added Make targets:
+  - `make formation-b2-infer-oof-replay`;
+  - `make formation-b2-infer-test`.
+- Integrated B2 into `rogii.inference` and `rogii.kaggle_submit`:
+  - `make submit` now passes `--b2-config configs/formation_b2_guarded_submit.yml`
+    by default;
+  - `B2_SUBMIT_CONFIG=` disables the correction for a plain base submit.
+  - default `CML_ID` changed to `c11ac4df327f49f3b91ad293c69bc91e` to keep
+    submit inference aligned with the OOF base used by B2.
+- OOF replay result:
+  - rows `3,783,989`;
+  - RMSE `10.42167`;
+  - P95 `20.10851`;
+  - worst `54.72078`;
+  - disabled wells `26`;
+  - `389ae58f` alpha `0.0`;
+  - max absolute difference vs
+    `artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet[b2_guarded_submit]`
+    is exactly `0.0`.
+- Local hidden-test smoke using
+  `artifacts/kaggle_submit_output/submission.csv` as the c11 base:
+  - rows `14,151`;
+  - wells `3`;
+  - NaN predictions `0`;
+  - median shift `1.21424`;
+  - P95 shift `4.5`;
+  - max shift `4.5`;
+  - `prediction_guard` strict mode: `pass`.
+- Kaggle package dry run:
+  - `make submit-dry CML_ID= B2_SUBMIT_CONFIG=configs/formation_b2_guarded_submit.yml`;
+  - kernel workspace created;
+  - generated `run.py` passes `--b2-config` to `rogii.inference`.
+- Decision:
+  - inference-contract parity is satisfied locally;
+  - next step is to run the same command inside the Kaggle inference package
+    using the c11 base submission produced in that kernel.
+- Kaggle result:
+  - public LB `10.536`;
+  - previous c11/plain-family submit reported `10.767`;
+  - public gain `+0.231`.
+- Takeaway:
+  - B2 bounded correction transferred to public LB, but only about half of the
+    OOF gain transferred;
+  - keep B2 as a real production candidate, then test one relaxed-but-guarded
+    variant separately instead of changing the main fixed submit policy.
+- Prepared optional relaxed variant:
+  - config `configs/formation_b2_guarded_relaxed.yml`;
+  - policy `A_among_B_top10__clip15_boost30_danger_le1`;
+  - OOF replay parity vs `b2_guarded_best`: max absolute diff `0.0`;
+  - OOF RMSE `10.41204`, P95 `20.06424`, worst `59.05610`;
+  - local hidden-test prediction guard vs c11 `base_submission.csv`: `pass`;
+  - hidden-test median shift `1.25152`, P95 shift `6.97498`, max shift
+    `7.90615`.
+- Relaxed Kaggle result:
+  - public LB `10.625`;
+  - worse than strict B2 `10.536`;
+  - decision: **NO-GO** for relaxed policy. The public result confirms that
+    the extra OOF gain came with too much public hidden risk.
+  - keep `configs/formation_b2_guarded_submit.yml` as the default B2 submit
+    policy.
+
 ## 2026-05-21
 
 ### Phase 2 - Surface Student v0
