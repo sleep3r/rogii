@@ -44,6 +44,29 @@ class OOBPredictionModel(nn.Module):
         return paths, logits
 
 
+class BoundedRawPredictionModel(nn.Module):
+    bounded_output = True
+
+    def forward_raw(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        batch = x.shape[0]
+        raw_paths = torch.tensor(
+            [[[-1.0, 0.0], [1.0, 65.0]]],
+            dtype=torch.float32,
+            device=x.device,
+        ).repeat(batch, 1, 1)
+        logits = torch.tensor([[2.0, 0.0]], dtype=torch.float32, device=x.device).repeat(
+            batch, 1
+        )
+        return raw_paths, logits
+
+    def bound_paths(self, raw_paths: Tensor) -> Tensor:
+        return 63.0 * torch.sigmoid(raw_paths)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        raw_paths, logits = self.forward_raw(x)
+        return self.bound_paths(raw_paths), logits
+
+
 def make_sample(well_id: str, target: np.ndarray) -> WindowSample:
     crop_tvt = np.arange(64, dtype=np.float32) * 10.0
     return WindowSample(
@@ -93,6 +116,20 @@ def test_evaluate_reports_prediction_bin_oob_metrics() -> None:
     assert metrics["pred_bin_max"] == pytest.approx(65.0)
     assert predictions.loc[0, "top1_pred_bin_oob_frac"] == pytest.approx(0.5)
     assert predictions.loc[0, "weighted_pred_bin_oob_frac"] == pytest.approx(0.5)
+
+
+def test_evaluate_reports_raw_prediction_oob_before_bound() -> None:
+    cfg = MTPConfig(train=TrainConfig(batch_size=1, device="cpu"))
+    samples = [make_sample("a", np.array([0.0, 0.0]))]
+
+    metrics, predictions = _evaluate(
+        BoundedRawPredictionModel(), samples, cfg, torch.device("cpu")
+    )
+
+    assert metrics["bounded_output"] is True
+    assert metrics["pred_bin_oob_frac"] == pytest.approx(0.0)
+    assert metrics["raw_path_oob_frac_before_bound"] == pytest.approx(0.5)
+    assert predictions.loc[0, "raw_path_oob_frac_before_bound"] == pytest.approx(0.5)
 
 
 def test_auto_device_prefers_mps_when_cuda_unavailable(monkeypatch) -> None:

@@ -81,16 +81,22 @@ class MTPNet(nn.Module):
         with torch.no_grad():
             self.path_head.bias.copy_(bias)
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+    def forward_raw(self, x: Tensor) -> tuple[Tensor, Tensor]:
         batch = x.shape[0]
         features = self.encoder(x).reshape(batch, -1)
         hidden = self.head(features)
         raw_paths = self.path_head(hidden).reshape(
             batch, self.k_modes, self.future_steps
         )
-        if self.bounded_output:
-            paths = float(self.height - 1) * torch.sigmoid(raw_paths)
-        else:
-            paths = raw_paths
         logits = self.logit_head(hidden)
+        return raw_paths, logits
+
+    def bound_paths(self, raw_paths: Tensor) -> Tensor:
+        if self.bounded_output:
+            return float(self.height - 1) * torch.sigmoid(raw_paths)
+        return raw_paths
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        raw_paths, logits = self.forward_raw(x)
+        paths = self.bound_paths(raw_paths)
         return paths, logits

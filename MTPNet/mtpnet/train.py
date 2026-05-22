@@ -210,16 +210,23 @@ def _evaluate(
     target_bin_values: list[float] = []
     pred_bin_values: list[float] = []
     pred_bin_oob: list[float] = []
+    raw_path_oob: list[float] = []
     top1_pred_bin_oob: list[float] = []
     weighted_pred_bin_oob: list[float] = []
     best_modes: list[int] = []
+    bounded_output = bool(getattr(model, "bounded_output", cfg.model.bounded_output))
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
             x = batch["x"].to(device)
             target = batch["target_bins"].to(device)
             target_tvt = batch["target_tvt"].to(device)
             crop_tvt = batch["crop_tvt"].to(device)
-            paths, logits = model(x)
+            if hasattr(model, "forward_raw") and hasattr(model, "bound_paths"):
+                raw_paths, logits = model.forward_raw(x)
+                paths = model.bound_paths(raw_paths)
+            else:
+                paths, logits = model(x)
+                raw_paths = paths
             prob = F.softmax(logits, dim=1)
             entropy = -(prob * torch.log(prob.clamp_min(1e-8))).sum(dim=1)
             err = torch.sqrt(((paths - target[:, None, :]) ** 2).mean(dim=-1))
@@ -229,6 +236,7 @@ def _evaluate(
             weighted = (paths * prob[:, :, None]).sum(dim=1)
             max_bin = float(crop_tvt.shape[1] - 1)
             path_oob = (paths < 0.0) | (paths > max_bin)
+            raw_path_oob_batch = (raw_paths < 0.0) | (raw_paths > max_bin)
             weighted_oob = (weighted < 0.0) | (weighted > max_bin)
             top3_idx = torch.topk(prob, k=min(3, prob.shape[1]), dim=1).indices
             top3_err = torch.gather(err, 1, top3_idx).min(dim=1).values
@@ -243,6 +251,9 @@ def _evaluate(
             classification_correct.extend((top1 == best_k).float().cpu().tolist())
             mode_entropy.extend(entropy.cpu().tolist())
             pred_bin_oob.extend(path_oob.float().mean(dim=(1, 2)).cpu().tolist())
+            raw_path_oob.extend(
+                raw_path_oob_batch.float().mean(dim=(1, 2)).cpu().tolist()
+            )
             top1_pred_bin_oob.extend(
                 path_oob[batch_idx, top1].float().mean(dim=1).cpu().tolist()
             )
@@ -301,6 +312,9 @@ def _evaluate(
                                 ((weighted_tvt[i] - target_tvt_np[i]) ** 2).mean()
                             )
                         ),
+                        "raw_path_oob_frac_before_bound": float(
+                            raw_path_oob_batch[i].float().mean().cpu()
+                        ),
                         "top1_pred_bin_oob_frac": float(
                             path_oob[i, int(top1_np[i])].float().mean().cpu()
                         ),
@@ -339,6 +353,8 @@ def _evaluate(
         "mode_entropy_mean": float(np.mean(mode_entropy)),
         "target_bin_min": float(np.min(target_bin_values)),
         "target_bin_max": float(np.max(target_bin_values)),
+        "bounded_output": bounded_output,
+        "raw_path_oob_frac_before_bound": float(np.mean(raw_path_oob)),
         "pred_bin_oob_frac": float(np.mean(pred_bin_oob)),
         "top1_pred_bin_oob_frac": float(np.mean(top1_pred_bin_oob)),
         "weighted_pred_bin_oob_frac": float(np.mean(weighted_pred_bin_oob)),
@@ -445,12 +461,15 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
         "",
         "extra:",
-        f"  bounded_output: {_metric_value(metrics, ('model', 'bounded_output'))}",
+        "  bounded_output: "
+        f"{_metric_value(metrics, ('model', 'bounded_output'), valid.get('bounded_output', 'n/a'))}",
         f"  mode_bias_init: {_metric_value(metrics, ('model', 'mode_bias_init'))}",
         f"  alpha_cls: {_metric_value(metrics, ('loss', 'alpha_cls'))}",
         f"  cls_warmup_epochs: {_metric_value(metrics, ('loss', 'cls_warmup_epochs'))}",
         f"  entropy_lambda: {_metric_value(metrics, ('loss', 'entropy_lambda'))}",
         f"  diversity_lambda: {_metric_value(metrics, ('loss', 'diversity_lambda'))}",
+        "  raw_path_oob_frac_before_bound: "
+        f"{valid.get('raw_path_oob_frac_before_bound', 'n/a')}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
         f"  top1_pred_bin_oob_frac: {valid.get('top1_pred_bin_oob_frac', 'n/a')}",
         "  weighted_pred_bin_oob_frac: "

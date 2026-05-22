@@ -30,6 +30,8 @@ def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_pa
             "mode_entropy_mean": 0.7,
             "mode_usage_histogram": {"0": 1},
             "pred_bin_oob_frac": 0.2,
+            "raw_path_oob_frac_before_bound": 0.3,
+            "bounded_output": True,
             "top1_pred_bin_oob_frac": 0.1,
             "weighted_pred_bin_oob_frac": 0.0,
             "pred_bin_min": -1.0,
@@ -51,6 +53,8 @@ def test_evaluate_run_writes_geometry_report_from_metrics_and_predictions(tmp_pa
     assert loaded["valid"]["oracle_topk_rmse_ft"] == 8.0
     assert "MTP_V0_GEOMETRY_REPORT" in report
     assert "pred_bin_oob_frac: 0.2" in report
+    assert "raw_path_oob_frac_before_bound: 0.3" in report
+    assert "bounded_output: True" in report
     assert "parquet rows: 1" in report
 
 
