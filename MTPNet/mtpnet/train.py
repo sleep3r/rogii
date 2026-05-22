@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,29 @@ from .windows import (
     build_windows_for_well,
     split_wells,
 )
+
+
+SAMPLE_TYPE_TO_WINDOW_ARGS = {
+    "teacher_forcing_hidden": ("teacher_forcing", "true_tvt"),
+    "known_tail_start": ("known_tail_start", "tvt_input_tail"),
+    "base_center_hidden": ("base_path", "base_path"),
+}
+
+VALID_SET_NAMES = {
+    "known_tail_start": "valid_first_chunk_known_tail",
+    "base_center_hidden": "valid_base_center_all_hidden",
+    "teacher_forcing_hidden": "valid_teacher_forcing_hidden",
+}
+
+
+@dataclass(frozen=True)
+class SampleSplits:
+    train_samples: list[WindowSample]
+    valid_samples: list[WindowSample]
+    valid_sets: dict[str, list[WindowSample]]
+    train_buckets: dict[str, list[WindowSample]]
+    train_mix_counts: dict[str, int]
+    primary_valid_name: str
 
 
 def set_seed(seed: int) -> None:
@@ -88,6 +111,50 @@ def build_windows_for_wells(
     return samples
 
 
+def _build_sample_type_windows(
+    wells: list[Any], cfg: MTPConfig, sample_type: str
+) -> list[WindowSample]:
+    if sample_type not in SAMPLE_TYPE_TO_WINDOW_ARGS:
+        raise ValueError(f"Unsupported sample_type: {sample_type}")
+    history_mode, center_source = SAMPLE_TYPE_TO_WINDOW_ARGS[sample_type]
+    return build_windows_for_wells(
+        wells,
+        cfg,
+        history_mode=history_mode,
+        center_source=center_source,
+    )
+
+
+def _mix_train_samples(
+    buckets: dict[str, list[WindowSample]],
+    weights: dict[str, float],
+    seed: int,
+) -> tuple[list[WindowSample], dict[str, int]]:
+    if not buckets:
+        return [], {}
+    if any(weight <= 0.0 for weight in weights.values()):
+        raise ValueError("window.train_sample_mix weights must be positive")
+    total_weight = float(sum(weights.values()))
+    normalized = {key: float(value) / total_weight for key, value in weights.items()}
+    total = max(len(samples) for samples in buckets.values())
+    rng = np.random.default_rng(seed)
+    mixed: list[WindowSample] = []
+    counts: dict[str, int] = {}
+    items = list(normalized.items())
+    for index, (sample_type, weight) in enumerate(items):
+        if index == len(items) - 1:
+            count = total - len(mixed)
+        else:
+            count = int(round(total * weight))
+        source = buckets[sample_type]
+        replace_items = count > len(source)
+        selected = rng.choice(np.arange(len(source)), size=count, replace=replace_items)
+        mixed.extend(source[int(item)] for item in selected)
+        counts[sample_type] = count
+    rng.shuffle(mixed)
+    return mixed, counts
+
+
 def split_samples(
     samples: list[WindowSample], cfg: MTPConfig
 ) -> tuple[list[WindowSample], list[WindowSample]]:
@@ -103,7 +170,7 @@ def split_samples(
     return train, valid
 
 
-def prepare_train_valid_samples(cfg: MTPConfig) -> tuple[list[WindowSample], list[WindowSample]]:
+def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
     wells = discover_wells(cfg.data)
     well_ids = [well.well_id for well in wells]
     train_ids, valid_ids = split_wells(
@@ -112,19 +179,59 @@ def prepare_train_valid_samples(cfg: MTPConfig) -> tuple[list[WindowSample], lis
     by_id = {well.well_id: well for well in wells}
     train_wells = [by_id[well_id] for well_id in train_ids]
     valid_wells = [by_id[well_id] for well_id in valid_ids]
-    train_samples = build_windows_for_wells(
-        train_wells,
-        cfg,
-        history_mode=cfg.window.train_history_mode,
-        center_source=cfg.window.train_center_source,
+    if cfg.window.train_sample_mix:
+        train_buckets = {
+            sample_type: _build_sample_type_windows(train_wells, cfg, sample_type)
+            for sample_type in cfg.window.train_sample_mix
+        }
+        train_samples, train_mix_counts = _mix_train_samples(
+            train_buckets, cfg.window.train_sample_mix, cfg.train.seed
+        )
+    else:
+        train_samples = build_windows_for_wells(
+            train_wells,
+            cfg,
+            history_mode=cfg.window.train_history_mode,
+            center_source=cfg.window.train_center_source,
+        )
+        train_buckets = {"legacy_train": train_samples}
+        train_mix_counts = {"legacy_train": len(train_samples)}
+
+    if cfg.window.valid_sample_types:
+        valid_sets = {
+            VALID_SET_NAMES.get(sample_type, f"valid_{sample_type}"): _build_sample_type_windows(
+                valid_wells, cfg, sample_type
+            )
+            for sample_type in cfg.window.valid_sample_types
+        }
+        primary_valid_name = (
+            "valid_base_center_all_hidden"
+            if "valid_base_center_all_hidden" in valid_sets
+            else next(iter(valid_sets))
+        )
+        valid_samples = valid_sets[primary_valid_name]
+    else:
+        valid_samples = build_windows_for_wells(
+            valid_wells,
+            cfg,
+            history_mode=cfg.window.valid_history_mode,
+            center_source=cfg.window.valid_center_source,
+        )
+        primary_valid_name = "valid"
+        valid_sets = {primary_valid_name: valid_samples}
+    return SampleSplits(
+        train_samples=train_samples,
+        valid_samples=valid_samples,
+        valid_sets=valid_sets,
+        train_buckets=train_buckets,
+        train_mix_counts=train_mix_counts,
+        primary_valid_name=primary_valid_name,
     )
-    valid_samples = build_windows_for_wells(
-        valid_wells,
-        cfg,
-        history_mode=cfg.window.valid_history_mode,
-        center_source=cfg.window.valid_center_source,
-    )
-    return train_samples, valid_samples
+
+
+def prepare_train_valid_samples(cfg: MTPConfig) -> tuple[list[WindowSample], list[WindowSample]]:
+    splits = prepare_sample_splits(cfg)
+    return splits.train_samples, splits.valid_samples
 
 
 def _loader(samples: list[WindowSample], cfg: MTPConfig, shuffle: bool) -> DataLoader:
@@ -300,6 +407,7 @@ def _evaluate(
                     {
                         "well_id": batch["well_id"][i],
                         "start_step": int(batch["start_step"][i]),
+                        "sample_type": batch["sample_type"][i],
                         "top1_mode": int(top1[i].cpu()),
                         "best_mode": int(best_k[i].cpu()),
                         "top1_rmse_bins": float(err[i, top1[i]].cpu()),
@@ -421,7 +529,9 @@ def write_geometry_report(
     sanity = metrics.get("sanity", {})
     run_name = str(metrics.get("run_name", ""))
     title = (
-        "MTP_V0_1_DIVERSITY_REPORT"
+        "MTP_V0_2_MIXED_REPORT"
+        if "mtp_v0_2" in run_name
+        else "MTP_V0_1_DIVERSITY_REPORT"
         if "mtp_v0_1" in run_name
         else "MTP_V0_GEOMETRY_REPORT"
     )
@@ -477,6 +587,23 @@ def write_geometry_report(
         f"  pred_bin_min: {valid.get('pred_bin_min', 'n/a')}",
         f"  pred_bin_max: {valid.get('pred_bin_max', 'n/a')}",
     ]
+    for set_name in ("valid_first_chunk_known_tail", "valid_base_center_all_hidden"):
+        set_metrics = metrics.get(set_name)
+        if not isinstance(set_metrics, dict):
+            continue
+        lines.extend(
+            [
+                "",
+                f"{set_name}:",
+                f"  windows: {set_metrics.get('num_windows', 'n/a')}",
+                f"  top1_ft: {set_metrics.get('top1_rmse_ft', 'n/a')}",
+                f"  weighted_ft: {set_metrics.get('weighted_mean_rmse_ft', 'n/a')}",
+                f"  oracle_top3_ft: {set_metrics.get('oracle_top3_rmse_ft', 'n/a')}",
+                f"  oracle_topK_ft: {set_metrics.get('oracle_topk_rmse_ft', 'n/a')}",
+                f"  entropy_mean: {set_metrics.get('mode_entropy_mean', 'n/a')}",
+                f"  mode_usage_histogram: {set_metrics.get('mode_usage_histogram', 'n/a')}",
+            ]
+        )
     if parquet_rows is not None:
         lines.extend(["", f"parquet rows: {parquet_rows}"])
     report_path = run_path / "geometry_report.md"
@@ -507,7 +634,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    train_samples, valid_samples = prepare_train_valid_samples(cfg)
+    splits = prepare_sample_splits(cfg)
+    train_samples = splits.train_samples
+    valid_samples = splits.valid_samples
     first = train_samples[0]
     model = MTPNet(
         in_channels=first.x.shape[0],
@@ -564,6 +693,15 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     checkpoint = torch.load(checkpoint_dir / "best.pt", map_location=device)
     model.load_state_dict(checkpoint["model"])
     valid_metrics, pred_frame = _evaluate(model, valid_samples, cfg, device)
+    valid_set_metrics = {
+        name: _evaluate(model, samples, cfg, device)[0]
+        for name, samples in splits.valid_sets.items()
+    }
+    if splits.primary_valid_name in valid_set_metrics:
+        valid_metrics = valid_set_metrics[splits.primary_valid_name]
+        _, pred_frame = _evaluate(
+            model, splits.valid_sets[splits.primary_valid_name], cfg, device
+        )
     train_metrics, _ = _evaluate(model, train_samples, cfg, device)
     sanity_metrics = {
         "shuffled_gr": _evaluate(
@@ -585,8 +723,14 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         "run_name": cfg.run.name,
         "train": train_metrics,
         "valid": valid_metrics,
+        **valid_set_metrics,
         "history": history,
         "sanity": sanity_metrics,
+        "primary_valid_name": splits.primary_valid_name,
+        "train_mix_counts": splits.train_mix_counts,
+        "train_bucket_counts": {
+            name: len(samples) for name, samples in splits.train_buckets.items()
+        },
         "model": {
             "bounded_output": cfg.model.bounded_output,
             "mode_bias_init": cfg.model.mode_bias_init,

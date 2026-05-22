@@ -113,6 +113,21 @@ def test_mtp_v0_1_diverse_config_loads() -> None:
     assert cfg.loss.diversity_lambda > 0.0
 
 
+def test_mtp_v0_2_mixed_config_loads() -> None:
+    cfg = load_config(Path("configs/mtp_v0_2_mixed.yml"))
+
+    assert cfg.run.name == "mtp_v0_2_mixed"
+    assert cfg.window.train_sample_mix == {
+        "teacher_forcing_hidden": 0.5,
+        "known_tail_start": 0.25,
+        "base_center_hidden": 0.25,
+    }
+    assert cfg.window.valid_sample_types == (
+        "known_tail_start",
+        "base_center_hidden",
+    )
+
+
 def test_zero_k_wells_fails(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError, match="data.k_wells must be -1 or a positive integer"

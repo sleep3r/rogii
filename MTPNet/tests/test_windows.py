@@ -88,6 +88,32 @@ def test_valid_window_mode_uses_only_known_tail_history() -> None:
     assert windows[0].center_tvt == windows[0].history_tvt[-1]
 
 
+def test_base_path_windows_cover_hidden_chunks_after_first() -> None:
+    cfg = WindowConfig(
+        rows_per_step=4,
+        history_steps=4,
+        future_steps=6,
+        vertical_bins=32,
+        vertical_radius_ft=60.0,
+        stride_steps=4,
+        max_windows_per_well=10,
+    )
+    first_hidden_step = 20
+    windows = build_windows_for_well(
+        "well_a",
+        synthetic_horizontal(),
+        synthetic_typewell(),
+        cfg,
+        history_mode="base_path",
+        center_source="base_path",
+    )
+
+    assert len(windows) > 1
+    assert {sample.sample_type for sample in windows} == {"base_center_hidden"}
+    assert any(sample.start_step > first_hidden_step - cfg.history_steps for sample in windows)
+    assert all(np.isfinite(sample.history_tvt).all() for sample in windows)
+
+
 def test_build_channels_supports_robust_z_and_derivative_diff() -> None:
     channels = build_channels(
         horizontal_gr=np.array([10.0, 20.0, 30.0], dtype=np.float32),

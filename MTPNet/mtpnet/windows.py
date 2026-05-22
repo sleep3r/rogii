@@ -21,6 +21,7 @@ class WindowSample:
     well_id: str
     start_step: int
     center_tvt: float
+    sample_type: str = "teacher_forcing_hidden"
 
 
 def _compress(values: np.ndarray, rows_per_step: int) -> np.ndarray:
@@ -75,6 +76,33 @@ def _crop_typewell(
     return crop_tvt.astype(np.float32), crop_gr.astype(np.float32)
 
 
+def _linear_tail_base_path(comp_tvt_input: np.ndarray, first_hidden: int) -> np.ndarray:
+    base = np.asarray(comp_tvt_input, dtype=np.float32).copy()
+    known = np.flatnonzero(np.isfinite(base[:first_hidden]))
+    if len(known) == 0:
+        return base
+    last_known = int(known[-1])
+    diffs = np.diff(base[known])
+    finite_diffs = diffs[np.isfinite(diffs)]
+    if len(finite_diffs) == 0:
+        slope = 0.0
+    else:
+        slope = float(np.median(finite_diffs[-min(8, len(finite_diffs)) :]))
+    for step in range(last_known + 1, len(base)):
+        base[step] = float(base[last_known] + slope * (step - last_known))
+    return base.astype(np.float32)
+
+
+def _sample_type_for(history_mode: str) -> str:
+    if history_mode == "teacher_forcing":
+        return "teacher_forcing_hidden"
+    if history_mode == "known_tail_start":
+        return "known_tail_start"
+    if history_mode == "base_path":
+        return "base_center_hidden"
+    raise ValueError(f"Unsupported history_mode: {history_mode}")
+
+
 def build_windows_for_well(
     well_id: str,
     horizontal: pd.DataFrame,
@@ -106,10 +134,11 @@ def build_windows_for_well(
     first_hidden = int(hidden_steps[0])
     if history_mode == "known_tail_only":
         history_mode = "known_tail_start"
-    if history_mode not in {"teacher_forcing", "known_tail_start"}:
+    if history_mode not in {"teacher_forcing", "known_tail_start", "base_path"}:
         raise ValueError(f"Unsupported history_mode: {history_mode}")
-    if center_source not in {"true_tvt", "tvt_input_tail"}:
+    if center_source not in {"true_tvt", "tvt_input_tail", "base_path"}:
         raise ValueError(f"Unsupported center_source: {center_source}")
+    base_path = _linear_tail_base_path(comp_tvt_input, first_hidden)
     min_start = max(0, first_hidden - cfg.history_steps)
     max_start = len(comp_tvt) - total_steps
     if history_mode == "known_tail_start":
@@ -131,19 +160,36 @@ def build_windows_for_well(
                 continue
             if not hidden[fut_slice].all():
                 continue
+        if history_mode == "base_path":
+            if not np.isfinite(base_path[hist_slice]).all():
+                continue
+            if not hidden[fut_slice].all():
+                continue
         if center_source == "tvt_input_tail":
             center_tvt = float(comp_tvt_input[start + cfg.history_steps - 1])
+            if not np.isfinite(center_tvt):
+                continue
+        elif center_source == "base_path":
+            center_tvt = float(base_path[start + cfg.history_steps - 1])
             if not np.isfinite(center_tvt):
                 continue
         else:
             center_tvt = float(comp_tvt[start + cfg.history_steps - 1])
         crop_tvt, crop_gr = _crop_typewell(typewell, center_tvt, cfg)
         path_all = _target_bins(comp_tvt[start : start + total_steps], crop_tvt)
+        if history_mode == "base_path":
+            history_path = _target_bins(
+                base_path[start : start + cfg.history_steps], crop_tvt
+            )
+        else:
+            history_path = path_all[: cfg.history_steps]
         history_bins = np.full(total_steps, np.nan, dtype=np.float32)
-        history_bins[: cfg.history_steps] = path_all[: cfg.history_steps]
+        history_bins[: cfg.history_steps] = history_path
         history_tvt = (
             comp_tvt_input[hist_slice]
             if history_mode == "known_tail_start"
+            else base_path[hist_slice]
+            if history_mode == "base_path"
             else comp_tvt[hist_slice]
         )
         x = build_channels(
@@ -163,6 +209,7 @@ def build_windows_for_well(
                 well_id=well_id,
                 start_step=start,
                 center_tvt=center_tvt,
+                sample_type=_sample_type_for(history_mode),
             )
         )
         if len(windows) >= cfg.max_windows_per_well:
@@ -201,4 +248,5 @@ class WindowDataset(Dataset):
             "crop_tvt": torch.from_numpy(sample.crop_tvt).float(),
             "well_id": sample.well_id,
             "start_step": sample.start_step,
+            "sample_type": sample.sample_type,
         }

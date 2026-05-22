@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from mtpnet.train import train_from_config
+from mtpnet.train import prepare_sample_splits, train_from_config
 
 
 def make_well(root: Path, well_id: str, shift: float) -> None:
@@ -72,3 +72,49 @@ def test_train_from_config_writes_metrics(tmp_path: Path) -> None:
     assert (tmp_path / "artifacts" / "unit" / "checkpoints" / "best.pt").exists()
     report = tmp_path / "artifacts" / "unit" / "geometry_report.md"
     assert "MTP_V0_GEOMETRY_REPORT" in report.read_text(encoding="utf-8")
+
+
+def test_prepare_sample_splits_builds_v0_2_mixed_sets(tmp_path: Path) -> None:
+    train_dir = tmp_path / "data" / "train"
+    make_well(train_dir, "well_a", 0.0)
+    make_well(train_dir, "well_b", 5.0)
+    config = {
+        "data": {"data_dir": str(tmp_path / "data"), "train_dir": str(train_dir), "k_wells": -1},
+        "window": {
+            "rows_per_step": 4,
+            "history_steps": 4,
+            "future_steps": 6,
+            "vertical_bins": 32,
+            "vertical_radius_ft": 60.0,
+            "stride_steps": 4,
+            "max_windows_per_well": 4,
+            "channels": ["gr_diff", "abs_gr_diff", "history_mask", "history_sdf", "finite_mask"],
+            "train_sample_mix": {
+                "teacher_forcing_hidden": 0.5,
+                "known_tail_start": 0.25,
+                "base_center_hidden": 0.25,
+            },
+            "valid_sample_types": ["known_tail_start", "base_center_hidden"],
+        },
+        "validation": {"valid_fraction": 0.5, "seed": 42},
+    }
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    from mtpnet.config import load_config
+
+    splits = prepare_sample_splits(load_config(config_path))
+
+    assert set(splits.train_buckets) == {
+        "teacher_forcing_hidden",
+        "known_tail_start",
+        "base_center_hidden",
+    }
+    assert set(splits.valid_sets) == {
+        "valid_first_chunk_known_tail",
+        "valid_base_center_all_hidden",
+    }
+    assert splits.primary_valid_name == "valid_base_center_all_hidden"
+    assert len(splits.valid_sets["valid_base_center_all_hidden"]) > len(
+        splits.valid_sets["valid_first_chunk_known_tail"]
+    )

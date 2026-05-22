@@ -33,6 +33,8 @@ class WindowConfig:
     valid_history_mode: str = "known_tail_only"
     train_center_source: str = "true_tvt"
     valid_center_source: str = "tvt_input_tail"
+    train_sample_mix: dict[str, float] = field(default_factory=dict)
+    valid_sample_types: tuple[str, ...] = ()
     channels: tuple[str, ...] = (
         "gr_diff",
         "abs_gr_diff",
@@ -179,6 +181,18 @@ def load_config(path: str | Path) -> MTPConfig:
             window_raw.get(
                 "valid_center_source", default_window.valid_center_source
             )
+        ),
+        train_sample_mix={
+            str(key): float(value)
+            for key, value in (
+                window_raw.get(
+                    "train_sample_mix", default_window.train_sample_mix
+                )
+                or {}
+            ).items()
+        },
+        valid_sample_types=tuple(
+            window_raw.get("valid_sample_types", default_window.valid_sample_types)
         ),
         channels=tuple(window_raw.get("channels", default_window.channels)),
     )

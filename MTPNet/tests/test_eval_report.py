@@ -69,3 +69,38 @@ def test_geometry_report_uses_v0_1_diversity_title(tmp_path: Path) -> None:
 
     report = (tmp_path / "geometry_report.md").read_text(encoding="utf-8")
     assert report.startswith("MTP_V0_1_DIVERSITY_REPORT")
+
+
+def test_geometry_report_uses_v0_2_mixed_title_and_validation_sections(
+    tmp_path: Path,
+) -> None:
+    metrics = {
+        "run_name": "mtp_v0_2_mixed",
+        "train": {"num_windows": 3},
+        "valid": {"num_windows": 2},
+        "valid_first_chunk_known_tail": {
+            "num_windows": 1,
+            "top1_rmse_ft": 4.0,
+            "weighted_mean_rmse_ft": 3.5,
+            "oracle_top3_rmse_ft": 2.5,
+            "oracle_topk_rmse_ft": 2.0,
+            "mode_entropy_mean": 0.4,
+            "mode_usage_histogram": {"0": 1},
+        },
+        "valid_base_center_all_hidden": {
+            "num_windows": 2,
+            "top1_rmse_ft": 5.0,
+            "weighted_mean_rmse_ft": 4.5,
+            "oracle_top3_rmse_ft": 3.5,
+            "oracle_topk_rmse_ft": 3.0,
+            "mode_entropy_mean": 0.5,
+            "mode_usage_histogram": {"1": 2},
+        },
+    }
+
+    write_geometry_report(metrics, tmp_path)
+
+    report = (tmp_path / "geometry_report.md").read_text(encoding="utf-8")
+    assert report.startswith("MTP_V0_2_MIXED_REPORT")
+    assert "valid_first_chunk_known_tail:" in report
+    assert "valid_base_center_all_hidden:" in report

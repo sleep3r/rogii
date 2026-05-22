@@ -1,0 +1,61 @@
+data:
+  data_dir: data
+  train_dir: data/train
+  test_dir: data/test
+  k_wells: -1
+  copy_from: ../old/data
+
+window:
+  rows_per_step: 32
+  history_steps: 8
+  future_steps: 16
+  vertical_bins: 64
+  vertical_radius_ft: 160.0
+  stride_steps: 4
+  max_windows_per_well: 64
+  train_sample_mix:
+    teacher_forcing_hidden: 0.5
+    known_tail_start: 0.25
+    base_center_hidden: 0.25
+  valid_sample_types:
+    - known_tail_start
+    - base_center_hidden
+  channels: [gr_diff, gr_z_diff, dgr_diff, abs_gr_diff, history_mask, history_sdf, finite_mask]
+
+model:
+  k_modes: 8
+  conv_channels: [16, 32, 64, 128]
+  hidden_dims: [512, 1024]
+  dropout: 0.05
+  bounded_output: true
+  mode_bias_init: true
+  mode_bias_span_bins: 20.0
+
+loss:
+  path_loss: mae
+  alpha_cls: 0.05
+  cls_warmup_epochs: 2
+  alpha_cls_warmup_value: 0.0
+  smooth_lambda: 0.01
+  entropy_lambda: 0.01
+  entropy_warmup_epochs: 3
+  entropy_final_lambda: 0.002
+  diversity_lambda: 0.02
+  diversity_margin_bins: 3.0
+
+train:
+  batch_size: 64
+  epochs: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
+  num_workers: 0
+  seed: 42
+
+validation:
+  valid_fraction: 0.2
+  seed: 42
+
+run:
+  name: mtp_v0_2_mixed
+  output_dir: artifacts/mtp_v0_2_mixed
