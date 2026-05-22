@@ -6,8 +6,9 @@ SMOKE_CONFIG ?= configs/mtp_smoke.yml
 RUN_DIR ?= artifacts/mtp_v0
 COPY_SOURCE ?= ../old/data
 COPY_TARGET ?= data
+CODEBASE_BUNDLE ?= artifacts/codebase_bundle.md
 
-.PHONY: install test copy-data smoke train eval
+.PHONY: install test copy-data smoke train eval codebase-bundle collect-code
 
 install:
 	$(UV) sync --extra dev
@@ -26,3 +27,8 @@ train:
 
 eval:
 	$(UV) run --extra dev python -m mtpnet.cli eval --run-dir $(RUN_DIR)
+
+codebase-bundle:
+	$(UV) run --extra dev python -m mtpnet.codebase_bundle --root . --output $(CODEBASE_BUNDLE)
+
+collect-code: codebase-bundle
