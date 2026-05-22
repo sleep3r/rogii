@@ -49,7 +49,7 @@ class MTPNet(nn.Module):
             head.extend(
                 [
                     nn.Linear(in_dim, hidden_dim, bias=False),
-                    nn.BatchNorm1d(hidden_dim),
+                    nn.LayerNorm(hidden_dim),
                     nn.GELU(),
                     nn.Dropout(cfg.dropout),
                 ]

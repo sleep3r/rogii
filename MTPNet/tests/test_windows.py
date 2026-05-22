@@ -37,8 +37,54 @@ def test_build_windows_shape_and_metadata() -> None:
     assert sample.x.shape == (5, 32, 10)
     assert sample.target_bins.shape == (6,)
     assert sample.target_tvt.shape == (6,)
+    assert sample.crop_tvt.shape == (32,)
     assert sample.well_id == "well_a"
     assert np.isfinite(sample.x).all()
+
+
+def test_typewell_crop_uses_regular_vertical_radius_grid() -> None:
+    cfg = WindowConfig(
+        rows_per_step=4,
+        history_steps=4,
+        future_steps=6,
+        vertical_bins=5,
+        vertical_radius_ft=20.0,
+        stride_steps=2,
+        max_windows_per_well=1,
+    )
+    sample = build_windows_for_well(
+        "well_a", synthetic_horizontal(), synthetic_typewell(), cfg
+    )[0]
+
+    np.testing.assert_allclose(sample.crop_tvt[0], sample.center_tvt - 20.0)
+    np.testing.assert_allclose(sample.crop_tvt[-1], sample.center_tvt + 20.0)
+    np.testing.assert_allclose(np.diff(sample.crop_tvt), np.full(4, 10.0), atol=1e-4)
+
+
+def test_valid_window_mode_uses_only_known_tail_history() -> None:
+    cfg = WindowConfig(
+        rows_per_step=4,
+        history_steps=4,
+        future_steps=6,
+        vertical_bins=32,
+        vertical_radius_ft=60.0,
+        stride_steps=2,
+        max_windows_per_well=3,
+    )
+    horizontal = synthetic_horizontal()
+    first_hidden_step = 20
+    windows = build_windows_for_well(
+        "well_a",
+        horizontal,
+        synthetic_typewell(),
+        cfg,
+        history_mode="known_tail_start",
+        center_source="tvt_input_tail",
+    )
+
+    assert [sample.start_step for sample in windows] == [first_hidden_step - cfg.history_steps]
+    assert windows[0].start_step + cfg.history_steps == first_hidden_step
+    assert windows[0].center_tvt == windows[0].history_tvt[-1]
 
 
 def test_split_wells_keeps_well_boundaries() -> None:

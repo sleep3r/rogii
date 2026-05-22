@@ -46,7 +46,7 @@ def test_train_from_config_writes_metrics(tmp_path: Path) -> None:
         "model": {"k_modes": 3, "conv_channels": [8, 16], "hidden_dims": [32], "dropout": 0.0},
         "train": {
             "batch_size": 4,
-            "epochs": 1,
+            "epochs": 2,
             "learning_rate": 0.001,
             "device": "cpu",
             "num_workers": 0,
@@ -59,5 +59,7 @@ def test_train_from_config_writes_metrics(tmp_path: Path) -> None:
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     summary = train_from_config(config_path)
     assert summary["valid"]["num_windows"] > 0
+    assert summary["best_epoch"] >= 1
+    assert summary["best_valid_score"] == summary["valid"]["checkpoint_score"]
     assert (tmp_path / "artifacts" / "unit" / "metrics.json").exists()
     assert (tmp_path / "artifacts" / "unit" / "checkpoints" / "best.pt").exists()

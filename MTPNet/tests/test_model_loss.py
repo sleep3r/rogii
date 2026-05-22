@@ -18,6 +18,20 @@ def test_model_forward_shapes() -> None:
     assert logits.shape == (3, 4)
 
 
+def test_model_head_supports_train_batch_size_one() -> None:
+    model = MTPNet(
+        in_channels=5,
+        height=32,
+        width=10,
+        future_steps=6,
+        cfg=ModelConfig(k_modes=4, conv_channels=(8, 16), hidden_dims=(32,)),
+    )
+    model.train()
+    paths, logits = model(torch.randn(1, 5, 32, 10))
+    assert paths.shape == (1, 4, 6)
+    assert logits.shape == (1, 4)
+
+
 def test_mtp_loss_prefers_closest_mode_and_backpropagates() -> None:
     pred = torch.tensor([[[0.0, 0.0], [5.0, 5.0], [1.0, 1.0]]], requires_grad=True)
     logits = torch.zeros(1, 3, requires_grad=True)
