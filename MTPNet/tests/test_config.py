@@ -401,6 +401,7 @@ def test_v4_synthetic_and_corr_head_config_loads(tmp_path: Path) -> None:
 def test_mtp_v4_configs_load() -> None:
     pretrain = load_config(Path("configs/mtp_v4_synth_pretrain.yml"))
     finetune = load_config(Path("configs/mtp_v4_sim2real.yml"))
+    cheap_retry = load_config(Path("configs/mtp_v4_sim2real_cheap_retry.yml"))
 
     assert pretrain.run.name == "mtp_v4_synth_pretrain"
     assert pretrain.synthetic.enabled is True
@@ -415,6 +416,18 @@ def test_mtp_v4_configs_load() -> None:
         "artifacts/mtp_v4_synth_pretrain/checkpoints/best.pt"
     )
     assert finetune.train.selection_source == "real"
+    assert cheap_retry.run.name == "mtp_v4_sim2real_cheap_retry"
+    assert cheap_retry.run.output_dir == Path("artifacts/mtp_v4_sim2real_cheap_retry")
+    assert cheap_retry.train.init_checkpoint == finetune.train.init_checkpoint
+    assert cheap_retry.train.epochs == 16
+    assert cheap_retry.corr_head.alpha_real == pytest.approx(0.5)
+    assert cheap_retry.augmentation.drop_all_priors_prob == pytest.approx(0.50)
+    assert cheap_retry.augmentation.batch_mix == {
+        "normal": 0.30,
+        "no_priors": 0.40,
+        "jittered_priors": 0.20,
+        "wrong_priors": 0.10,
+    }
 
 
 def test_zero_k_wells_fails(tmp_path: Path) -> None:
