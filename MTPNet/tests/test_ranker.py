@@ -11,7 +11,9 @@ from mtpnet.ranker import (
     FEATURE_COLUMNS,
     apply_ranker_logits,
     build_mode_feature_frame,
+    make_group_folds,
     normalize_mode_windows,
+    run_ranker_crossfit_from_frames,
     run_ranker_from_frames,
     split_ranker_wells,
     train_catboost_ranker,
@@ -89,6 +91,22 @@ def test_split_ranker_wells_is_group_safe_and_deterministic() -> None:
     assert train == train_again
     assert valid == valid_again
     assert len(valid) == 2
+
+
+def test_make_group_folds_covers_each_well_once() -> None:
+    folds = make_group_folds(["a", "b", "c", "d", "e"], n_folds=3, seed=11)
+    held_out = [well for fold in folds for well in fold["valid_wells"]]
+
+    assert sorted(held_out) == ["a", "b", "c", "d", "e"]
+    for fold in folds:
+        assert set(fold["train_wells"]).isdisjoint(fold["valid_wells"])
+        assert set(fold["train_wells"]) | set(fold["valid_wells"]) == {
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+        }
 
 
 def test_feature_columns_exclude_target_and_oracle_leakage() -> None:
@@ -254,3 +272,31 @@ def test_run_ranker_from_frames_writes_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "checkpoints" / "mtp_ranker_catboost.cbm").exists()
     assert summary["ranker_split"]["train_wells"]
     assert summary["ranker_split"]["valid_wells"]
+
+
+def test_run_ranker_crossfit_from_frames_writes_oof_predictions(tmp_path: Path) -> None:
+    wells = ["a", "b", "c", "d", "e"]
+    cfg = MTPConfig(
+        window=WindowConfig(history_steps=1, future_steps=2, rows_per_step=1),
+        run=RunConfig(name="tiny_crossfit", output_dir=tmp_path),
+    )
+
+    summary = run_ranker_crossfit_from_frames(
+        run_dir=tmp_path,
+        cfg=cfg,
+        mode_windows=_windows_for_wells(wells),
+        hidden_rows_all=_hidden_rows_for_wells(wells),
+        gr_context=_gr_context(wells),
+        n_folds=3,
+        seed=9,
+        ranker_params={"iterations": 30, "depth": 2, "od_wait": 10},
+    )
+    oof = pd.read_parquet(tmp_path / "oof_ranker_logits.parquet")
+
+    assert (tmp_path / "crossfit_ranker_metrics.json").exists()
+    assert (tmp_path / "crossfit_ranker_report.md").exists()
+    assert len(oof) == len(wells) * 2
+    assert sorted(oof["well_id"].unique().tolist()) == wells
+    assert oof["predicted_error_ft"].notna().all()
+    assert summary["folds"] == 3
+    assert summary["oof_rows"] == len(oof)

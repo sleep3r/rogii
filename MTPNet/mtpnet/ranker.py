@@ -104,6 +104,30 @@ def split_ranker_wells(
     return train, valid
 
 
+def make_group_folds(
+    well_ids: list[str] | set[str] | tuple[str, ...],
+    *,
+    n_folds: int,
+    seed: int,
+) -> list[dict[str, list[str]]]:
+    wells = sorted({str(well_id) for well_id in well_ids})
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least 2")
+    if n_folds > len(wells):
+        raise ValueError("n_folds cannot exceed number of wells")
+    rng = np.random.default_rng(seed)
+    order = np.asarray(wells, dtype=object)
+    rng.shuffle(order)
+    chunks = np.array_split(order, n_folds)
+    folds: list[dict[str, list[str]]] = []
+    all_wells = set(wells)
+    for index, chunk in enumerate(chunks):
+        valid = sorted(str(item) for item in chunk.tolist())
+        train = sorted(all_wells.difference(valid))
+        folds.append({"fold": index, "train_wells": train, "valid_wells": valid})
+    return folds
+
+
 def _as_float_array(value: Any) -> np.ndarray:
     arr = np.asarray(value)
     if arr.dtype == object:
@@ -457,6 +481,139 @@ def train_catboost_ranker(
     }
 
 
+def _predict_ranker_errors(model: Any, features: pd.DataFrame) -> np.ndarray:
+    return np.expm1(model.predict(features[list(FEATURE_COLUMNS)])).astype(np.float32)
+
+
+def _ranker_oof_metrics(oof: pd.DataFrame) -> dict[str, float]:
+    best_rows = (
+        oof.sort_values(["window_id", "predicted_error_ft"])
+        .groupby("window_id", as_index=False)
+        .head(1)
+    )
+    top3 = (
+        oof.sort_values(["window_id", "predicted_error_ft"])
+        .groupby("window_id", as_index=False)
+        .head(3)
+    )
+    return {
+        "oof_mode_rmse_mae": float(
+            np.mean(
+                np.abs(
+                    oof["predicted_error_ft"].to_numpy(dtype=np.float32)
+                    - oof["mode_rmse_ft"].to_numpy(dtype=np.float32)
+                )
+            )
+        ),
+        "oof_top1_ft": float(best_rows["mode_rmse_ft"].mean()),
+        "oof_best_mode_top1_rate": float(best_rows["is_best_mode"].mean()),
+        "oof_best_mode_top3_rate": float(
+            top3.groupby("window_id")["is_best_mode"].max().mean()
+        ),
+    }
+
+
+def _write_crossfit_report(
+    run_dir: Path,
+    *,
+    summary: dict[str, Any],
+) -> Path:
+    lines = [
+        "MTP_RANKER_CROSSFIT_V0_REPORT",
+        "",
+        "dataset:",
+        f"  feature_rows: {summary['feature_rows']}",
+        f"  oof_rows: {summary['oof_rows']}",
+        f"  wells: {summary['wells']}",
+        f"  folds: {summary['folds']}",
+        "",
+        "oof metrics:",
+        json.dumps(summary["oof_metrics"], indent=2),
+        "",
+        "folds:",
+        json.dumps(summary["fold_summaries"], indent=2),
+    ]
+    path = run_dir / "crossfit_ranker_report.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def run_ranker_crossfit_from_frames(
+    *,
+    run_dir: str | Path,
+    cfg: MTPConfig,
+    mode_windows: pd.DataFrame,
+    hidden_rows_all: pd.DataFrame,
+    gr_context: dict[str, dict[str, np.ndarray]] | None = None,
+    n_folds: int = 5,
+    seed: int = 42,
+    ranker_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    (run_path / "checkpoints").mkdir(exist_ok=True)
+    mode_windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
+    hidden_rows_all = _attach_prior_columns(hidden_rows_all, cfg)
+    features = build_mode_feature_frame(
+        mode_windows,
+        hidden_rows_all,
+        gr_context or {},
+        history_steps=cfg.window.history_steps,
+        future_steps=cfg.window.future_steps,
+    )
+    folds = make_group_folds(
+        set(mode_windows["well_id"].astype(str)), n_folds=n_folds, seed=seed
+    )
+    oof_parts: list[pd.DataFrame] = []
+    fold_summaries: list[dict[str, Any]] = []
+    for fold in folds:
+        train_wells = set(fold["train_wells"])
+        valid_wells = set(fold["valid_wells"])
+        model, train_metrics = train_catboost_ranker(
+            features,
+            train_wells=train_wells,
+            valid_wells=valid_wells,
+            seed=seed + int(fold["fold"]),
+            params=ranker_params,
+        )
+        model_path = run_path / "checkpoints" / f"mtp_ranker_crossfit_fold{fold['fold']}.cbm"
+        model.save_model(str(model_path))
+        valid = features[features["well_id"].isin(valid_wells)].copy()
+        valid["fold"] = int(fold["fold"])
+        valid["predicted_error_ft"] = _predict_ranker_errors(model, valid)
+        valid["ranker_logit_t5"] = -valid["predicted_error_ft"] / 5.0
+        oof_parts.append(valid)
+        fold_summaries.append(
+            {
+                "fold": int(fold["fold"]),
+                "train_wells": sorted(train_wells),
+                "valid_wells": sorted(valid_wells),
+                **train_metrics,
+            }
+        )
+    oof = pd.concat(oof_parts, ignore_index=True)
+    oof["ranker_prob_t5"] = 0.0
+    for _, index in oof.groupby("window_id").groups.items():
+        local = oof.loc[index, "ranker_logit_t5"].to_numpy(dtype=np.float32)
+        oof.loc[index, "ranker_prob_t5"] = _softmax_np(local)
+    oof.to_parquet(run_path / "oof_ranker_logits.parquet", index=False)
+    features.to_parquet(run_path / "crossfit_ranker_mode_features.parquet", index=False)
+    summary: dict[str, Any] = {
+        "feature_rows": int(len(features)),
+        "oof_rows": int(len(oof)),
+        "wells": int(oof["well_id"].nunique()),
+        "folds": int(n_folds),
+        "seed": int(seed),
+        "oof_metrics": _ranker_oof_metrics(oof),
+        "fold_summaries": fold_summaries,
+    }
+    (run_path / "crossfit_ranker_metrics.json").write_text(
+        json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
+    )
+    _write_crossfit_report(run_path, summary=summary)
+    return summary
+
+
 def apply_ranker_logits(
     mode_windows: pd.DataFrame,
     predictions: pd.DataFrame,
@@ -799,4 +956,36 @@ def run_ranker(
     )
     best = min(summary["candidates"], key=lambda item: item.get("rmse", float("inf")))
     print(json.dumps(_json_safe(best), indent=2), flush=True)
+    return summary
+
+
+def run_ranker_crossfit(
+    run_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    n_folds: int = 5,
+    seed: int = 42,
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    out_path = Path(output_dir) if output_dir is not None else run_path
+    cfg = _load_run_config(run_path)
+    windows_path = run_path / "stitch_window_modes.parquet"
+    if not windows_path.exists():
+        raise FileNotFoundError(
+            f"Missing {windows_path}; run `make stitch RUN_DIR={run_path}` first"
+        )
+    mode_windows = pd.read_parquet(windows_path)
+    well_ids = set(mode_windows["well_id"].astype(str))
+    hidden_rows = _load_hidden_rows(cfg, well_ids)
+    gr_context = _load_gr_context(cfg, well_ids)
+    summary = run_ranker_crossfit_from_frames(
+        run_dir=out_path,
+        cfg=cfg,
+        mode_windows=mode_windows,
+        hidden_rows_all=hidden_rows,
+        gr_context=gr_context,
+        n_folds=n_folds,
+        seed=seed,
+    )
+    print(json.dumps(_json_safe(summary["oof_metrics"]), indent=2), flush=True)
     return summary

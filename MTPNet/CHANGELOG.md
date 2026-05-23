@@ -19,6 +19,52 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### EXP-MTPRANKER-CROSSFIT-V0 - OOF ranker logits for tracker
+
+- Command/config:
+  - `make mtp-ranker-crossfit RUN_DIR=artifacts/mtp_v1_prior_conditioned N_FOLDS=5 OUTPUT=artifacts/mtp_ranker_crossfit_v0`;
+  - `make track RUN_DIR=artifacts/mtp_v1_prior_conditioned LOGIT_SOURCE=ranker_oof RANKER_LOGITS=artifacts/mtp_ranker_crossfit_v0/oof_ranker_logits.parquet`;
+  - CNN was not retrained; only existing validation-window MTP modes were used.
+- What changed:
+  - added 5-fold group cross-fit for the CatBoost mode ranker over the current
+    MTP validation wells;
+  - every validation well now receives ranker logits from a fold that did not
+    train on that well;
+  - added `rank-crossfit` CLI, `rank-crossfit`/`mtp-ranker-crossfit` Make
+    targets, and external `ranker_oof` tracker logits;
+  - cross-fit writes `oof_ranker_logits.parquet`,
+    `crossfit_ranker_mode_features.parquet`, `crossfit_ranker_metrics.json`,
+    `crossfit_ranker_report.md`, and fold checkpoints.
+- Cross-fit ranker OOF metrics:
+  - mode error MAE: `6.60133 ft`;
+  - OOF top1 mode RMSE: `7.57280 ft`;
+  - best-mode top1 rate: `0.44288`;
+  - best-mode top3 rate: `0.92415`.
+- OOF-ranker tracker result on full validation hidden rows:
+  - B2 baseline RMSE: `9.94786 ft`;
+  - best guarded candidate `b2_plus_mtp_track_weighted_a0.2_clip20`:
+    `9.92943 ft`;
+  - gain vs B2: `+0.01843 ft`;
+  - covered RMSE: `9.85010 ft`;
+  - P95 shift vs B2: `1.08984 ft`;
+  - worst well RMSE: `44.22050 ft`;
+  - coverage: `98.45%`.
+- Takeaway:
+  - cross-fit removes the ranker leakage risk identified by the split audit;
+  - clean OOF ranker logits keep the tracker mildly positive but far below the
+    previous in-sample `+0.12082 ft` gain;
+  - bottleneck remains learned mode selection/calibration, not tracker
+    infrastructure.
+- Decision:
+  - tracker plus OOF ranker is a clean diagnostic GO;
+  - performance is NO-GO for submit by the `+0.10 ft` gain threshold;
+  - next work should improve ranker objective/features or build full fold-safe
+    MTP/ranker OOF before packaging.
+- Verification:
+  - focused cross-fit tests: `3 passed`;
+  - full suite before report update: `75 passed`;
+  - real cross-fit and tracker jobs completed and wrote their artifacts.
+
 ### AUDIT-MTPTRACK-V0 - Ranker split hygiene audit
 
 - Command/config:

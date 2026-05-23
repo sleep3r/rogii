@@ -10,6 +10,7 @@ from mtpnet.config import MTPConfig, RunConfig, WindowConfig
 from mtpnet.track import (
     TrackConfig,
     TrackParticle,
+    apply_tracker_logit_source,
     merge_and_prune_particles,
     particles_to_step_predictions,
     run_track_split_audit_from_frames,
@@ -221,3 +222,23 @@ def test_run_track_split_audit_compares_train_valid_and_nn_ranker(tmp_path: Path
     assert "ranker" in summary["subsets"]["ranker_valid"]
     assert (tmp_path / "track_split_audit.json").exists()
     assert (tmp_path / "track_split_audit.md").exists()
+
+
+def test_run_tracker_requires_oof_logits_for_ranker_oof(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                start_step=0,
+                logits=[2.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            )
+        ]
+    )
+    with pytest.raises(FileNotFoundError, match="ranker_oof"):
+        apply_tracker_logit_source(
+            windows,
+            logit_source="ranker_oof",
+            run_dir=tmp_path,
+            ranker_logits=None,
+            tau_ft=5.0,
+        )

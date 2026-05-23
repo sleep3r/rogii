@@ -32,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     rank_parser.add_argument("--seed", type=int, default=42)
     rank_parser.add_argument("--valid-fraction", type=float, default=0.35)
 
+    rank_crossfit_parser = sub.add_parser(
+        "rank-crossfit", help="Train OOF CatBoost MTP ranker folds on current MTP windows"
+    )
+    rank_crossfit_parser.add_argument("--run-dir", type=Path, required=True)
+    rank_crossfit_parser.add_argument("--output-dir", type=Path)
+    rank_crossfit_parser.add_argument("--n-folds", type=int, default=5)
+    rank_crossfit_parser.add_argument("--seed", type=int, default=42)
+
     track_parser = sub.add_parser(
         "track", help="Sequentially track MTP modes as particle realizations"
     )
@@ -41,7 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--merge-tolerance-ft", type=float, default=3.0)
     track_parser.add_argument("--overlap-penalty", type=float, default=0.10)
     track_parser.add_argument("--max-modes-per-window", type=int, default=8)
-    track_parser.add_argument("--logit-source", choices=("ranker", "nn"), default="ranker")
+    track_parser.add_argument(
+        "--logit-source", choices=("ranker", "ranker_oof", "nn"), default="ranker"
+    )
+    track_parser.add_argument("--ranker-logits", type=Path)
     track_parser.add_argument("--tau-ft", type=float, default=5.0)
 
     track_audit_parser = sub.add_parser(
@@ -88,6 +99,16 @@ def main(argv: list[str] | None = None) -> None:
             valid_fraction=args.valid_fraction,
         )
         return
+    if args.command == "rank-crossfit":
+        from .ranker import run_ranker_crossfit
+
+        run_ranker_crossfit(
+            args.run_dir,
+            output_dir=args.output_dir,
+            n_folds=args.n_folds,
+            seed=args.seed,
+        )
+        return
     if args.command == "track":
         from .track import run_tracker
 
@@ -99,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
             overlap_penalty=args.overlap_penalty,
             max_modes_per_window=args.max_modes_per_window,
             logit_source=args.logit_source,
+            ranker_logits=args.ranker_logits,
             tau_ft=args.tau_ft,
         )
         return

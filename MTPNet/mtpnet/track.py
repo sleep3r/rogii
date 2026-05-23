@@ -761,6 +761,39 @@ def run_track_split_audit(
     return summary
 
 
+def apply_tracker_logit_source(
+    mode_windows: pd.DataFrame,
+    *,
+    logit_source: str,
+    run_dir: str | Path,
+    ranker_logits: str | Path | None,
+    tau_ft: float,
+) -> tuple[pd.DataFrame, str]:
+    run_path = Path(run_dir)
+    windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
+    if logit_source == "nn":
+        return windows, "nn"
+    if logit_source == "ranker":
+        ranker_path = run_path / "ranker_predictions.parquet"
+        if not ranker_path.exists():
+            return windows, "nn"
+        return (
+            apply_ranker_logits(windows, pd.read_parquet(ranker_path), tau_ft=tau_ft),
+            "ranker",
+        )
+    if logit_source == "ranker_oof":
+        ranker_path = Path(ranker_logits) if ranker_logits is not None else (
+            run_path / "oof_ranker_logits.parquet"
+        )
+        if not ranker_path.exists():
+            raise FileNotFoundError(f"Missing ranker_oof logits: {ranker_path}")
+        return (
+            apply_ranker_logits(windows, pd.read_parquet(ranker_path), tau_ft=tau_ft),
+            "ranker_oof",
+        )
+    raise ValueError("logit_source must be 'ranker', 'ranker_oof', or 'nn'")
+
+
 def run_tracker(
     run_dir: str | Path,
     *,
@@ -770,6 +803,7 @@ def run_tracker(
     overlap_penalty: float = 0.10,
     max_modes_per_window: int = 8,
     logit_source: str = "ranker",
+    ranker_logits: str | Path | None = None,
     tau_ft: float = 5.0,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
@@ -779,17 +813,13 @@ def run_tracker(
         raise FileNotFoundError(
             f"Missing {windows_path}; run `make stitch RUN_DIR={run_path}` first"
         )
-    mode_windows = _ensure_window_ids(normalize_mode_windows(pd.read_parquet(windows_path)))
-    if logit_source == "ranker":
-        ranker_path = run_path / "ranker_predictions.parquet"
-        if ranker_path.exists():
-            mode_windows = apply_ranker_logits(
-                mode_windows, pd.read_parquet(ranker_path), tau_ft=tau_ft
-            )
-        else:
-            logit_source = "nn"
-    elif logit_source != "nn":
-        raise ValueError("logit_source must be 'ranker' or 'nn'")
+    mode_windows, logit_source = apply_tracker_logit_source(
+        pd.read_parquet(windows_path),
+        logit_source=logit_source,
+        run_dir=run_path,
+        ranker_logits=ranker_logits,
+        tau_ft=tau_ft,
+    )
     well_ids = set(mode_windows["well_id"].astype(str))
     hidden_rows = _load_hidden_rows(cfg, well_ids)
     summary = run_tracker_from_frames(
