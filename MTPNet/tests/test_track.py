@@ -12,6 +12,7 @@ from mtpnet.track import (
     TrackParticle,
     merge_and_prune_particles,
     particles_to_step_predictions,
+    run_track_split_audit_from_frames,
     run_tracker_from_frames,
     track_mode_windows,
 )
@@ -163,3 +164,60 @@ def test_run_tracker_from_frames_writes_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "track_report.md").exists()
     assert summary["tracker"]["n_realizations"] == 4
     assert summary["candidates"][0]["rows"] == 3
+
+
+def test_run_track_split_audit_compares_train_valid_and_nn_ranker(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                well_id="a",
+                start_step=0,
+                logits=[2.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            ),
+            _mode_window(
+                well_id="b",
+                start_step=0,
+                logits=[0.0, 2.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            ),
+        ]
+    )
+    windows["window_id"] = ["wa", "wb"]
+    ranker_features = pd.DataFrame(
+        {
+            "window_id": ["wa", "wa", "wb", "wb"],
+            "mode_id": [0, 1, 0, 1],
+            "predicted_error_ft": [0.0, 30.0, 0.0, 30.0],
+        }
+    )
+    hidden = pd.concat(
+        [
+            _hidden_rows([1, 2]).assign(well_id="a", id=["a_1", "a_2"]),
+            _hidden_rows([1, 2]).assign(well_id="b", id=["b_1", "b_2"]),
+        ],
+        ignore_index=True,
+    )
+    cfg = MTPConfig(
+        window=WindowConfig(history_steps=1, future_steps=2, rows_per_step=1),
+        run=RunConfig(name="tiny_audit", output_dir=tmp_path),
+    )
+
+    summary = run_track_split_audit_from_frames(
+        run_dir=tmp_path,
+        cfg=cfg,
+        mode_windows=windows,
+        hidden_rows_all=hidden,
+        ranker_predictions=ranker_features,
+        ranker_train_wells={"a"},
+        ranker_valid_wells={"b"},
+        track_config=TrackConfig(keep_top=4, n_realizations=4, merge_tolerance_ft=0.5),
+    )
+
+    assert set(summary["subsets"]) == {"all_valid", "ranker_train", "ranker_valid"}
+    assert summary["subsets"]["ranker_train"]["wells"] == 1
+    assert summary["subsets"]["ranker_valid"]["wells"] == 1
+    assert "nn" in summary["subsets"]["ranker_valid"]
+    assert "ranker" in summary["subsets"]["ranker_valid"]
+    assert (tmp_path / "track_split_audit.json").exists()
+    assert (tmp_path / "track_split_audit.md").exists()

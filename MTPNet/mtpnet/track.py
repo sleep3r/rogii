@@ -490,6 +490,277 @@ def run_tracker_from_frames(
     return summary
 
 
+def _metrics_by_name(metrics: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(item["candidate"]): item for item in metrics}
+
+
+def _best_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    return min(metrics, key=lambda item: item.get("rmse", float("inf")))
+
+
+def _run_tracker_metrics_only(
+    *,
+    cfg: MTPConfig,
+    mode_windows: pd.DataFrame,
+    hidden_rows_all: pd.DataFrame,
+    track_config: TrackConfig,
+    prefix: str,
+) -> dict[str, Any]:
+    particles = track_mode_windows(
+        mode_windows,
+        history_steps=cfg.window.history_steps,
+        future_steps=cfg.window.future_steps,
+        cfg=track_config,
+    )
+    candidate_steps = {
+        f"{prefix}_top1": particles_to_step_predictions(particles, strategy="top1"),
+        f"{prefix}_weighted": particles_to_step_predictions(particles, strategy="weighted"),
+    }
+    covered_keys = pd.concat(candidate_steps.values(), ignore_index=True)[
+        ["well_id", "step"]
+    ].drop_duplicates()
+    hidden_covered = hidden_rows_all.merge(
+        covered_keys, on=["well_id", "step"], how="inner"
+    )
+    metrics: list[dict[str, Any]] = []
+    for name, steps in candidate_steps.items():
+        rows = _apply_step_predictions_to_rows(
+            hidden_covered, steps, anchor_column="base_tvt"
+        )
+        metrics.append(evaluate_with_b2_fallback(hidden_rows_all, rows, name))
+        if name.endswith("_weighted"):
+            for alpha in (0.1, 0.2, 0.3):
+                for clip in (20.0, 30.0):
+                    blended = _blend_with_anchor(
+                        rows,
+                        anchor_column="b2_tvt",
+                        alpha=alpha,
+                        clip=clip,
+                    )
+                    metrics.append(
+                        evaluate_with_b2_fallback(
+                            hidden_rows_all,
+                            blended,
+                            f"b2_plus_{name}_a{alpha:g}_clip{int(clip)}",
+                        )
+                    )
+    return {
+        "particles": int(sum(len(items) for items in particles.values())),
+        "coverage": {
+            "covered_hidden_rows": int(len(hidden_covered)),
+            "total_hidden_rows": int(len(hidden_rows_all)),
+            "coverage_frac": float(len(hidden_covered) / max(1, len(hidden_rows_all))),
+        },
+        "candidates": metrics,
+        "best": _best_metric(metrics),
+    }
+
+
+def _subset_summary(
+    *,
+    cfg: MTPConfig,
+    mode_windows: pd.DataFrame,
+    hidden_rows_all: pd.DataFrame,
+    ranker_predictions: pd.DataFrame,
+    wells: set[str],
+    track_config: TrackConfig,
+    tau_ft: float,
+) -> dict[str, Any]:
+    subset_windows = mode_windows[mode_windows["well_id"].astype(str).isin(wells)].copy()
+    subset_hidden = hidden_rows_all[hidden_rows_all["well_id"].astype(str).isin(wells)].copy()
+    nn = _run_tracker_metrics_only(
+        cfg=cfg,
+        mode_windows=subset_windows,
+        hidden_rows_all=subset_hidden,
+        track_config=track_config,
+        prefix="mtp_track_nn",
+    )
+    ranker_windows = apply_ranker_logits(
+        subset_windows, ranker_predictions, tau_ft=tau_ft
+    )
+    ranker = _run_tracker_metrics_only(
+        cfg=cfg,
+        mode_windows=ranker_windows,
+        hidden_rows_all=subset_hidden,
+        track_config=track_config,
+        prefix="mtp_track_ranker",
+    )
+    base = _baseline_metrics(subset_hidden, "base_tvt", "base_schema10_pp")
+    b2 = _baseline_metrics(subset_hidden, "b2_tvt", "b2_guarded_submit")
+    return {
+        "wells": int(len(wells)),
+        "rows": int(len(subset_hidden)),
+        "base_schema10_pp": base,
+        "b2_guarded_submit": b2,
+        "nn": nn,
+        "ranker": ranker,
+        "ranker_gain_vs_b2": float(b2["rmse"] - ranker["best"]["rmse"]),
+        "nn_gain_vs_b2": float(b2["rmse"] - nn["best"]["rmse"]),
+    }
+
+
+def _write_split_audit_report(run_dir: Path, summary: dict[str, Any]) -> Path:
+    lines = [
+        "MTPTRACK_SPLIT_AUDIT",
+        "",
+        "tracker:",
+        json.dumps(summary["tracker"], indent=2),
+        "",
+    ]
+    for name in ("all_valid", "ranker_train", "ranker_valid"):
+        item = summary["subsets"][name]
+        b2 = item["b2_guarded_submit"]["rmse"]
+        nn_best = item["nn"]["best"]
+        ranker_best = item["ranker"]["best"]
+        lines.extend(
+            [
+                f"{name}:",
+                f"  wells: {item['wells']}",
+                f"  rows: {item['rows']}",
+                f"  B2: {b2}",
+                f"  tracker_NN_best: {nn_best['candidate']}",
+                f"  tracker_NN_RMSE: {nn_best['rmse']}",
+                f"  tracker_NN_gain: {item['nn_gain_vs_b2']}",
+                f"  tracker_ranker_best: {ranker_best['candidate']}",
+                f"  tracker_ranker_RMSE: {ranker_best['rmse']}",
+                f"  tracker_ranker_gain: {item['ranker_gain_vs_b2']}",
+                f"  tracker_ranker_P95_shift: {ranker_best.get('p95_abs_shift_vs_b2')}",
+                f"  tracker_ranker_worst: {ranker_best.get('worst_well_rmse')}",
+                "",
+            ]
+        )
+    decision = summary["decision"]
+    lines.extend(
+        [
+            "decision:",
+            f"  clean_go: {decision['clean_go']}",
+            f"  partial_go: {decision['partial_go']}",
+            f"  leakage_risk: {decision['leakage_risk']}",
+            f"  train_valid_gain_gap: {decision['train_valid_gain_gap']}",
+        ]
+    )
+    path = run_dir / "track_split_audit.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def run_track_split_audit_from_frames(
+    *,
+    run_dir: str | Path,
+    cfg: MTPConfig,
+    mode_windows: pd.DataFrame,
+    hidden_rows_all: pd.DataFrame,
+    ranker_predictions: pd.DataFrame,
+    ranker_train_wells: set[str],
+    ranker_valid_wells: set[str],
+    track_config: TrackConfig,
+    tau_ft: float = 5.0,
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    mode_windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
+    ranker_predictions = ranker_predictions.copy()
+    all_wells = set(mode_windows["well_id"].astype(str))
+    subsets = {
+        "all_valid": _subset_summary(
+            cfg=cfg,
+            mode_windows=mode_windows,
+            hidden_rows_all=hidden_rows_all,
+            ranker_predictions=ranker_predictions,
+            wells=all_wells,
+            track_config=track_config,
+            tau_ft=tau_ft,
+        ),
+        "ranker_train": _subset_summary(
+            cfg=cfg,
+            mode_windows=mode_windows,
+            hidden_rows_all=hidden_rows_all,
+            ranker_predictions=ranker_predictions,
+            wells=set(ranker_train_wells),
+            track_config=track_config,
+            tau_ft=tau_ft,
+        ),
+        "ranker_valid": _subset_summary(
+            cfg=cfg,
+            mode_windows=mode_windows,
+            hidden_rows_all=hidden_rows_all,
+            ranker_predictions=ranker_predictions,
+            wells=set(ranker_valid_wells),
+            track_config=track_config,
+            tau_ft=tau_ft,
+        ),
+    }
+    train_gain = subsets["ranker_train"]["ranker_gain_vs_b2"]
+    valid_gain = subsets["ranker_valid"]["ranker_gain_vs_b2"]
+    decision = {
+        "clean_go": bool(
+            valid_gain >= 0.10
+            and subsets["ranker_valid"]["ranker"]["best"].get("p95_abs_shift_vs_b2", 999.0)
+            <= 2.5
+        ),
+        "partial_go": bool(0.05 <= valid_gain < 0.10),
+        "leakage_risk": bool((train_gain - valid_gain) > 0.10),
+        "train_valid_gain_gap": float(train_gain - valid_gain),
+    }
+    summary: dict[str, Any] = {
+        "tracker": {
+            "n_realizations": track_config.n_realizations,
+            "keep_top": track_config.keep_top,
+            "merge_tolerance_ft": track_config.merge_tolerance_ft,
+            "overlap_penalty": track_config.overlap_penalty,
+            "max_modes_per_window": track_config.max_modes_per_window,
+            "tau_ft": tau_ft,
+        },
+        "subsets": subsets,
+        "decision": decision,
+    }
+    (run_path / "track_split_audit.json").write_text(
+        json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
+    )
+    _write_split_audit_report(run_path, summary)
+    return summary
+
+
+def run_track_split_audit(
+    run_dir: str | Path,
+    *,
+    n_realizations: int = 32,
+    keep_top: int = 32,
+    merge_tolerance_ft: float = 3.0,
+    overlap_penalty: float = 0.10,
+    max_modes_per_window: int = 8,
+    tau_ft: float = 5.0,
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    cfg = _load_run_config(run_path)
+    mode_windows = pd.read_parquet(run_path / "stitch_window_modes.parquet")
+    ranker_predictions = pd.read_parquet(run_path / "ranker_predictions.parquet")
+    ranker_metrics_path = run_path / "ranker_metrics.json"
+    ranker_metrics = json.loads(ranker_metrics_path.read_text(encoding="utf-8"))
+    train_wells = set(ranker_metrics["ranker_split"]["train_wells"])
+    valid_wells = set(ranker_metrics["ranker_split"]["valid_wells"])
+    hidden_rows = _load_hidden_rows(cfg, set(mode_windows["well_id"].astype(str)))
+    summary = run_track_split_audit_from_frames(
+        run_dir=run_path,
+        cfg=cfg,
+        mode_windows=mode_windows,
+        hidden_rows_all=hidden_rows,
+        ranker_predictions=ranker_predictions,
+        ranker_train_wells=train_wells,
+        ranker_valid_wells=valid_wells,
+        track_config=TrackConfig(
+            n_realizations=n_realizations,
+            keep_top=keep_top,
+            merge_tolerance_ft=merge_tolerance_ft,
+            overlap_penalty=overlap_penalty,
+            max_modes_per_window=max_modes_per_window,
+        ),
+        tau_ft=tau_ft,
+    )
+    print(json.dumps(_json_safe(summary["decision"]), indent=2), flush=True)
+    return summary
+
+
 def run_tracker(
     run_dir: str | Path,
     *,

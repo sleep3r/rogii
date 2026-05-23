@@ -43,6 +43,17 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--max-modes-per-window", type=int, default=8)
     track_parser.add_argument("--logit-source", choices=("ranker", "nn"), default="ranker")
     track_parser.add_argument("--tau-ft", type=float, default=5.0)
+
+    track_audit_parser = sub.add_parser(
+        "track-audit", help="Audit MTP tracker on ranker train/valid well splits"
+    )
+    track_audit_parser.add_argument("--run-dir", type=Path, required=True)
+    track_audit_parser.add_argument("--n-realizations", type=int, default=32)
+    track_audit_parser.add_argument("--keep-top", type=int, default=32)
+    track_audit_parser.add_argument("--merge-tolerance-ft", type=float, default=3.0)
+    track_audit_parser.add_argument("--overlap-penalty", type=float, default=0.10)
+    track_audit_parser.add_argument("--max-modes-per-window", type=int, default=8)
+    track_audit_parser.add_argument("--tau-ft", type=float, default=5.0)
     return parser
 
 
@@ -88,6 +99,19 @@ def main(argv: list[str] | None = None) -> None:
             overlap_penalty=args.overlap_penalty,
             max_modes_per_window=args.max_modes_per_window,
             logit_source=args.logit_source,
+            tau_ft=args.tau_ft,
+        )
+        return
+    if args.command == "track-audit":
+        from .track import run_track_split_audit
+
+        run_track_split_audit(
+            args.run_dir,
+            n_realizations=args.n_realizations,
+            keep_top=args.keep_top,
+            merge_tolerance_ft=args.merge_tolerance_ft,
+            overlap_penalty=args.overlap_penalty,
+            max_modes_per_window=args.max_modes_per_window,
             tau_ft=args.tau_ft,
         )
         return

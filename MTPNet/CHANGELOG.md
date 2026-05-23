@@ -19,6 +19,46 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### AUDIT-MTPTRACK-V0 - Ranker split hygiene audit
+
+- Command/config:
+  - `make track-audit RUN_DIR=artifacts/mtp_v1_prior_conditioned`;
+  - same tracker defaults as `EXP-MTPTRACK-V0`;
+  - compares NN logits vs ranker logits on all validation wells, ranker-train
+    wells, and ranker-valid wells.
+- All validation wells:
+  - B2 RMSE: `9.94786 ft`;
+  - best NN-logit tracker: `9.92946 ft`, gain `+0.01839`;
+  - best ranker-logit tracker: `9.82704 ft`, gain `+0.12082`.
+- Ranker-train wells:
+  - wells: `101`;
+  - rows: `506,703`;
+  - B2 RMSE: `10.37686 ft`;
+  - best NN-logit tracker: `10.36271 ft`, gain `+0.01415`;
+  - best ranker-logit tracker: `10.07314 ft`, gain `+0.30371`;
+  - P95 shift vs B2 for best ranker tracker: `5.79297 ft`.
+- Ranker-valid wells:
+  - wells: `54`;
+  - rows: `252,259`;
+  - B2 RMSE: `9.02473 ft`;
+  - best NN-logit tracker: `8.99640 ft`, gain `+0.02833`;
+  - best ranker-logit tracker: `9.01199 ft`, gain `+0.01274`;
+  - P95 shift vs B2 for best ranker tracker: `1.15430 ft`;
+  - worst well RMSE for best ranker tracker: `22.34533 ft`.
+- Takeaway:
+  - tracker itself has a small clean positive signal with NN logits;
+  - the large all-valid `+0.12082 ft` gain is dominated by ranker in-sample
+    wells;
+  - current CatBoost ranker is not cleanly validated for submit use.
+- Decision:
+  - tracker infrastructure remains GO;
+  - performance status is downgraded from submit-candidate to leakage-risk
+    diagnostic;
+  - next required step is fold-safe OOF ranker/tracker or stronger ranker
+    validation before any MTPTrack submit packaging.
+- Verification:
+  - split audit wrote `track_split_audit.json` and `track_split_audit.md`.
+
 ### EXP-MTPTRACK-V0 - Sequential multi-realization particle tracker
 
 - Command/config:
@@ -56,6 +96,8 @@ run is treated as a candidate.
 - Takeaway:
   - sequential carry-forward tracking now exists and beats B2 by more than the
     `+0.10 ft` threshold on this validation setup;
+  - later split audit shows this performance number is ranker-leakage-risk and
+    must not be treated as clean submit-ready OOF;
   - raw tracker is already stronger than previous overlap/ranker stitched
     candidates;
   - strong GO threshold `<=9.80 ft` is close but not reached.
