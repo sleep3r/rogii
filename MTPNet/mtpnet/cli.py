@@ -72,6 +72,28 @@ def build_parser() -> argparse.ArgumentParser:
     track_audit_parser.add_argument("--max-modes-per-window", type=int, default=8)
     track_audit_parser.add_argument("--tau-ft", type=float, default=5.0)
     track_audit_parser.add_argument("--ranker-beta", type=float, default=0.5)
+
+    oof_parser = sub.add_parser(
+        "oof", help="Train fold-safe OOF MTP runs and track held-out wells"
+    )
+    oof_parser.add_argument("--config", type=Path, required=True)
+    oof_parser.add_argument("--output-dir", type=Path)
+    oof_parser.add_argument("--n-folds", type=int, default=5)
+    oof_parser.add_argument("--max-folds", type=int)
+    oof_parser.add_argument("--seed", type=int, default=42)
+    oof_parser.add_argument(
+        "--logit-source", choices=("ranker", "ranker_oof", "nn"), default="nn"
+    )
+    oof_parser.add_argument("--n-realizations", type=int, default=32)
+    oof_parser.add_argument("--keep-top", type=int, default=32)
+    oof_parser.add_argument("--merge-tolerance-ft", type=float, default=3.0)
+    oof_parser.add_argument("--overlap-penalty", type=float, default=0.10)
+    oof_parser.add_argument("--max-modes-per-window", type=int, default=8)
+    oof_parser.add_argument(
+        "--full-stitch",
+        action="store_true",
+        help="Run full stitch diagnostics instead of fast mode-window export",
+    )
     return parser
 
 
@@ -145,6 +167,24 @@ def main(argv: list[str] | None = None) -> None:
             max_modes_per_window=args.max_modes_per_window,
             tau_ft=args.tau_ft,
             ranker_beta=args.ranker_beta,
+        )
+        return
+    if args.command == "oof":
+        from .oof import run_oof
+
+        run_oof(
+            args.config,
+            output_dir=args.output_dir,
+            n_folds=args.n_folds,
+            max_folds=args.max_folds,
+            seed=args.seed,
+            logit_source=args.logit_source,
+            n_realizations=args.n_realizations,
+            keep_top=args.keep_top,
+            merge_tolerance_ft=args.merge_tolerance_ft,
+            overlap_penalty=args.overlap_penalty,
+            max_modes_per_window=args.max_modes_per_window,
+            full_stitch=args.full_stitch,
         )
         return
     raise SystemExit(f"Unknown command: {args.command}")

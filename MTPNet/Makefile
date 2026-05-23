@@ -5,6 +5,7 @@ CONFIG ?= configs/mtp_v0.yml
 SMOKE_CONFIG ?= configs/mtp_smoke.yml
 RUN_DIR ?= artifacts/mtp_v0
 OUTPUT ?=
+MAX_FOLDS ?=
 N_FOLDS ?= 5
 SEED ?= 42
 RANKER_VARIANT ?= conservative_regression
@@ -12,11 +13,12 @@ LOGIT_SOURCE ?= ranker
 RANKER_LOGITS ?=
 TAU_FT ?= 5.0
 RANKER_BETA ?= 0.5
+FULL_STITCH ?=
 COPY_SOURCE ?= ../old/data
 COPY_TARGET ?= data
 CODEBASE_BUNDLE ?= artifacts/codebase_bundle.md
 
-.PHONY: install test copy-data smoke train eval stitch rank rank-crossfit mtp-ranker-crossfit track track-audit codebase-bundle collect-code
+.PHONY: install test copy-data smoke train eval stitch rank rank-crossfit mtp-ranker-crossfit track track-audit oof mtp-oof codebase-bundle collect-code
 
 install:
 	$(UV) sync --extra dev
@@ -52,6 +54,11 @@ track:
 
 track-audit:
 	$(UV) run --extra dev python -m mtpnet.cli track-audit --run-dir $(RUN_DIR)
+
+oof:
+	$(UV) run --extra dev python -m mtpnet.cli oof --config $(CONFIG) --n-folds $(N_FOLDS) --seed $(SEED) --logit-source $(LOGIT_SOURCE) $(if $(OUTPUT),--output-dir $(OUTPUT),) $(if $(MAX_FOLDS),--max-folds $(MAX_FOLDS),) $(if $(FULL_STITCH),--full-stitch,)
+
+mtp-oof: oof
 
 codebase-bundle:
 	$(UV) run --extra dev python -m mtpnet.codebase_bundle --root . --output $(CODEBASE_BUNDLE)

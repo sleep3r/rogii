@@ -62,6 +62,26 @@ def test_window_train_valid_modes_are_configurable(tmp_path: Path) -> None:
     assert cfg.window.channels == ("gr_diff", "gr_z_diff", "dgr_diff")
 
 
+def test_validation_explicit_fold_wells_are_configurable(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "validation": {
+                    "train_wells": ["a", "b"],
+                    "valid_wells": ["c"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.validation.train_wells == ("a", "b")
+    assert cfg.validation.valid_wells == ("c",)
+
+
 def test_v0_1_diversity_knobs_are_configurable(tmp_path: Path) -> None:
     path = tmp_path / "config.yml"
     path.write_text(

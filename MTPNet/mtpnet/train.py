@@ -170,11 +170,33 @@ def _mix_train_samples(
     return mixed, counts
 
 
+def resolve_train_valid_well_ids(
+    well_ids: list[str], cfg: MTPConfig
+) -> tuple[list[str], list[str]]:
+    known = set(well_ids)
+    if cfg.validation.valid_wells:
+        valid_ids = [str(well_id) for well_id in cfg.validation.valid_wells]
+        train_ids = (
+            [str(well_id) for well_id in cfg.validation.train_wells]
+            if cfg.validation.train_wells
+            else [well_id for well_id in well_ids if well_id not in set(valid_ids)]
+        )
+        missing = sorted((set(train_ids) | set(valid_ids)).difference(known))
+        if missing:
+            raise ValueError(f"Explicit validation wells not found: {missing[:10]}")
+        if set(train_ids).intersection(valid_ids):
+            raise ValueError("Explicit train_wells and valid_wells must be disjoint")
+        if not train_ids or not valid_ids:
+            raise ValueError("Explicit train_wells and valid_wells must be non-empty")
+        return sorted(train_ids), sorted(valid_ids)
+    return split_wells(well_ids, cfg.validation.valid_fraction, cfg.validation.seed)
+
+
 def split_samples(
     samples: list[WindowSample], cfg: MTPConfig
 ) -> tuple[list[WindowSample], list[WindowSample]]:
     wells = sorted({sample.well_id for sample in samples})
-    _, valid_wells = split_wells(wells, cfg.validation.valid_fraction, cfg.validation.seed)
+    _, valid_wells = resolve_train_valid_well_ids(wells, cfg)
     valid_set = set(valid_wells)
     train = [sample for sample in samples if sample.well_id not in valid_set]
     valid = [sample for sample in samples if sample.well_id in valid_set]
@@ -189,9 +211,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
     wells = discover_wells(cfg.data)
     prior_tables = load_prior_tables(cfg.priors)
     well_ids = [well.well_id for well in wells]
-    train_ids, valid_ids = split_wells(
-        well_ids, cfg.validation.valid_fraction, cfg.validation.seed
-    )
+    train_ids, valid_ids = resolve_train_valid_well_ids(well_ids, cfg)
     by_id = {well.well_id: well for well in wells}
     train_wells = [by_id[well_id] for well_id in train_ids]
     valid_wells = [by_id[well_id] for well_id in valid_ids]
@@ -914,8 +934,33 @@ def _json_safe_config(cfg: MTPConfig) -> dict[str, Any]:
     return convert(asdict(cfg))
 
 
-def train_from_config(config_path: str | Path) -> dict[str, Any]:
+def train_from_config(
+    config_path: str | Path,
+    *,
+    output_dir: Path | None = None,
+    run_name: str | None = None,
+    train_wells: tuple[str, ...] | None = None,
+    valid_wells: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     cfg = load_config(config_path)
+    if output_dir is not None or run_name is not None:
+        cfg = replace(
+            cfg,
+            run=replace(
+                cfg.run,
+                name=run_name if run_name is not None else cfg.run.name,
+                output_dir=output_dir if output_dir is not None else cfg.run.output_dir,
+            ),
+        )
+    if train_wells is not None or valid_wells is not None:
+        cfg = replace(
+            cfg,
+            validation=replace(
+                cfg.validation,
+                train_wells=tuple(train_wells or cfg.validation.train_wells),
+                valid_wells=tuple(valid_wells or cfg.validation.valid_wells),
+            ),
+        )
     set_seed(cfg.train.seed)
     device = resolve_device(cfg.train.device)
     output_dir = cfg.run.output_dir

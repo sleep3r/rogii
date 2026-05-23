@@ -118,6 +118,8 @@ class TrainConfig:
 class ValidationConfig:
     valid_fraction: float = 0.2
     seed: int = 42
+    train_wells: tuple[str, ...] = ()
+    valid_wells: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -399,6 +401,20 @@ def load_config(path: str | Path) -> MTPConfig:
             validation_raw.get("valid_fraction", default_validation.valid_fraction)
         ),
         seed=int(validation_raw.get("seed", default_validation.seed)),
+        train_wells=tuple(
+            str(value)
+            for value in _tuple(
+                validation_raw.get("train_wells"),
+                default_validation.train_wells,
+            )
+        ),
+        valid_wells=tuple(
+            str(value)
+            for value in _tuple(
+                validation_raw.get("valid_wells"),
+                default_validation.valid_wells,
+            )
+        ),
     )
 
     run_raw = _section(raw, "run")

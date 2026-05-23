@@ -734,10 +734,7 @@ def write_stitch_report(
 def run_stitch(run_dir: str | Path) -> dict[str, Any]:
     run_path = Path(run_dir)
     cfg = _load_run_config(run_path)
-    mode_windows = _predict_valid_modes(run_path, cfg)
-    _serializable_mode_windows(mode_windows).to_parquet(
-        run_path / "stitch_window_modes.parquet", index=False
-    )
+    mode_windows = write_mode_windows(run_path, cfg=cfg)
 
     metrics_path = run_path / "metrics.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -917,3 +914,15 @@ def run_stitch(run_dir: str | Path) -> dict[str, Any]:
     write_stitch_report(run_dir=run_path, summary=summary, candidates=candidate_metrics)
     print(json.dumps(candidate_metrics[0], indent=2), flush=True)
     return summary
+
+
+def write_mode_windows(
+    run_dir: str | Path, *, cfg: MTPConfig | None = None
+) -> pd.DataFrame:
+    run_path = Path(run_dir)
+    cfg = cfg or _load_run_config(run_path)
+    mode_windows = _predict_valid_modes(run_path, cfg)
+    _serializable_mode_windows(mode_windows).to_parquet(
+        run_path / "stitch_window_modes.parquet", index=False
+    )
+    return mode_windows
