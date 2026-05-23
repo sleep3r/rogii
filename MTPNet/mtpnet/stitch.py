@@ -14,6 +14,7 @@ import yaml
 from .config import MTPConfig, load_config
 from .heatmap import fill_nan
 from .io import discover_wells, load_well
+from .loss import mode_corr_scores
 from .model import MTPNet
 from .priors import load_prior_tables
 from .train import _bins_to_tvt, _loader, prepare_sample_splits, resolve_device
@@ -289,6 +290,7 @@ def _predict_valid_modes(run_dir: Path, cfg: MTPConfig) -> pd.DataFrame:
         width=first.x.shape[2],
         future_steps=cfg.window.future_steps,
         cfg=cfg.model,
+        corr_head=cfg.corr_head,
     ).to(device)
     checkpoint_path = run_dir / "checkpoints" / "best.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -299,9 +301,32 @@ def _predict_valid_modes(run_dir: Path, cfg: MTPConfig) -> pd.DataFrame:
         for batch in _loader(samples, cfg, shuffle=False):
             x = batch["x"].to(device)
             crop_tvt = batch["crop_tvt"].to(device)
-            raw_paths, logits = model.forward_raw(x)
-            paths = model.bound_paths(raw_paths)
+            output = model.forward_all(x)
+            raw_paths = output.raw_paths
+            logits = output.logits
+            paths = output.paths
             probs = F.softmax(logits, dim=1)
+            corr_scores = (
+                mode_corr_scores(
+                    output.corr_logits,
+                    paths,
+                    future_start=cfg.window.history_steps,
+                )
+                if output.corr_logits is not None
+                else None
+            )
+            corr_top1_tvt = None
+            if output.corr_logits is not None:
+                future_corr = output.corr_logits[
+                    :,
+                    :,
+                    cfg.window.history_steps : cfg.window.history_steps
+                    + cfg.window.future_steps,
+                ]
+                corr_top1_bins = future_corr.argmax(dim=1).float().cpu().numpy()
+                corr_top1_tvt = _bins_to_tvt(
+                    corr_top1_bins[:, None, :], crop_tvt.cpu().numpy()
+                )[:, 0, :]
             path_tvt = _bins_to_tvt(paths.cpu().numpy(), crop_tvt.cpu().numpy())
             for index in range(paths.shape[0]):
                 rows.append(
@@ -315,6 +340,25 @@ def _predict_valid_modes(run_dir: Path, cfg: MTPConfig) -> pd.DataFrame:
                         "target_tvt": batch["target_tvt"][index].cpu().numpy().astype(
                             np.float32
                         ),
+                        **(
+                            {
+                                "corr_scores": corr_scores[index]
+                                .cpu()
+                                .numpy()
+                                .astype(np.float32)
+                            }
+                            if corr_scores is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "corr_top1_pred_tvt": corr_top1_tvt[index].astype(
+                                    np.float32
+                                )
+                            }
+                            if corr_top1_tvt is not None
+                            else {}
+                        ),
                     }
                 )
     return pd.DataFrame(rows)
@@ -322,7 +366,15 @@ def _predict_valid_modes(run_dir: Path, cfg: MTPConfig) -> pd.DataFrame:
 
 def _serializable_mode_windows(mode_windows: pd.DataFrame) -> pd.DataFrame:
     out = mode_windows.copy()
-    for column in ("logits", "probs", "path_tvt", "target_tvt", "gr_scores"):
+    for column in (
+        "logits",
+        "probs",
+        "path_tvt",
+        "target_tvt",
+        "gr_scores",
+        "corr_scores",
+        "corr_top1_pred_tvt",
+    ):
         if column in out.columns:
             out[column] = out[column].map(
                 lambda value: np.asarray(value, dtype=np.float32).tolist()

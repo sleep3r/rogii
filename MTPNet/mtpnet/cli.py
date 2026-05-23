@@ -55,11 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--overlap-penalty", type=float, default=0.10)
     track_parser.add_argument("--max-modes-per-window", type=int, default=8)
     track_parser.add_argument(
-        "--logit-source", choices=("ranker", "ranker_oof", "nn"), default="ranker"
+        "--logit-source", choices=("corr", "ranker", "ranker_oof", "nn"), default="ranker"
     )
     track_parser.add_argument("--ranker-logits", type=Path)
     track_parser.add_argument("--tau-ft", type=float, default=5.0)
     track_parser.add_argument("--ranker-beta", type=float, default=0.5)
+    track_parser.add_argument("--corr-beta", type=float, default=0.5)
 
     track_audit_parser = sub.add_parser(
         "track-audit", help="Audit MTP tracker on ranker train/valid well splits"
@@ -82,13 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
     oof_parser.add_argument("--max-folds", type=int)
     oof_parser.add_argument("--seed", type=int, default=42)
     oof_parser.add_argument(
-        "--logit-source", choices=("ranker", "ranker_oof", "nn"), default="nn"
+        "--logit-source", choices=("corr", "ranker", "ranker_oof", "nn"), default="nn"
     )
     oof_parser.add_argument("--n-realizations", type=int, default=32)
     oof_parser.add_argument("--keep-top", type=int, default=32)
     oof_parser.add_argument("--merge-tolerance-ft", type=float, default=3.0)
     oof_parser.add_argument("--overlap-penalty", type=float, default=0.10)
     oof_parser.add_argument("--max-modes-per-window", type=int, default=8)
+    oof_parser.add_argument("--corr-beta", type=float, default=0.5)
     oof_parser.add_argument(
         "--full-stitch",
         action="store_true",
@@ -153,6 +155,7 @@ def main(argv: list[str] | None = None) -> None:
             ranker_logits=args.ranker_logits,
             tau_ft=args.tau_ft,
             ranker_beta=args.ranker_beta,
+            corr_beta=args.corr_beta,
         )
         return
     if args.command == "track-audit":
@@ -184,6 +187,7 @@ def main(argv: list[str] | None = None) -> None:
             merge_tolerance_ft=args.merge_tolerance_ft,
             overlap_penalty=args.overlap_penalty,
             max_modes_per_window=args.max_modes_per_window,
+            corr_beta=args.corr_beta,
             full_stitch=args.full_stitch,
         )
         return

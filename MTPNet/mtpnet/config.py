@@ -52,6 +52,39 @@ class AugmentationConfig:
 
 
 @dataclass(frozen=True)
+class SyntheticConfig:
+    enabled: bool = False
+    windows_per_epoch: int = 0
+    valid_windows: int = 0
+    real_fraction: float = 0.0
+    path_families: tuple[str, ...] = (
+        "linear",
+        "curved",
+        "piecewise",
+        "real_residual",
+    )
+    noise_std_range: tuple[float, float] = (1.0, 8.0)
+    amplitude_scale_range: tuple[float, float] = (0.8, 1.2)
+    baseline_shift_range: tuple[float, float] = (-10.0, 10.0)
+    dropout_max_frac: float = 0.15
+    stretch_range: tuple[float, float] = (0.8, 1.25)
+    bad_prior_prob: float = 0.15
+    no_prior_prob: float = 0.10
+    seed: int = 1729
+
+
+@dataclass(frozen=True)
+class CorrelationHeadConfig:
+    enabled: bool = False
+    target_sigma_bins: float = 1.5
+    target_tau_bins: float = 1.5
+    loss: str = "vertical_kl"
+    alpha_synth: float = 0.5
+    alpha_real: float = 0.25
+    tracker_beta_grid: tuple[float, ...] = (0.25, 0.5, 1.0)
+
+
+@dataclass(frozen=True)
 class WindowConfig:
     rows_per_step: int = 32
     history_steps: int = 8
@@ -117,6 +150,8 @@ class TrainConfig:
     device: str = "auto"
     num_workers: int = 0
     seed: int = 42
+    init_checkpoint: Path | None = None
+    selection_source: str = "real"
 
 
 @dataclass(frozen=True)
@@ -138,6 +173,8 @@ class MTPConfig:
     data: DataConfig = field(default_factory=DataConfig)
     priors: PriorConfig = field(default_factory=PriorConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
+    synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
+    corr_head: CorrelationHeadConfig = field(default_factory=CorrelationHeadConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -269,6 +306,97 @@ def load_config(path: str | Path) -> MTPConfig:
                 augmentation_raw.get("batch_mix", default_augmentation.batch_mix)
             ).items()
         },
+    )
+
+    synthetic_raw = _section(raw, "synthetic")
+    default_synthetic = SyntheticConfig()
+    synthetic = SyntheticConfig(
+        enabled=bool(synthetic_raw.get("enabled", default_synthetic.enabled)),
+        windows_per_epoch=int(
+            synthetic_raw.get(
+                "windows_per_epoch", default_synthetic.windows_per_epoch
+            )
+        ),
+        valid_windows=int(
+            synthetic_raw.get("valid_windows", default_synthetic.valid_windows)
+        ),
+        real_fraction=float(
+            synthetic_raw.get("real_fraction", default_synthetic.real_fraction)
+        ),
+        path_families=tuple(
+            str(value)
+            for value in _tuple(
+                synthetic_raw.get("path_families"),
+                default_synthetic.path_families,
+            )
+        ),
+        noise_std_range=tuple(
+            float(value)
+            for value in _tuple(
+                synthetic_raw.get("noise_std_range"),
+                default_synthetic.noise_std_range,
+            )
+        ),
+        amplitude_scale_range=tuple(
+            float(value)
+            for value in _tuple(
+                synthetic_raw.get("amplitude_scale_range"),
+                default_synthetic.amplitude_scale_range,
+            )
+        ),
+        baseline_shift_range=tuple(
+            float(value)
+            for value in _tuple(
+                synthetic_raw.get("baseline_shift_range"),
+                default_synthetic.baseline_shift_range,
+            )
+        ),
+        dropout_max_frac=float(
+            synthetic_raw.get(
+                "dropout_max_frac", default_synthetic.dropout_max_frac
+            )
+        ),
+        stretch_range=tuple(
+            float(value)
+            for value in _tuple(
+                synthetic_raw.get("stretch_range"), default_synthetic.stretch_range
+            )
+        ),
+        bad_prior_prob=float(
+            synthetic_raw.get("bad_prior_prob", default_synthetic.bad_prior_prob)
+        ),
+        no_prior_prob=float(
+            synthetic_raw.get("no_prior_prob", default_synthetic.no_prior_prob)
+        ),
+        seed=int(synthetic_raw.get("seed", default_synthetic.seed)),
+    )
+
+    corr_head_raw = _section(raw, "corr_head")
+    default_corr_head = CorrelationHeadConfig()
+    corr_head = CorrelationHeadConfig(
+        enabled=bool(corr_head_raw.get("enabled", default_corr_head.enabled)),
+        target_sigma_bins=float(
+            corr_head_raw.get(
+                "target_sigma_bins", default_corr_head.target_sigma_bins
+            )
+        ),
+        target_tau_bins=float(
+            corr_head_raw.get("target_tau_bins", default_corr_head.target_tau_bins)
+        ),
+        loss=str(corr_head_raw.get("loss", default_corr_head.loss)),
+        alpha_synth=float(
+            corr_head_raw.get("alpha_synth", default_corr_head.alpha_synth)
+        ),
+        alpha_real=float(
+            corr_head_raw.get("alpha_real", default_corr_head.alpha_real)
+        ),
+        tracker_beta_grid=tuple(
+            float(value)
+            for value in _tuple(
+                corr_head_raw.get("tracker_beta_grid"),
+                default_corr_head.tracker_beta_grid,
+            )
+        ),
     )
 
     window_raw = _section(raw, "window")
@@ -423,7 +551,13 @@ def load_config(path: str | Path) -> MTPConfig:
         device=str(train_raw.get("device", default_train.device)),
         num_workers=int(train_raw.get("num_workers", default_train.num_workers)),
         seed=int(train_raw.get("seed", default_train.seed)),
+        init_checkpoint=_as_path(train_raw.get("init_checkpoint")),
+        selection_source=str(
+            train_raw.get("selection_source", default_train.selection_source)
+        ),
     )
+    if train.selection_source not in {"real", "synthetic"}:
+        raise ValueError("train.selection_source must be 'real' or 'synthetic'")
 
     validation_raw = _section(raw, "validation")
     default_validation = ValidationConfig()
@@ -459,6 +593,8 @@ def load_config(path: str | Path) -> MTPConfig:
         data=data,
         priors=priors,
         augmentation=augmentation,
+        synthetic=synthetic,
+        corr_head=corr_head,
         window=window,
         model=model,
         loss=loss,

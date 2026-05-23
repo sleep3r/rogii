@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+import torch.nn.functional as F
 import torch
 from torch import Tensor, nn
 
-from .config import ModelConfig
+from .config import CorrelationHeadConfig, ModelConfig
+
+
+@dataclass(frozen=True)
+class MTPForwardOutput:
+    paths: Tensor
+    logits: Tensor
+    raw_paths: Tensor
+    corr_logits: Tensor | None = None
 
 
 class ConvBlock(nn.Module):
@@ -27,12 +38,15 @@ class MTPNet(nn.Module):
         width: int,
         future_steps: int,
         cfg: ModelConfig,
+        corr_head: CorrelationHeadConfig | None = None,
     ) -> None:
         super().__init__()
         self.k_modes = cfg.k_modes
         self.future_steps = future_steps
         self.height = height
+        self.width = width
         self.bounded_output = cfg.bounded_output
+        self.corr_head_enabled = bool(corr_head and corr_head.enabled)
         blocks: list[nn.Module] = []
         c_in = in_channels
         for index, c_out in enumerate(cfg.conv_channels):
@@ -44,7 +58,14 @@ class MTPNet(nn.Module):
         self.encoder = nn.Sequential(*blocks)
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, height, width)
-            flat_dim = int(self.encoder(dummy).reshape(1, -1).shape[1])
+            encoded = self.encoder(dummy)
+            flat_dim = int(encoded.reshape(1, -1).shape[1])
+            encoded_channels = int(encoded.shape[1])
+        self.corr_head = (
+            nn.Conv2d(encoded_channels, 1, kernel_size=1)
+            if self.corr_head_enabled
+            else None
+        )
         head: list[nn.Module] = []
         in_dim = flat_dim
         for hidden_dim in cfg.hidden_dims:
@@ -81,9 +102,12 @@ class MTPNet(nn.Module):
         with torch.no_grad():
             self.path_head.bias.copy_(bias)
 
+    def encode(self, x: Tensor) -> Tensor:
+        return self.encoder(x)
+
     def forward_raw(self, x: Tensor) -> tuple[Tensor, Tensor]:
         batch = x.shape[0]
-        features = self.encoder(x).reshape(batch, -1)
+        features = self.encode(x).reshape(batch, -1)
         hidden = self.head(features)
         raw_paths = self.path_head(hidden).reshape(
             batch, self.k_modes, self.future_steps
@@ -91,12 +115,37 @@ class MTPNet(nn.Module):
         logits = self.logit_head(hidden)
         return raw_paths, logits
 
+    def forward_all(self, x: Tensor) -> MTPForwardOutput:
+        batch = x.shape[0]
+        encoded = self.encode(x)
+        features = encoded.reshape(batch, -1)
+        hidden = self.head(features)
+        raw_paths = self.path_head(hidden).reshape(
+            batch, self.k_modes, self.future_steps
+        )
+        logits = self.logit_head(hidden)
+        paths = self.bound_paths(raw_paths)
+        corr_logits: Tensor | None = None
+        if self.corr_head is not None:
+            corr_logits = self.corr_head(encoded)
+            corr_logits = F.interpolate(
+                corr_logits,
+                size=(self.height, self.width),
+                mode="bilinear",
+                align_corners=False,
+            )[:, 0]
+        return MTPForwardOutput(
+            paths=paths,
+            logits=logits,
+            raw_paths=raw_paths,
+            corr_logits=corr_logits,
+        )
+
     def bound_paths(self, raw_paths: Tensor) -> Tensor:
         if self.bounded_output:
             return float(self.height - 1) * torch.sigmoid(raw_paths)
         return raw_paths
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        raw_paths, logits = self.forward_raw(x)
-        paths = self.bound_paths(raw_paths)
-        return paths, logits
+        output = self.forward_all(x)
+        return output.paths, output.logits

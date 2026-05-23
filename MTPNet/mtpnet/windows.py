@@ -23,6 +23,8 @@ class WindowSample:
     start_step: int
     center_tvt: float
     sample_type: str = "teacher_forcing_hidden"
+    horizontal_gr: np.ndarray | None = None
+    typewell_gr: np.ndarray | None = None
 
 
 def _compress(values: np.ndarray, rows_per_step: int) -> np.ndarray:
@@ -375,6 +377,8 @@ def build_windows_for_well(
                 start_step=start,
                 center_tvt=center_tvt,
                 sample_type=_sample_type_for(history_mode),
+                horizontal_gr=comp_gr[start : start + total_steps].astype(np.float32),
+                typewell_gr=crop_gr.astype(np.float32),
             )
         )
         if len(windows) >= cfg.max_windows_per_well:

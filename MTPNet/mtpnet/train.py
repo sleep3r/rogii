@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from .config import MTPConfig, load_config
 from .io import discover_wells, load_well
-from .loss import mtp_loss
+from .loss import corr_vertical_kl_loss, mode_corr_scores, mtp_loss
 from .model import MTPNet
 from .priors import PriorTables, load_prior_tables
 from .windows import (
@@ -25,6 +25,7 @@ from .windows import (
     build_windows_for_well,
     split_wells,
 )
+from .synthetic import generate_synthetic_samples, templates_from_samples
 
 
 SAMPLE_TYPE_TO_WINDOW_ARGS = {
@@ -235,6 +236,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
         )
         train_buckets = {"legacy_train": train_samples}
         train_mix_counts = {"legacy_train": len(train_samples)}
+    real_train_samples = train_samples
     train_samples = _augment_prior_conditioning_samples(train_samples, cfg)
 
     if cfg.window.valid_sample_types:
@@ -260,6 +262,42 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
         )
         primary_valid_name = "valid"
         valid_sets = {primary_valid_name: valid_samples}
+    if cfg.synthetic.enabled:
+        train_templates = templates_from_samples(real_train_samples)
+        valid_templates = templates_from_samples(valid_samples)
+        if not train_templates:
+            raise RuntimeError("Synthetic training requested but no templates were built")
+        synthetic_count = int(cfg.synthetic.windows_per_epoch)
+        if cfg.synthetic.real_fraction > 0.0 and train_samples:
+            synthetic_count = min(
+                synthetic_count,
+                int(
+                    round(
+                        len(train_samples)
+                        * cfg.synthetic.real_fraction
+                        / max(1e-6, 1.0 - cfg.synthetic.real_fraction)
+                    )
+                ),
+            )
+        synthetic_train = generate_synthetic_samples(
+            train_templates, cfg, count=synthetic_count, seed_offset=100_000
+        )
+        if cfg.synthetic.real_fraction <= 0.0:
+            train_samples = synthetic_train
+        else:
+            train_samples = [*train_samples, *synthetic_train]
+        train_buckets = {**train_buckets, "synthetic": synthetic_train}
+        train_mix_counts = {**train_mix_counts, "synthetic": len(synthetic_train)}
+        synthetic_valid = generate_synthetic_samples(
+            valid_templates or train_templates,
+            cfg,
+            count=int(cfg.synthetic.valid_windows),
+            seed_offset=1_000_000,
+        )
+        valid_sets = {**valid_sets, "valid_synthetic": synthetic_valid}
+        if cfg.train.selection_source == "synthetic":
+            primary_valid_name = "valid_synthetic"
+            valid_samples = synthetic_valid
     return SampleSplits(
         train_samples=train_samples,
         valid_samples=valid_samples,
@@ -414,6 +452,12 @@ def _evaluate(
     best_mode_top3: list[float] = []
     best_mode_top5: list[float] = []
     logit_error_spearman: list[float] = []
+    corr_top1_ft: list[float] = []
+    corr_mode_top1_ft: list[float] = []
+    corr_mode_weighted_ft: list[float] = []
+    corr_target_rank: list[float] = []
+    corr_target_top3: list[float] = []
+    corr_nll: list[float] = []
     bounded_output = bool(getattr(model, "bounded_output", cfg.model.bounded_output))
     with torch.no_grad():
         for batch in _loader(samples, cfg, shuffle=False):
@@ -421,12 +465,20 @@ def _evaluate(
             target = batch["target_bins"].to(device)
             target_tvt = batch["target_tvt"].to(device)
             crop_tvt = batch["crop_tvt"].to(device)
-            if hasattr(model, "forward_raw") and hasattr(model, "bound_paths"):
+            if hasattr(model, "forward_all"):
+                output = model.forward_all(x)
+                raw_paths = output.raw_paths
+                paths = output.paths
+                logits = output.logits
+                corr_logits = output.corr_logits
+            elif hasattr(model, "forward_raw") and hasattr(model, "bound_paths"):
                 raw_paths, logits = model.forward_raw(x)
                 paths = model.bound_paths(raw_paths)
+                corr_logits = None
             else:
                 paths, logits = model(x)
                 raw_paths = paths
+                corr_logits = None
             prob = F.softmax(logits, dim=1)
             entropy = -(prob * torch.log(prob.clamp_min(1e-8))).sum(dim=1)
             err = torch.sqrt(((paths - target[:, None, :]) ** 2).mean(dim=-1))
@@ -517,45 +569,104 @@ def _evaluate(
                 .mean(axis=1)
                 .tolist()
             )
-            for i in range(paths.shape[0]):
-                rows.append(
-                    {
-                        "well_id": batch["well_id"][i],
-                        "start_step": int(batch["start_step"][i]),
-                        "sample_type": batch["sample_type"][i],
-                        "top1_mode": int(top1[i].cpu()),
-                        "best_mode": int(best_k[i].cpu()),
-                        "best_mode_rank_by_logit": int(best_rank[i].cpu()),
-                        "top1_rmse_bins": float(err[i, top1[i]].cpu()),
-                        "oracle_rmse_bins": float(oracle_err[i].cpu()),
-                        "best_mode_mae_bins": float(mae[i, best_k[i]].cpu()),
-                        "top1_rmse_ft": float(ft_err[i, int(top1_np[i])]),
-                        "oracle_rmse_ft": float(ft_err[i, int(best_k_np[i])]),
-                        "weighted_rmse_ft": float(
-                            np.sqrt(
-                                ((weighted_tvt[i] - target_tvt_np[i]) ** 2).mean()
-                            )
-                        ),
-                        "raw_path_oob_frac_before_bound": float(
-                            raw_path_oob_batch[i].float().mean().cpu()
-                        ),
-                        "top1_pred_bin_oob_frac": float(
-                            path_oob[i, int(top1_np[i])].float().mean().cpu()
-                        ),
-                        "weighted_pred_bin_oob_frac": float(
-                            weighted_oob[i].float().mean().cpu()
-                        ),
-                        "top1_pred_bins": paths_np[i, int(top1_np[i])].tolist(),
-                        "best_pred_bins": paths_np[i, int(best_k_np[i])].tolist(),
-                        "weighted_pred_bins": weighted_bins_np[i].tolist(),
-                        "top1_pred_tvt": path_tvt[i, int(top1_np[i])].tolist(),
-                        "best_pred_tvt": path_tvt[i, int(best_k_np[i])].tolist(),
-                        "weighted_pred_tvt": weighted_tvt[i].tolist(),
-                        "target_tvt": target_tvt_np[i].tolist(),
-                        "target_bins": target_bins_np[i].tolist(),
-                        "crop_tvt": crop_tvt_np[i].tolist(),
-                    }
+            corr_scores_np: np.ndarray | None = None
+            corr_top1_bins_np: np.ndarray | None = None
+            corr_mode_top1_np: np.ndarray | None = None
+            if corr_logits is not None:
+                future_corr = corr_logits[
+                    :,
+                    :,
+                    cfg.window.history_steps : cfg.window.history_steps
+                    + cfg.window.future_steps,
+                ]
+                corr_log_prob = F.log_softmax(future_corr, dim=1)
+                corr_top1_bins = future_corr.argmax(dim=1).float()
+                corr_scores = mode_corr_scores(
+                    corr_logits, paths, future_start=cfg.window.history_steps
                 )
+                corr_prob = F.softmax(corr_scores, dim=1)
+                corr_mode_top1 = corr_scores.argmax(dim=1)
+                corr_mode_weighted = (paths * corr_prob[:, :, None]).sum(dim=1)
+                corr_scores_np = corr_scores.cpu().numpy()
+                corr_top1_bins_np = corr_top1_bins.cpu().numpy()
+                corr_mode_top1_np = corr_mode_top1.cpu().numpy()
+                corr_mode_weighted_np = corr_mode_weighted.cpu().numpy()
+                corr_top1_tvt = _bins_to_tvt(
+                    corr_top1_bins_np[:, None, :], crop_tvt_np
+                )[:, 0, :]
+                corr_mode_weighted_tvt = _bins_to_tvt(
+                    corr_mode_weighted_np[:, None, :], crop_tvt_np
+                )[:, 0, :]
+                corr_top1_ft.extend(
+                    np.sqrt(((corr_top1_tvt - target_tvt_np) ** 2).mean(axis=-1)).tolist()
+                )
+                corr_mode_top1_ft.extend(
+                    ft_err[batch_indices_np, corr_mode_top1_np].tolist()
+                )
+                corr_mode_weighted_ft.extend(
+                    np.sqrt(
+                        ((corr_mode_weighted_tvt - target_tvt_np) ** 2).mean(axis=-1)
+                    ).tolist()
+                )
+                target_rounded = target.round().long().clamp(0, future_corr.shape[1] - 1)
+                log_prob_by_step = corr_log_prob.permute(0, 2, 1)
+                gathered = torch.gather(
+                    log_prob_by_step, dim=2, index=target_rounded[:, :, None]
+                ).squeeze(2)
+                corr_nll.extend((-gathered.mean(dim=1)).cpu().tolist())
+                corr_order = torch.argsort(future_corr, dim=1, descending=True)
+                rank_positions = torch.empty_like(corr_order)
+                rank_values = torch.arange(
+                    future_corr.shape[1], device=device
+                )[None, :, None].expand_as(corr_order)
+                rank_positions.scatter_(1, corr_order, rank_values)
+                rank_matrix = torch.gather(
+                    rank_positions, dim=1, index=target_rounded[:, None, :]
+                ).squeeze(1) + 1
+                corr_target_rank.extend(rank_matrix.float().mean(dim=1).cpu().tolist())
+                corr_target_top3.extend(
+                    (rank_matrix <= 3).float().mean(dim=1).cpu().tolist()
+                )
+            for i in range(paths.shape[0]):
+                row = {
+                    "well_id": batch["well_id"][i],
+                    "start_step": int(batch["start_step"][i]),
+                    "sample_type": batch["sample_type"][i],
+                    "top1_mode": int(top1[i].cpu()),
+                    "best_mode": int(best_k[i].cpu()),
+                    "best_mode_rank_by_logit": int(best_rank[i].cpu()),
+                    "top1_rmse_bins": float(err[i, top1[i]].cpu()),
+                    "oracle_rmse_bins": float(oracle_err[i].cpu()),
+                    "best_mode_mae_bins": float(mae[i, best_k[i]].cpu()),
+                    "top1_rmse_ft": float(ft_err[i, int(top1_np[i])]),
+                    "oracle_rmse_ft": float(ft_err[i, int(best_k_np[i])]),
+                    "weighted_rmse_ft": float(
+                        np.sqrt(((weighted_tvt[i] - target_tvt_np[i]) ** 2).mean())
+                    ),
+                    "raw_path_oob_frac_before_bound": float(
+                        raw_path_oob_batch[i].float().mean().cpu()
+                    ),
+                    "top1_pred_bin_oob_frac": float(
+                        path_oob[i, int(top1_np[i])].float().mean().cpu()
+                    ),
+                    "weighted_pred_bin_oob_frac": float(
+                        weighted_oob[i].float().mean().cpu()
+                    ),
+                    "top1_pred_bins": paths_np[i, int(top1_np[i])].tolist(),
+                    "best_pred_bins": paths_np[i, int(best_k_np[i])].tolist(),
+                    "weighted_pred_bins": weighted_bins_np[i].tolist(),
+                    "top1_pred_tvt": path_tvt[i, int(top1_np[i])].tolist(),
+                    "best_pred_tvt": path_tvt[i, int(best_k_np[i])].tolist(),
+                    "weighted_pred_tvt": weighted_tvt[i].tolist(),
+                    "target_tvt": target_tvt_np[i].tolist(),
+                    "target_bins": target_bins_np[i].tolist(),
+                    "crop_tvt": crop_tvt_np[i].tolist(),
+                }
+                if corr_scores_np is not None and corr_top1_bins_np is not None:
+                    row["corr_scores"] = corr_scores_np[i].tolist()
+                    row["corr_top1_pred_bins"] = corr_top1_bins_np[i].tolist()
+                    row["corr_top1_mode"] = int(corr_mode_top1_np[i])
+                rows.append(row)
     unique_modes, mode_counts = np.unique(np.array(best_modes), return_counts=True)
     mode_hist = {
         str(k): int(v) for k, v in zip(unique_modes, mode_counts, strict=False)
@@ -596,6 +707,17 @@ def _evaluate(
         "pred_bin_max": float(np.max(pred_bin_values)),
         "mode_usage_histogram": mode_hist,
     }
+    if corr_top1_ft:
+        metrics.update(
+            {
+                "corr_top1_rmse_ft": float(np.mean(corr_top1_ft)),
+                "corr_target_rank_mean": float(np.mean(corr_target_rank)),
+                "corr_target_top3_rate": float(np.mean(corr_target_top3)),
+                "corr_nll": float(np.mean(corr_nll)),
+                "corr_mode_top1_ft": float(np.mean(corr_mode_top1_ft)),
+                "corr_mode_weighted_ft": float(np.mean(corr_mode_weighted_ft)),
+            }
+        )
     return metrics, pd.DataFrame(rows)
 
 
@@ -894,6 +1016,15 @@ def _metric_value(
     return current
 
 
+def _sanity_gap(
+    valid: dict[str, Any], sanity: dict[str, Any], kind: str, metric: str
+) -> float | None:
+    baseline = sanity.get(kind, {})
+    if not isinstance(baseline, dict) or metric not in valid or metric not in baseline:
+        return None
+    return float(baseline[metric]) - float(valid[metric])
+
+
 def write_geometry_report(
     metrics: dict[str, Any],
     run_dir: str | Path,
@@ -906,6 +1037,9 @@ def write_geometry_report(
     sanity = metrics.get("sanity", {})
     run_name = str(metrics.get("run_name", ""))
     title = (
+        "GEOMTP_V4_SIM2REAL_REPORT"
+        if "mtp_v4" in run_name
+        else
         "GEOMTP_V3_GR_FORCED_REPORT"
         if "mtp_v3_gr_forced" in run_name
         else "GEOMTP_V2_ANCHOR_DROPOUT_REPORT"
@@ -954,6 +1088,22 @@ def write_geometry_report(
         f"  logit_error_spearman: {valid.get('logit_error_spearman', 'n/a')}",
         "  oracle_top3_by_logit_ft: "
         f"{valid.get('oracle_top3_by_logit_rmse_ft', 'n/a')}",
+        f"  corr_top1_ft: {valid.get('corr_top1_rmse_ft', 'n/a')}",
+        f"  corr_mode_top1_ft: {valid.get('corr_mode_top1_ft', 'n/a')}",
+        f"  corr_mode_weighted_ft: {valid.get('corr_mode_weighted_ft', 'n/a')}",
+        f"  corr_target_top3_rate: {valid.get('corr_target_top3_rate', 'n/a')}",
+        f"  corr_target_rank_mean: {valid.get('corr_target_rank_mean', 'n/a')}",
+        f"  corr_nll: {valid.get('corr_nll', 'n/a')}",
+        "  normal_vs_shuffled_top1_gap: "
+        f"{_metric_value(metrics, ('sanity_gaps', 'shuffled_gr_top1_gap_ft'))}",
+        "  normal_vs_no_GR_top1_gap: "
+        f"{_metric_value(metrics, ('sanity_gaps', 'no_gr_top1_gap_ft'))}",
+        "  normal_vs_no_all_priors_top1_gap: "
+        f"{_metric_value(metrics, ('sanity_gaps', 'no_all_priors_top1_gap_ft'))}",
+        "  normal_vs_shuffled_corr_gap: "
+        f"{_metric_value(metrics, ('sanity_gaps', 'shuffled_gr_corr_top1_gap_ft'))}",
+        "  normal_vs_no_GR_corr_gap: "
+        f"{_metric_value(metrics, ('sanity_gaps', 'no_gr_corr_top1_gap_ft'))}",
         "  oracle_top5_by_logit_ft: "
         f"{valid.get('oracle_top5_by_logit_rmse_ft', 'n/a')}",
         "",
@@ -964,8 +1114,16 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('no_gr', 'weighted_mean_rmse_ft'))}",
         "  no_GR baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_gr', 'oracle_topk_rmse_ft'))}",
+        "  no_GR baseline corr_top1_ft: "
+        f"{_metric_value(sanity, ('no_gr', 'corr_top1_rmse_ft'))}",
+        "  shuffled_GR baseline top1_ft: "
+        f"{_metric_value(sanity, ('shuffled_gr', 'top1_rmse_ft'))}",
+        "  shuffled_GR baseline weighted_ft: "
+        f"{_metric_value(sanity, ('shuffled_gr', 'weighted_mean_rmse_ft'))}",
         "  shuffled_GR baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('shuffled_gr', 'oracle_topk_rmse_ft'))}",
+        "  shuffled_GR baseline corr_top1_ft: "
+        f"{_metric_value(sanity, ('shuffled_gr', 'corr_top1_rmse_ft'))}",
         "  no_history baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_history', 'oracle_topk_rmse_ft'))}",
         "  no_base_b2_a baseline top1_ft: "
@@ -1000,6 +1158,10 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('base_b2_a_only', 'weighted_mean_rmse_ft'))}",
         "  base_b2_a_only baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('base_b2_a_only', 'oracle_topk_rmse_ft'))}",
+        "  no_corr_head top1_ft: "
+        f"{_metric_value(sanity, ('no_corr_head', 'top1_rmse_ft'))}",
+        "  no_corr_head weighted_ft: "
+        f"{_metric_value(sanity, ('no_corr_head', 'weighted_mean_rmse_ft'))}",
         "",
         "static modes:",
         "  static_top1_ft: "
@@ -1028,6 +1190,12 @@ def write_geometry_report(
         f"  contrastive_alpha: {_metric_value(metrics, ('loss', 'contrastive_alpha'))}",
         "  contrastive_margin_bins: "
         f"{_metric_value(metrics, ('loss', 'contrastive_margin_bins'))}",
+        f"  selection_source: {_metric_value(metrics, ('train_config', 'selection_source'))}",
+        f"  synthetic_enabled: {_metric_value(metrics, ('synthetic', 'enabled'))}",
+        f"  synthetic_real_fraction: {_metric_value(metrics, ('synthetic', 'real_fraction'))}",
+        f"  corr_head_enabled: {_metric_value(metrics, ('corr_head', 'enabled'))}",
+        f"  corr_alpha_synth: {_metric_value(metrics, ('corr_head', 'alpha_synth'))}",
+        f"  corr_alpha_real: {_metric_value(metrics, ('corr_head', 'alpha_real'))}",
         "  raw_path_oob_frac_before_bound: "
         f"{valid.get('raw_path_oob_frac_before_bound', 'n/a')}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
@@ -1037,7 +1205,11 @@ def write_geometry_report(
         f"  pred_bin_min: {valid.get('pred_bin_min', 'n/a')}",
         f"  pred_bin_max: {valid.get('pred_bin_max', 'n/a')}",
     ]
-    for set_name in ("valid_first_chunk_known_tail", "valid_base_center_all_hidden"):
+    for set_name in (
+        "valid_synthetic",
+        "valid_first_chunk_known_tail",
+        "valid_base_center_all_hidden",
+    ):
         set_metrics = metrics.get(set_name)
         if not isinstance(set_metrics, dict):
             continue
@@ -1050,6 +1222,9 @@ def write_geometry_report(
                 f"  weighted_ft: {set_metrics.get('weighted_mean_rmse_ft', 'n/a')}",
                 f"  oracle_top3_ft: {set_metrics.get('oracle_top3_rmse_ft', 'n/a')}",
                 f"  oracle_topK_ft: {set_metrics.get('oracle_topk_rmse_ft', 'n/a')}",
+                f"  corr_top1_ft: {set_metrics.get('corr_top1_rmse_ft', 'n/a')}",
+                "  corr_target_top3_rate: "
+                f"{set_metrics.get('corr_target_top3_rate', 'n/a')}",
                 f"  entropy_mean: {set_metrics.get('mode_entropy_mean', 'n/a')}",
                 f"  mode_usage_histogram: {set_metrics.get('mode_usage_histogram', 'n/a')}",
             ]
@@ -1119,7 +1294,13 @@ def train_from_config(
         width=first.x.shape[2],
         future_steps=cfg.window.future_steps,
         cfg=cfg.model,
+        corr_head=cfg.corr_head,
     ).to(device)
+    if cfg.train.init_checkpoint is not None:
+        if not cfg.train.init_checkpoint.exists():
+            raise FileNotFoundError(f"Missing init_checkpoint: {cfg.train.init_checkpoint}")
+        init_state = torch.load(cfg.train.init_checkpoint, map_location=device)
+        model.load_state_dict(init_state.get("model", init_state), strict=False)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.train.learning_rate,
@@ -1135,7 +1316,9 @@ def train_from_config(
             x = batch["x"].to(device)
             target = batch["target_bins"].to(device)
             history_bins = batch["history_bins"].to(device)
-            paths, logits = model(x)
+            output = model.forward_all(x)
+            paths = output.paths
+            logits = output.logits
             loss, _ = mtp_loss(
                 paths,
                 logits,
@@ -1144,6 +1327,25 @@ def train_from_config(
                 epoch=epoch,
                 history_bins=history_bins,
             )
+            if output.corr_logits is not None:
+                future_corr = output.corr_logits[
+                    :,
+                    :,
+                    cfg.window.history_steps : cfg.window.history_steps
+                    + cfg.window.future_steps,
+                ]
+                corr_alpha_values = [
+                    cfg.corr_head.alpha_synth
+                    if str(sample_type).startswith("synthetic")
+                    else cfg.corr_head.alpha_real
+                    for sample_type in batch["sample_type"]
+                ]
+                corr_alpha = float(np.mean(corr_alpha_values))
+                loss = loss + corr_alpha * corr_vertical_kl_loss(
+                    future_corr,
+                    target,
+                    tau_bins=cfg.corr_head.target_tau_bins,
+                )
             if cfg.loss.contrastive_alpha > 0.0:
                 corrupted_x = _contrastive_corruption_batch(x, cfg)
                 corrupted_paths, _ = model(corrupted_x)
@@ -1259,6 +1461,27 @@ def train_from_config(
             device,
         )[0],
     }
+    sanity_metrics["no_corr_head"] = {
+        key: value for key, value in valid_metrics.items() if not key.startswith("corr_")
+    }
+    sanity_gaps = {
+        "no_gr_top1_gap_ft": _sanity_gap(valid_metrics, sanity_metrics, "no_gr", "top1_rmse_ft"),
+        "shuffled_gr_top1_gap_ft": _sanity_gap(
+            valid_metrics, sanity_metrics, "shuffled_gr", "top1_rmse_ft"
+        ),
+        "no_all_priors_top1_gap_ft": _sanity_gap(
+            valid_metrics, sanity_metrics, "no_all_priors", "top1_rmse_ft"
+        ),
+        "no_gr_corr_top1_gap_ft": _sanity_gap(
+            valid_metrics, sanity_metrics, "no_gr", "corr_top1_rmse_ft"
+        ),
+        "shuffled_gr_corr_top1_gap_ft": _sanity_gap(
+            valid_metrics, sanity_metrics, "shuffled_gr", "corr_top1_rmse_ft"
+        ),
+    }
+    sanity_gaps = {
+        key: value for key, value in sanity_gaps.items() if value is not None
+    }
     valid_metrics["checkpoint_epoch"] = int(checkpoint["best_epoch"])
     valid_metrics["checkpoint_score"] = float(checkpoint["best_valid_score"])
     summary = {
@@ -1268,6 +1491,7 @@ def train_from_config(
         **valid_set_metrics,
         "history": history,
         "sanity": sanity_metrics,
+        "sanity_gaps": sanity_gaps,
         "primary_valid_name": splits.primary_valid_name,
         "train_mix_counts": splits.train_mix_counts,
         "train_bucket_counts": {
@@ -1298,6 +1522,9 @@ def train_from_config(
         },
         "priors": _json_safe_config(cfg)["priors"],
         "augmentation": _json_safe_config(cfg)["augmentation"],
+        "synthetic": _json_safe_config(cfg)["synthetic"],
+        "corr_head": _json_safe_config(cfg)["corr_head"],
+        "train_config": _json_safe_config(cfg)["train"],
         "static_modes": _static_mode_metrics(valid_samples, cfg, device),
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),

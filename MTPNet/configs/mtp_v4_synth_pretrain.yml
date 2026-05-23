@@ -1,0 +1,133 @@
+data:
+  data_dir: data
+  train_dir: data/train
+  test_dir: data/test
+  k_wells: -1
+  copy_from: ../old/data
+
+priors:
+  enabled: true
+  base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+  b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+  a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+  base_column: schema10_oof_pp
+  b2_column: b2_guarded_submit
+  b2_danger_column: b2_submit_danger_score
+  a_p50_column: formation_sample_median
+  a_p10_column: formation_sample_p10
+  a_p90_column: formation_sample_p90
+
+synthetic:
+  enabled: true
+  windows_per_epoch: 100000
+  valid_windows: 10000
+  real_fraction: 0.0
+  path_families: [linear, curved, piecewise, real_residual]
+  noise_std_range: [1.0, 8.0]
+  amplitude_scale_range: [0.8, 1.2]
+  baseline_shift_range: [-10.0, 10.0]
+  dropout_max_frac: 0.15
+  stretch_range: [0.8, 1.25]
+  bad_prior_prob: 0.15
+  no_prior_prob: 0.10
+  seed: 1729
+
+corr_head:
+  enabled: true
+  target_sigma_bins: 1.5
+  target_tau_bins: 1.5
+  loss: vertical_kl
+  alpha_synth: 0.5
+  alpha_real: 0.25
+  tracker_beta_grid: [0.25, 0.5, 1.0]
+
+augmentation:
+  enabled: true
+  drop_anchor_sdf_prob: 0.30
+  drop_b2_sdf_prob: 0.50
+  drop_a_density_prob: 0.35
+  drop_all_priors_prob: 0.25
+  anchor_jitter_ft: [10.0, 20.0, 40.0, 60.0]
+  anchor_swap_prob: 0.40
+  anchor_swap: [schema10, B2, A_p50, A_weighted_mean, noisy_anchor]
+  wrong_anchor_prob: 0.10
+  wrong_anchor_shift_ft: [40.0, 80.0]
+  batch_mix:
+    normal: 0.55
+    no_priors: 0.20
+    jittered_priors: 0.15
+    wrong_priors: 0.10
+
+window:
+  rows_per_step: 32
+  history_steps: 8
+  future_steps: 16
+  vertical_bins: 96
+  vertical_radius_ft: 240.0
+  stride_steps: 4
+  max_windows_per_well: 64
+  train_sample_mix:
+    teacher_forcing_hidden: 0.40
+    known_tail_start: 0.20
+    base_center_hidden: 0.40
+  valid_sample_types:
+    - known_tail_start
+    - base_center_hidden
+  channels:
+    - gr_diff
+    - gr_z_diff
+    - dgr_diff
+    - abs_gr_diff
+    - history_mask
+    - history_sdf
+    - finite_mask
+    - anchor_sdf
+    - b2_sdf
+    - a_p50_sdf
+    - a_density
+    - a_p10_p90_band
+    - anchor_offset_value
+    - b2_delta_value
+
+model:
+  k_modes: 8
+  conv_channels: [16, 32, 64, 128]
+  hidden_dims: [512, 1024]
+  dropout: 0.05
+  bounded_output: true
+  mode_bias_init: true
+  mode_bias_span_bins: 36.0
+
+loss:
+  path_loss: mae
+  alpha_cls: 0.0
+  soft_prob_alpha: 0.2
+  soft_prob_tau_bins: 2.0
+  top3_margin_alpha: 0.05
+  top3_margin: 0.0
+  continuation_alpha: 0.02
+  continuation_tau_bins: 3.0
+  smooth_lambda: 0.01
+  entropy_lambda: 0.004
+  entropy_warmup_epochs: 3
+  entropy_final_lambda: 0.001
+  diversity_lambda: 0.01
+  diversity_margin_bins: 3.0
+
+train:
+  batch_size: 64
+  epochs: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
+  num_workers: 0
+  seed: 42
+  selection_source: synthetic
+
+validation:
+  valid_fraction: 0.2
+  seed: 42
+
+run:
+  name: mtp_v4_synth_pretrain
+  output_dir: artifacts/mtp_v4_synth_pretrain

@@ -330,6 +330,90 @@ def test_mtp_v3_gr_forced_config_loads() -> None:
     assert cfg.loss.top3_margin_alpha == pytest.approx(0.05)
 
 
+def test_v4_synthetic_and_corr_head_config_loads(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "synthetic": {
+                    "enabled": True,
+                    "windows_per_epoch": 1234,
+                    "valid_windows": 234,
+                    "real_fraction": 0.3,
+                    "path_families": ["linear", "curved"],
+                    "noise_std_range": [1.0, 8.0],
+                    "amplitude_scale_range": [0.8, 1.2],
+                    "baseline_shift_range": [-10.0, 10.0],
+                    "dropout_max_frac": 0.15,
+                    "stretch_range": [0.8, 1.25],
+                    "bad_prior_prob": 0.15,
+                    "no_prior_prob": 0.10,
+                    "seed": 1729,
+                },
+                "corr_head": {
+                    "enabled": True,
+                    "target_sigma_bins": 1.5,
+                    "target_tau_bins": 1.5,
+                    "loss": "vertical_kl",
+                    "alpha_synth": 0.5,
+                    "alpha_real": 0.25,
+                    "tracker_beta_grid": [0.25, 0.5, 1.0],
+                },
+                "train": {
+                    "init_checkpoint": "artifacts/mtp_v4_synth_pretrain/checkpoints/best.pt",
+                    "selection_source": "synthetic",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.synthetic.enabled is True
+    assert cfg.synthetic.windows_per_epoch == 1234
+    assert cfg.synthetic.valid_windows == 234
+    assert cfg.synthetic.real_fraction == pytest.approx(0.3)
+    assert cfg.synthetic.path_families == ("linear", "curved")
+    assert cfg.synthetic.noise_std_range == (1.0, 8.0)
+    assert cfg.synthetic.amplitude_scale_range == (0.8, 1.2)
+    assert cfg.synthetic.baseline_shift_range == (-10.0, 10.0)
+    assert cfg.synthetic.dropout_max_frac == pytest.approx(0.15)
+    assert cfg.synthetic.stretch_range == (0.8, 1.25)
+    assert cfg.synthetic.bad_prior_prob == pytest.approx(0.15)
+    assert cfg.synthetic.no_prior_prob == pytest.approx(0.10)
+    assert cfg.synthetic.seed == 1729
+    assert cfg.corr_head.enabled is True
+    assert cfg.corr_head.target_sigma_bins == pytest.approx(1.5)
+    assert cfg.corr_head.target_tau_bins == pytest.approx(1.5)
+    assert cfg.corr_head.loss == "vertical_kl"
+    assert cfg.corr_head.alpha_synth == pytest.approx(0.5)
+    assert cfg.corr_head.alpha_real == pytest.approx(0.25)
+    assert cfg.corr_head.tracker_beta_grid == (0.25, 0.5, 1.0)
+    assert cfg.train.init_checkpoint == Path(
+        "artifacts/mtp_v4_synth_pretrain/checkpoints/best.pt"
+    )
+    assert cfg.train.selection_source == "synthetic"
+
+
+def test_mtp_v4_configs_load() -> None:
+    pretrain = load_config(Path("configs/mtp_v4_synth_pretrain.yml"))
+    finetune = load_config(Path("configs/mtp_v4_sim2real.yml"))
+
+    assert pretrain.run.name == "mtp_v4_synth_pretrain"
+    assert pretrain.synthetic.enabled is True
+    assert pretrain.synthetic.real_fraction == pytest.approx(0.0)
+    assert pretrain.corr_head.enabled is True
+    assert pretrain.corr_head.alpha_synth == pytest.approx(0.5)
+    assert pretrain.train.selection_source == "synthetic"
+    assert finetune.run.name == "mtp_v4_sim2real"
+    assert finetune.synthetic.real_fraction == pytest.approx(0.3)
+    assert finetune.train.init_checkpoint == Path(
+        "artifacts/mtp_v4_synth_pretrain/checkpoints/best.pt"
+    )
+    assert finetune.train.selection_source == "real"
+
+
 def test_zero_k_wells_fails(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError, match="data.k_wells must be -1 or a positive integer"

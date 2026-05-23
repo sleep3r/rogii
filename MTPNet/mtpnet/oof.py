@@ -168,6 +168,7 @@ def run_oof(
     merge_tolerance_ft: float = 3.0,
     overlap_penalty: float = 0.10,
     max_modes_per_window: int = 8,
+    corr_beta: float = 0.5,
     full_stitch: bool = False,
     resume: bool = True,
 ) -> dict[str, Any]:
@@ -271,6 +272,7 @@ def run_oof(
                 overlap_penalty=overlap_penalty,
                 max_modes_per_window=max_modes_per_window,
                 logit_source=logit_source,
+                corr_beta=corr_beta,
             )
         for name, item in track_summary["baselines"].items():
             baseline_items.setdefault(name, []).append(item)
@@ -328,6 +330,7 @@ def run_oof(
             "merge_tolerance_ft": merge_tolerance_ft,
             "overlap_penalty": overlap_penalty,
             "max_modes_per_window": max_modes_per_window,
+            "corr_beta": corr_beta,
         },
         "folds": fold_summaries,
         "aggregate": {

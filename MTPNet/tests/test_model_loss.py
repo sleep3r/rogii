@@ -1,8 +1,13 @@
 import torch
 import pytest
 
-from mtpnet.config import LossConfig, ModelConfig
-from mtpnet.loss import mtp_loss
+from mtpnet.config import CorrelationHeadConfig, LossConfig, ModelConfig
+from mtpnet.loss import (
+    corr_vertical_kl_loss,
+    mode_corr_scores,
+    mtp_loss,
+    vertical_corr_target,
+)
 from mtpnet.model import MTPNet
 
 
@@ -17,6 +22,27 @@ def test_model_forward_shapes() -> None:
     paths, logits = model(torch.randn(3, 5, 32, 10))
     assert paths.shape == (3, 4, 6)
     assert logits.shape == (3, 4)
+
+
+def test_model_forward_all_returns_corr_logits_when_enabled() -> None:
+    model = MTPNet(
+        in_channels=5,
+        height=32,
+        width=10,
+        future_steps=6,
+        cfg=ModelConfig(k_modes=4, conv_channels=(8, 16), hidden_dims=(32,)),
+        corr_head=CorrelationHeadConfig(enabled=True),
+    )
+    paths, logits = model(torch.randn(3, 5, 32, 10))
+    output = model.forward_all(torch.randn(3, 5, 32, 10))
+
+    assert paths.shape == (3, 4, 6)
+    assert logits.shape == (3, 4)
+    assert output.paths.shape == (3, 4, 6)
+    assert output.logits.shape == (3, 4)
+    assert output.raw_paths.shape == (3, 4, 6)
+    assert output.corr_logits is not None
+    assert output.corr_logits.shape == (3, 32, 10)
 
 
 def test_model_head_supports_train_batch_size_one() -> None:
@@ -206,3 +232,41 @@ def test_mtp_loss_continuation_probability_prefers_smooth_history_extension() ->
 
     assert aligned_metrics["continuation_loss"] < reversed_metrics["continuation_loss"]
     assert aligned_loss.item() < reversed_loss.item()
+
+
+def test_vertical_corr_target_sums_to_one_and_peaks_at_true_bin() -> None:
+    target_bins = torch.tensor([[1.0, 3.0]])
+
+    target = vertical_corr_target(target_bins, height=5, tau_bins=1.0)
+
+    assert target.shape == (1, 5, 2)
+    assert torch.allclose(target.sum(dim=1), torch.ones(1, 2))
+    assert target[0, :, 0].argmax().item() == 1
+    assert target[0, :, 1].argmax().item() == 3
+
+
+def test_corr_vertical_kl_loss_is_lower_when_logits_peak_at_target_bin() -> None:
+    target_bins = torch.tensor([[1.0, 3.0]])
+    good_logits = torch.full((1, 5, 2), -4.0)
+    good_logits[0, 1, 0] = 4.0
+    good_logits[0, 3, 1] = 4.0
+    bad_logits = torch.full((1, 5, 2), -4.0)
+    bad_logits[0, 4, 0] = 4.0
+    bad_logits[0, 0, 1] = 4.0
+
+    good_loss = corr_vertical_kl_loss(good_logits, target_bins, tau_bins=1.0)
+    bad_loss = corr_vertical_kl_loss(bad_logits, target_bins, tau_bins=1.0)
+
+    assert good_loss.item() < bad_loss.item()
+
+
+def test_mode_corr_scores_prefer_path_on_high_corr_ridge() -> None:
+    corr_logits = torch.full((1, 6, 5), -4.0)
+    corr_logits[0, 1, 2] = 4.0
+    corr_logits[0, 2, 3] = 4.0
+    paths = torch.tensor([[[1.0, 2.0], [4.0, 4.0]]])
+
+    scores = mode_corr_scores(corr_logits, paths, future_start=2)
+
+    assert scores.shape == (1, 2)
+    assert scores[0, 0] > scores[0, 1]

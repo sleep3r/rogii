@@ -243,3 +243,63 @@ def test_run_tracker_requires_oof_logits_for_ranker_oof(tmp_path: Path) -> None:
             tau_ft=5.0,
             ranker_beta=0.5,
         )
+
+
+def test_corr_logit_source_selects_mode_with_higher_corr_score(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                start_step=0,
+                logits=[0.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            )
+        ]
+    )
+    windows["corr_scores"] = [np.asarray([-3.0, 3.0], dtype=np.float32)]
+
+    corr_windows, source = apply_tracker_logit_source(
+        windows,
+        logit_source="corr",
+        run_dir=tmp_path,
+        ranker_logits=None,
+        tau_ft=5.0,
+        ranker_beta=0.5,
+        corr_beta=1.0,
+    )
+    nn_windows, _ = apply_tracker_logit_source(
+        windows,
+        logit_source="corr",
+        run_dir=tmp_path,
+        ranker_logits=None,
+        tau_ft=5.0,
+        ranker_beta=0.5,
+        corr_beta=0.0,
+    )
+
+    assert source == "corr"
+    assert int(np.asarray(corr_windows.iloc[0]["logits"]).argmax()) == 1
+    np.testing.assert_allclose(corr_windows.iloc[0]["logits"], [-1.0, 1.0])
+    np.testing.assert_allclose(nn_windows.iloc[0]["logits"], [0.0, 0.0])
+
+
+def test_corr_logit_source_requires_corr_scores(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                start_step=0,
+                logits=[0.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="corr_scores"):
+        apply_tracker_logit_source(
+            windows,
+            logit_source="corr",
+            run_dir=tmp_path,
+            ranker_logits=None,
+            tau_ft=5.0,
+            ranker_beta=0.5,
+            corr_beta=1.0,
+        )

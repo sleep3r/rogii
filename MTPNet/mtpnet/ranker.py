@@ -165,7 +165,7 @@ def _ensure_window_ids(windows: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_mode_windows(mode_windows: pd.DataFrame) -> pd.DataFrame:
     out = mode_windows.copy()
-    for column in ("logits", "probs", "path_tvt", "target_tvt"):
+    for column in ("logits", "probs", "path_tvt", "target_tvt", "corr_scores"):
         if column in out.columns:
             out[column] = out[column].map(_as_float_array)
     return out

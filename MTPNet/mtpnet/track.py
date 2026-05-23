@@ -503,6 +503,11 @@ def _anchored_candidate_name(name: str, alpha: float, clip: float) -> str:
     return f"mtp_track_anchored_{local}_a{alpha:g}_clip{int(clip)}"
 
 
+def _beta_suffix(beta: float) -> str:
+    text = f"{float(beta):.1f}" if float(beta).is_integer() else f"{float(beta):g}"
+    return "b" + text.replace("0.", "0").replace(".", "")
+
+
 def _run_tracker_metrics_only(
     *,
     cfg: MTPConfig,
@@ -782,11 +787,30 @@ def apply_tracker_logit_source(
     ranker_logits: str | Path | None,
     tau_ft: float,
     ranker_beta: float,
+    corr_beta: float = 0.5,
 ) -> tuple[pd.DataFrame, str]:
     run_path = Path(run_dir)
     windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
     if logit_source == "nn":
         return windows, "nn"
+    if logit_source == "corr":
+        if "corr_scores" not in windows.columns:
+            raise ValueError("logit_source='corr' requires corr_scores in mode windows")
+        out = windows.copy()
+
+        def combine(row: Any) -> np.ndarray:
+            logits = np.asarray(row.logits, dtype=np.float32)
+            corr = np.asarray(row.corr_scores, dtype=np.float32)
+            scale = float(corr.std())
+            if scale <= 1e-8:
+                corr_z = np.zeros_like(corr, dtype=np.float32)
+            else:
+                corr_z = ((corr - float(corr.mean())) / scale).astype(np.float32)
+            return (logits + float(corr_beta) * corr_z).astype(np.float32)
+
+        out["logits"] = out.apply(combine, axis=1)
+        out["probs"] = out["logits"].map(_softmax_np)
+        return out, "corr"
     if logit_source == "ranker":
         ranker_path = run_path / "ranker_predictions.parquet"
         if not ranker_path.exists():
@@ -809,7 +833,7 @@ def apply_tracker_logit_source(
             ),
             "ranker_oof",
         )
-    raise ValueError("logit_source must be 'ranker', 'ranker_oof', or 'nn'")
+    raise ValueError("logit_source must be 'corr', 'ranker', 'ranker_oof', or 'nn'")
 
 
 def run_tracker(
@@ -824,6 +848,7 @@ def run_tracker(
     ranker_logits: str | Path | None = None,
     tau_ft: float = 5.0,
     ranker_beta: float = 0.5,
+    corr_beta: float = 0.5,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     cfg = _load_run_config(run_path)
@@ -839,6 +864,7 @@ def run_tracker(
         ranker_logits=ranker_logits,
         tau_ft=tau_ft,
         ranker_beta=ranker_beta,
+        corr_beta=corr_beta,
     )
     well_ids = set(mode_windows["well_id"].astype(str))
     hidden_rows = _load_hidden_rows(cfg, well_ids)
@@ -858,10 +884,25 @@ def run_tracker(
     summary["tracker"]["logit_source"] = logit_source
     summary["tracker"]["tau_ft"] = tau_ft
     summary["tracker"]["ranker_beta"] = ranker_beta
+    summary["tracker"]["corr_beta"] = corr_beta
     (run_path / "track_metrics.json").write_text(
         json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
     )
     _write_track_report(run_path, summary=summary, candidates=summary["candidates"])
+    if logit_source == "corr":
+        suffix = _beta_suffix(corr_beta)
+        (run_path / f"track_metrics_corr_{suffix}.json").write_text(
+            json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
+        )
+        pd.DataFrame(summary["candidates"]).sort_values("rmse").to_csv(
+            run_path / f"track_candidates_corr_{suffix}.csv", index=False
+        )
+        report_path = _write_track_report(
+            run_path, summary=summary, candidates=summary["candidates"]
+        )
+        (run_path / f"track_report_corr_{suffix}.md").write_text(
+            report_path.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     best = min(summary["candidates"], key=lambda item: item.get("rmse", float("inf")))
     print(json.dumps(_json_safe(best), indent=2), flush=True)
     return summary

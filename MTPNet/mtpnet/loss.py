@@ -63,6 +63,43 @@ def _soft_probability_loss(errors: Tensor, logits: Tensor, tau_bins: float) -> T
     return F.kl_div(F.log_softmax(logits, dim=1), target_prob, reduction="batchmean")
 
 
+def vertical_corr_target(target_bins: Tensor, *, height: int, tau_bins: float) -> Tensor:
+    bins = torch.arange(height, device=target_bins.device, dtype=target_bins.dtype)
+    distance = torch.abs(bins[None, :, None] - target_bins[:, None, :])
+    return F.softmax(-distance / max(float(tau_bins), 1e-6), dim=1)
+
+
+def corr_vertical_kl_loss(
+    corr_logits: Tensor, target_bins: Tensor, *, tau_bins: float
+) -> Tensor:
+    target_prob = vertical_corr_target(
+        target_bins.to(device=corr_logits.device, dtype=corr_logits.dtype),
+        height=int(corr_logits.shape[1]),
+        tau_bins=tau_bins,
+    )
+    return F.kl_div(
+        F.log_softmax(corr_logits, dim=1),
+        target_prob.detach(),
+        reduction="batchmean",
+    )
+
+
+def mode_corr_scores(
+    corr_logits: Tensor, paths: Tensor, *, future_start: int
+) -> Tensor:
+    future_steps = paths.shape[-1]
+    future_logits = corr_logits[:, :, future_start : future_start + future_steps]
+    log_prob = F.log_softmax(future_logits, dim=1)
+    bins = paths.round().long().clamp(0, corr_logits.shape[1] - 1)
+    log_prob_by_step = log_prob.permute(0, 2, 1)
+    expanded = log_prob_by_step[:, None, :, :].expand(
+        -1, paths.shape[1], -1, -1
+    )
+    return torch.gather(expanded, dim=3, index=bins[:, :, :, None]).squeeze(3).mean(
+        dim=2
+    )
+
+
 def _top3_margin_loss(
     logits: Tensor, best_k: Tensor, *, margin: float = 0.0, top_k: int = 3
 ) -> Tensor:
