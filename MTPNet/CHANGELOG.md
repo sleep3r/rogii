@@ -19,6 +19,59 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### EXP-MTPRANKER-V0 - CatBoost mode selector over MTP hypotheses
+
+- Command/config:
+  - `make rank RUN_DIR=artifacts/mtp_v1_prior_conditioned`;
+  - ranker valid split: `35%` of existing MTP validation wells, grouped by
+    `well_id`, seed `42`.
+- Data:
+  - mode feature rows: `43,136`;
+  - windows: `5,392`;
+  - modes per window: `8`;
+  - ranker train wells: `101`;
+  - ranker valid wells: `54`.
+- What changed:
+  - added CatBoost-based MTP mode ranker as a second-stage selector;
+  - added explicit anti-leak `FEATURE_COLUMNS`;
+  - added mode-level features from neural logits, path geometry, base/B2/A
+    priors, GR/typewell scores, and window context;
+  - added ranker CLI/Make target and artifacts:
+    `ranker_mode_features.parquet`, `ranker_predictions.parquet`,
+    `ranker_candidates.csv`, `ranker_metrics.json`, `ranker_report.md`,
+    `checkpoints/mtp_ranker_catboost.cbm`;
+  - fixed ranker `window_id` stability so filtered validation windows align
+    with feature rows before applying learned logits.
+- Window-level ranker-valid result:
+  - NN logits top1 RMSE: `7.7140 ft`;
+  - NN weighted RMSE: `7.0651 ft`;
+  - CatBoost ranker top1 RMSE: `7.4533 ft`;
+  - CatBoost ranker weighted RMSE at tau `5`: `6.9245 ft`;
+  - CatBoost ranker top3 oracle by logit: `4.2396 ft`;
+  - CatBoost ranker best-mode top3 rate: `0.9364`.
+- Row-level ranker-valid result:
+  - B2 baseline RMSE: `9.0247 ft`;
+  - base schema10 RMSE: `9.7790 ft`;
+  - best raw ranker candidate `mtp_ranker_top3_t5`: `8.9632 ft`;
+  - best guarded B2+ranker candidate:
+    `b2_plus_mtp_ranker_weighted_t2.5_a0.3_clip20`: `8.9752 ft`;
+  - deployable gain vs B2: `+0.0615 ft` raw top3, `+0.0495 ft` guarded;
+  - P95 shift vs B2 for best raw: `3.8770 ft`;
+  - P95 shift vs B2 for best guarded: `1.1670 ft`.
+- Takeaway:
+  - learned selection is materially better than NN logits and simple GR rerank;
+  - the planned `+0.10 ft` gain threshold over B2 is not reached yet;
+  - ranker is a useful selector direction, but not enough to justify 5-fold OOF
+    as-is.
+- Decision:
+  - diagnostic GO;
+  - performance GO is still conditional;
+  - next options are better B/NCC features, pairwise/listwise rank objective, or
+    OOF ranker only if the selector gain improves past `0.10 ft`.
+- Verification:
+  - focused ranker tests: `9 passed`;
+  - real ranker job completed and wrote all ranker artifacts.
+
 ### EXP-MTPNET-V1.2 - Oracle and GR/typewell rerank diagnostics
 
 - Command/config:

@@ -24,6 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
         "stitch", help="Stitch window predictions into row-level OOF candidates"
     )
     stitch_parser.add_argument("--run-dir", type=Path, required=True)
+
+    rank_parser = sub.add_parser(
+        "rank", help="Train CatBoost MTP mode ranker on stitched window modes"
+    )
+    rank_parser.add_argument("--run-dir", type=Path, required=True)
+    rank_parser.add_argument("--seed", type=int, default=42)
+    rank_parser.add_argument("--valid-fraction", type=float, default=0.35)
     return parser
 
 
@@ -48,6 +55,15 @@ def main(argv: list[str] | None = None) -> None:
         from .stitch import run_stitch
 
         run_stitch(args.run_dir)
+        return
+    if args.command == "rank":
+        from .ranker import run_ranker
+
+        run_ranker(
+            args.run_dir,
+            seed=args.seed,
+            valid_fraction=args.valid_fraction,
+        )
         return
     raise SystemExit(f"Unknown command: {args.command}")
 

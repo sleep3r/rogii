@@ -8,7 +8,7 @@ COPY_SOURCE ?= ../old/data
 COPY_TARGET ?= data
 CODEBASE_BUNDLE ?= artifacts/codebase_bundle.md
 
-.PHONY: install test copy-data smoke train eval stitch codebase-bundle collect-code
+.PHONY: install test copy-data smoke train eval stitch rank codebase-bundle collect-code
 
 install:
 	$(UV) sync --extra dev
@@ -30,6 +30,9 @@ eval:
 
 stitch:
 	$(UV) run --extra dev python -m mtpnet.cli stitch --run-dir $(RUN_DIR)
+
+rank:
+	$(UV) run --extra dev python -m mtpnet.cli rank --run-dir $(RUN_DIR)
 
 codebase-bundle:
 	$(UV) run --extra dev python -m mtpnet.codebase_bundle --root . --output $(CODEBASE_BUNDLE)
