@@ -13,7 +13,7 @@ LOGIT_SOURCE ?= ranker
 RANKER_LOGITS ?=
 TAU_FT ?= 5.0
 RANKER_BETA ?= 0.5
-CORR_BETA ?= 0.5
+CORR_BETA ?=
 FULL_STITCH ?=
 COPY_SOURCE ?= ../old/data
 COPY_TARGET ?= data
@@ -51,13 +51,13 @@ rank-crossfit:
 mtp-ranker-crossfit: rank-crossfit
 
 track:
-	$(UV) run --extra dev python -m mtpnet.cli track --run-dir $(RUN_DIR) --logit-source $(LOGIT_SOURCE) --tau-ft $(TAU_FT) --ranker-beta $(RANKER_BETA) --corr-beta $(CORR_BETA) $(if $(RANKER_LOGITS),--ranker-logits $(RANKER_LOGITS),)
+	$(UV) run --extra dev python -m mtpnet.cli track --run-dir $(RUN_DIR) --logit-source $(LOGIT_SOURCE) --tau-ft $(TAU_FT) --ranker-beta $(RANKER_BETA) $(if $(CORR_BETA),--corr-beta $(CORR_BETA),) $(if $(RANKER_LOGITS),--ranker-logits $(RANKER_LOGITS),)
 
 track-audit:
 	$(UV) run --extra dev python -m mtpnet.cli track-audit --run-dir $(RUN_DIR)
 
 oof:
-	$(UV) run --extra dev python -m mtpnet.cli oof --config $(CONFIG) --n-folds $(N_FOLDS) --seed $(SEED) --logit-source $(LOGIT_SOURCE) --corr-beta $(CORR_BETA) $(if $(OUTPUT),--output-dir $(OUTPUT),) $(if $(MAX_FOLDS),--max-folds $(MAX_FOLDS),) $(if $(FULL_STITCH),--full-stitch,)
+	$(UV) run --extra dev python -m mtpnet.cli oof --config $(CONFIG) --n-folds $(N_FOLDS) --seed $(SEED) --logit-source $(LOGIT_SOURCE) $(if $(CORR_BETA),--corr-beta $(CORR_BETA),) $(if $(OUTPUT),--output-dir $(OUTPUT),) $(if $(MAX_FOLDS),--max-folds $(MAX_FOLDS),) $(if $(FULL_STITCH),--full-stitch,)
 
 mtp-oof: oof
 

@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
-from mtpnet.config import MTPConfig, RunConfig
+from mtpnet.config import MTPConfig, RunConfig, SyntheticConfig, TrainConfig
 from mtpnet.oof import _aggregate_named_metrics, make_oof_folds, run_oof
 
 
@@ -123,3 +124,93 @@ def test_run_oof_writes_fold_and_aggregate_artifacts(
     assert (output_dir / "oof_metrics.json").exists()
     assert (output_dir / "oof_report.md").exists()
     assert (output_dir / "oof_candidates.csv").exists()
+
+
+def test_oof_v4_uses_fold_local_pretrain_without_outer_valid_wells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        "run:\n  name: mtp_v4_sim2real\n  output_dir: artifacts/mtp_v4_sim2real\n"
+    )
+    output_dir = tmp_path / "oof"
+
+    class FakeWell:
+        def __init__(self, well_id: str):
+            self.well_id = well_id
+
+    def fake_load_config(path: Path) -> MTPConfig:
+        return MTPConfig(
+            run=RunConfig(name="mtp_v4_sim2real", output_dir=tmp_path / "mtp_v4_sim2real"),
+            synthetic=SyntheticConfig(enabled=True, real_fraction=0.3),
+            train=TrainConfig(init_checkpoint=Path("artifacts/mtp_v4_synth_pretrain/checkpoints/best.pt")),
+        )
+
+    def fake_discover_wells(_data):
+        return [FakeWell(f"w{i}") for i in range(6)]
+
+    train_calls: list[dict[str, object]] = []
+
+    def fake_train_from_config(
+        path: Path,
+        *,
+        output_dir: Path,
+        run_name: str,
+        train_wells: tuple[str, ...],
+        valid_wells: tuple[str, ...],
+    ):
+        train_calls.append(
+            {
+                "path": Path(path),
+                "output_dir": output_dir,
+                "run_name": run_name,
+                "train_wells": train_wells,
+                "valid_wells": valid_wells,
+            }
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        (output_dir / "checkpoints" / "best.pt").write_bytes(b"checkpoint")
+        return {"run_name": run_name}
+
+    def fake_write_mode_windows(run_dir: Path):
+        return [object(), object()]
+
+    def fake_run_tracker(run_dir: Path, **_kwargs):
+        fold = int(run_dir.name.split("_")[-1])
+        return {
+            "baselines": {
+                "b2_guarded_submit": {"candidate": "b2_guarded_submit", "rows": 10, "rmse": 10.0}
+            },
+            "candidates": [
+                {"candidate": "mtp_track_top1", "rows": 10, "rmse": 9.5 + fold}
+            ],
+        }
+
+    monkeypatch.setattr("mtpnet.oof.load_config", fake_load_config)
+    monkeypatch.setattr("mtpnet.oof.discover_wells", fake_discover_wells)
+    monkeypatch.setattr("mtpnet.oof.train_from_config", fake_train_from_config)
+    monkeypatch.setattr("mtpnet.oof.write_mode_windows", fake_write_mode_windows)
+    monkeypatch.setattr("mtpnet.oof.run_tracker", fake_run_tracker)
+
+    run_oof(config_path, output_dir=output_dir, n_folds=2, seed=7, logit_source="nn")
+
+    pretrain_calls = [
+        call for call in train_calls if str(call["output_dir"]).endswith("/pretrain")
+    ]
+    finetune_calls = [
+        call for call in train_calls if not str(call["output_dir"]).endswith("/pretrain")
+    ]
+    assert len(pretrain_calls) == 2
+    assert len(finetune_calls) == 2
+    for pretrain, finetune in zip(pretrain_calls, finetune_calls, strict=True):
+        outer_valid = set(finetune["valid_wells"])
+        assert set(pretrain["train_wells"]).isdisjoint(outer_valid)
+        assert set(pretrain["valid_wells"]).isdisjoint(outer_valid)
+        assert set(pretrain["train_wells"]) | set(pretrain["valid_wells"]) == set(
+            finetune["train_wells"]
+        )
+        resolved = yaml.safe_load(Path(finetune["path"]).read_text(encoding="utf-8"))
+        assert resolved["train"]["init_checkpoint"] == str(
+            Path(finetune["output_dir"]) / "pretrain" / "checkpoints" / "best.pt"
+        )

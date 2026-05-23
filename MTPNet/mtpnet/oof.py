@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .config import load_config
+import yaml
+
+from .config import MTPConfig, load_config
 from .io import discover_wells
 from .stitch import run_stitch, write_mode_windows
 from .track import run_tracker
@@ -132,6 +134,7 @@ def _write_oof_report(output_dir: Path, summary: dict[str, Any]) -> Path:
                 f"  fold {item['fold']}:",
                 f"    train_wells: {item['train_wells']}",
                 f"    valid_wells: {item['valid_wells']}",
+                f"    pretrain_scope: {item.get('pretrain_scope', 'n/a')}",
                 f"    B2_rmse: {item['b2_rmse']}",
                 f"    best_candidate: {item['best_candidate']}",
                 f"    best_rmse: {item['best_rmse']}",
@@ -155,6 +158,59 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _config_dict(cfg: MTPConfig) -> dict[str, Any]:
+    return _json_safe(asdict(cfg))
+
+
+def _write_config(path: Path, cfg: MTPConfig) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(_config_dict(cfg), sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _inner_pretrain_wells(
+    outer_train_wells: tuple[str, ...], *, seed: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    wells = np.asarray(sorted(outer_train_wells), dtype=object)
+    if len(wells) < 2:
+        raise ValueError("Fold-local pretrain requires at least two outer train wells")
+    rng = np.random.default_rng(seed)
+    shuffled = wells.copy()
+    rng.shuffle(shuffled)
+    valid_count = max(1, int(round(0.2 * len(shuffled))))
+    valid = tuple(sorted(str(item) for item in shuffled[:valid_count].tolist()))
+    valid_set = set(valid)
+    train = tuple(sorted(str(item) for item in wells.tolist() if item not in valid_set))
+    if not train:
+        train = tuple(sorted(str(item) for item in shuffled[valid_count:].tolist()))
+    return train, valid
+
+
+def _fold_local_pretrain_config(
+    cfg: MTPConfig, *, output_dir: Path, run_name: str
+) -> MTPConfig:
+    return replace(
+        cfg,
+        run=replace(cfg.run, name=run_name, output_dir=output_dir),
+        train=replace(
+            cfg.train,
+            init_checkpoint=None,
+            selection_source="synthetic",
+        ),
+        synthetic=replace(cfg.synthetic, real_fraction=0.0),
+    )
+
+
+def _fold_finetune_config(
+    cfg: MTPConfig, *, output_dir: Path, run_name: str, init_checkpoint: Path
+) -> MTPConfig:
+    return replace(
+        cfg,
+        run=replace(cfg.run, name=run_name, output_dir=output_dir),
+        train=replace(cfg.train, init_checkpoint=init_checkpoint, selection_source="real"),
+    )
+
+
 def run_oof(
     config_path: str | Path,
     *,
@@ -168,7 +224,7 @@ def run_oof(
     merge_tolerance_ft: float = 3.0,
     overlap_penalty: float = 0.10,
     max_modes_per_window: int = 8,
-    corr_beta: float = 0.5,
+    corr_beta: float | None = None,
     full_stitch: bool = False,
     resume: bool = True,
 ) -> dict[str, Any]:
@@ -215,8 +271,40 @@ def run_oof(
                 ),
                 flush=True,
             )
+            fold_config_path = config_path
+            pretrain_scope = "single_split/global"
+            if cfg.synthetic.enabled and cfg.train.init_checkpoint is not None:
+                pretrain_scope = "fold_local"
+                pretrain_dir = fold_dir / "pretrain"
+                pretrain_checkpoint = pretrain_dir / "checkpoints" / "best.pt"
+                if not (resume and pretrain_checkpoint.exists()):
+                    inner_train, inner_valid = _inner_pretrain_wells(
+                        fold.train_wells, seed=seed + 10_000 + fold.fold
+                    )
+                    pretrain_cfg = _fold_local_pretrain_config(
+                        cfg,
+                        output_dir=pretrain_dir,
+                        run_name=f"{fold_name}_pretrain",
+                    )
+                    pretrain_config_path = _write_config(
+                        fold_dir / "pretrain_config.yml", pretrain_cfg
+                    )
+                    train_from_config(
+                        pretrain_config_path,
+                        output_dir=pretrain_dir,
+                        run_name=f"{fold_name}_pretrain",
+                        train_wells=inner_train,
+                        valid_wells=inner_valid,
+                    )
+                finetune_cfg = _fold_finetune_config(
+                    cfg,
+                    output_dir=fold_dir,
+                    run_name=fold_name,
+                    init_checkpoint=pretrain_checkpoint,
+                )
+                fold_config_path = _write_config(fold_dir / "finetune_config.yml", finetune_cfg)
             train_from_config(
-                config_path,
+                fold_config_path,
                 output_dir=fold_dir,
                 run_name=fold_name,
                 train_wells=fold.train_wells,
@@ -287,6 +375,11 @@ def run_oof(
             "run_dir": fold_dir,
             "train_wells": len(fold.train_wells),
             "valid_wells": len(fold.valid_wells),
+            "pretrain_scope": (
+                "fold_local"
+                if cfg.synthetic.enabled and cfg.train.init_checkpoint is not None
+                else "single_split/global"
+            ),
             "b2_rmse": float(b2["rmse"]),
             "best_candidate": best["candidate"],
             "best_rmse": float(best["rmse"]),

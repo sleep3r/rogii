@@ -76,12 +76,14 @@ class SyntheticConfig:
 @dataclass(frozen=True)
 class CorrelationHeadConfig:
     enabled: bool = False
+    source: str = "input_shallow"
     target_sigma_bins: float = 1.5
     target_tau_bins: float = 1.5
     loss: str = "vertical_kl"
     alpha_synth: float = 0.5
     alpha_real: float = 0.25
     tracker_beta_grid: tuple[float, ...] = (0.25, 0.5, 1.0)
+    score_normalization: str = "centered"
 
 
 @dataclass(frozen=True)
@@ -375,6 +377,7 @@ def load_config(path: str | Path) -> MTPConfig:
     default_corr_head = CorrelationHeadConfig()
     corr_head = CorrelationHeadConfig(
         enabled=bool(corr_head_raw.get("enabled", default_corr_head.enabled)),
+        source=str(corr_head_raw.get("source", default_corr_head.source)),
         target_sigma_bins=float(
             corr_head_raw.get(
                 "target_sigma_bins", default_corr_head.target_sigma_bins
@@ -397,7 +400,16 @@ def load_config(path: str | Path) -> MTPConfig:
                 default_corr_head.tracker_beta_grid,
             )
         ),
+        score_normalization=str(
+            corr_head_raw.get(
+                "score_normalization", default_corr_head.score_normalization
+            )
+        ),
     )
+    if corr_head.source not in {"input_shallow", "encoder_upsample"}:
+        raise ValueError("corr_head.source must be 'input_shallow' or 'encoder_upsample'")
+    if corr_head.score_normalization not in {"centered", "zscore"}:
+        raise ValueError("corr_head.score_normalization must be 'centered' or 'zscore'")
 
     window_raw = _section(raw, "window")
     default_window = WindowConfig()

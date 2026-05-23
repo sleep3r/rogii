@@ -34,12 +34,14 @@ synthetic:
 
 corr_head:
   enabled: true
+  source: input_shallow
   target_sigma_bins: 1.5
   target_tau_bins: 1.5
   loss: vertical_kl
   alpha_synth: 0.5
   alpha_real: 0.25
   tracker_beta_grid: [0.25, 0.5, 1.0]
+  score_normalization: centered
 
 augmentation:
   enabled: true

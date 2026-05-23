@@ -70,18 +70,38 @@ def vertical_corr_target(target_bins: Tensor, *, height: int, tau_bins: float) -
 
 
 def corr_vertical_kl_loss(
-    corr_logits: Tensor, target_bins: Tensor, *, tau_bins: float
+    corr_logits: Tensor,
+    target_bins: Tensor,
+    *,
+    tau_bins: float,
+    reduction: str = "mean",
 ) -> Tensor:
+    if reduction not in {"mean", "none"}:
+        raise ValueError("corr_vertical_kl_loss reduction must be 'mean' or 'none'")
     target_prob = vertical_corr_target(
         target_bins.to(device=corr_logits.device, dtype=corr_logits.dtype),
         height=int(corr_logits.shape[1]),
         tau_bins=tau_bins,
     )
-    return F.kl_div(
+    per_bin = F.kl_div(
         F.log_softmax(corr_logits, dim=1),
         target_prob.detach(),
-        reduction="batchmean",
+        reduction="none",
     )
+    per_step = per_bin.sum(dim=1)
+    valid = ((target_bins >= 0.0) & (target_bins <= corr_logits.shape[1] - 1)).to(
+        device=corr_logits.device,
+        dtype=corr_logits.dtype,
+    )
+    per_sample = (per_step * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
+    per_sample = torch.where(
+        valid.sum(dim=1) > 0,
+        per_sample,
+        torch.zeros_like(per_sample),
+    )
+    if reduction == "none":
+        return per_sample
+    return per_sample.mean()
 
 
 def mode_corr_scores(
@@ -90,14 +110,17 @@ def mode_corr_scores(
     future_steps = paths.shape[-1]
     future_logits = corr_logits[:, :, future_start : future_start + future_steps]
     log_prob = F.log_softmax(future_logits, dim=1)
-    bins = paths.round().long().clamp(0, corr_logits.shape[1] - 1)
+    clipped = paths.clamp(0.0, float(corr_logits.shape[1] - 1))
+    lower = torch.floor(clipped).long()
+    upper = (lower + 1).clamp(0, corr_logits.shape[1] - 1)
+    frac = (clipped - lower.to(dtype=clipped.dtype)).clamp(0.0, 1.0)
     log_prob_by_step = log_prob.permute(0, 2, 1)
     expanded = log_prob_by_step[:, None, :, :].expand(
         -1, paths.shape[1], -1, -1
     )
-    return torch.gather(expanded, dim=3, index=bins[:, :, :, None]).squeeze(3).mean(
-        dim=2
-    )
+    lower_values = torch.gather(expanded, dim=3, index=lower[:, :, :, None]).squeeze(3)
+    upper_values = torch.gather(expanded, dim=3, index=upper[:, :, :, None]).squeeze(3)
+    return ((1.0 - frac) * lower_values + frac * upper_values).mean(dim=2)
 
 
 def _top3_margin_loss(

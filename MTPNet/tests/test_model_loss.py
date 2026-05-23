@@ -45,6 +45,28 @@ def test_model_forward_all_returns_corr_logits_when_enabled() -> None:
     assert output.corr_logits.shape == (3, 32, 10)
 
 
+def test_corr_head_uses_native_resolution_input_branch() -> None:
+    model = MTPNet(
+        in_channels=14,
+        height=96,
+        width=24,
+        future_steps=16,
+        cfg=ModelConfig(
+            k_modes=8,
+            conv_channels=(16, 32, 64, 128),
+            hidden_dims=(64,),
+        ),
+        corr_head=CorrelationHeadConfig(enabled=True, source="input_shallow"),
+    )
+
+    assert model.corr_head_source == "input_shallow"
+    assert model.corr_head_native_resolution is True
+    output = model.forward_all(torch.randn(2, 14, 96, 24))
+
+    assert output.corr_logits is not None
+    assert output.corr_logits.shape == (2, 96, 24)
+
+
 def test_model_head_supports_train_batch_size_one() -> None:
     model = MTPNet(
         in_channels=5,
@@ -260,6 +282,24 @@ def test_corr_vertical_kl_loss_is_lower_when_logits_peak_at_target_bin() -> None
     assert good_loss.item() < bad_loss.item()
 
 
+def test_corr_vertical_kl_loss_masks_out_of_crop_targets_and_supports_per_sample() -> None:
+    corr_logits = torch.zeros(2, 5, 2)
+    target_bins = torch.tensor([[-10.0, 20.0], [1.0, 3.0]])
+
+    per_sample = corr_vertical_kl_loss(
+        corr_logits,
+        target_bins,
+        tau_bins=1.0,
+        reduction="none",
+    )
+
+    assert per_sample.shape == (2,)
+    assert per_sample[0].item() == pytest.approx(0.0)
+    assert per_sample[1].item() > 0.0
+    weighted = (per_sample * torch.tensor([10.0, 0.5])).mean()
+    assert weighted.item() == pytest.approx(0.5 * per_sample[1].item() / 2.0)
+
+
 def test_mode_corr_scores_prefer_path_on_high_corr_ridge() -> None:
     corr_logits = torch.full((1, 6, 5), -4.0)
     corr_logits[0, 1, 2] = 4.0
@@ -270,3 +310,14 @@ def test_mode_corr_scores_prefer_path_on_high_corr_ridge() -> None:
 
     assert scores.shape == (1, 2)
     assert scores[0, 0] > scores[0, 1]
+
+
+def test_mode_corr_scores_uses_bilinear_subbin_sampling() -> None:
+    corr_logits = torch.full((1, 4, 3), -8.0)
+    corr_logits[0, 1, 1:] = 4.0
+    corr_logits[0, 2, 1:] = 0.0
+    paths = torch.tensor([[[1.0, 1.0], [1.5, 1.5], [2.0, 2.0]]])
+
+    scores = mode_corr_scores(corr_logits, paths, future_start=1)
+
+    assert scores[0, 0] > scores[0, 1] > scores[0, 2]

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-import torch.nn.functional as F
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
+from dataclasses import dataclass
 
 from .config import CorrelationHeadConfig, ModelConfig
 
@@ -47,6 +46,10 @@ class MTPNet(nn.Module):
         self.width = width
         self.bounded_output = cfg.bounded_output
         self.corr_head_enabled = bool(corr_head and corr_head.enabled)
+        self.corr_head_source = corr_head.source if corr_head else "input_shallow"
+        self.corr_head_native_resolution = (
+            self.corr_head_enabled and self.corr_head_source == "input_shallow"
+        )
         blocks: list[nn.Module] = []
         c_in = in_channels
         for index, c_out in enumerate(cfg.conv_channels):
@@ -61,11 +64,21 @@ class MTPNet(nn.Module):
             encoded = self.encoder(dummy)
             flat_dim = int(encoded.reshape(1, -1).shape[1])
             encoded_channels = int(encoded.shape[1])
-        self.corr_head = (
-            nn.Conv2d(encoded_channels, 1, kernel_size=1)
-            if self.corr_head_enabled
-            else None
-        )
+        self.corr_head: nn.Module | None
+        if not self.corr_head_enabled:
+            self.corr_head = None
+        elif self.corr_head_source == "input_shallow":
+            self.corr_head = nn.Sequential(
+                nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(32, 32, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(32, 1, kernel_size=1),
+            )
+        elif self.corr_head_source == "encoder_upsample":
+            self.corr_head = nn.Conv2d(encoded_channels, 1, kernel_size=1)
+        else:
+            raise ValueError(f"Unsupported corr_head.source: {self.corr_head_source}")
         head: list[nn.Module] = []
         in_dim = flat_dim
         for hidden_dim in cfg.hidden_dims:
@@ -127,13 +140,16 @@ class MTPNet(nn.Module):
         paths = self.bound_paths(raw_paths)
         corr_logits: Tensor | None = None
         if self.corr_head is not None:
-            corr_logits = self.corr_head(encoded)
-            corr_logits = F.interpolate(
-                corr_logits,
-                size=(self.height, self.width),
-                mode="bilinear",
-                align_corners=False,
-            )[:, 0]
+            if self.corr_head_source == "input_shallow":
+                corr_logits = self.corr_head(x)[:, 0]
+            else:
+                corr_logits = self.corr_head(encoded)
+                corr_logits = F.interpolate(
+                    corr_logits,
+                    size=(self.height, self.width),
+                    mode="bilinear",
+                    align_corners=False,
+                )[:, 0]
         return MTPForwardOutput(
             paths=paths,
             logits=logits,

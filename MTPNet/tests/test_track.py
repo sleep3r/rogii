@@ -13,6 +13,7 @@ from mtpnet.track import (
     apply_tracker_logit_source,
     merge_and_prune_particles,
     particles_to_step_predictions,
+    run_tracker_corr_beta_grid_from_frames,
     run_track_split_audit_from_frames,
     run_tracker_from_frames,
     track_mode_windows,
@@ -278,8 +279,69 @@ def test_corr_logit_source_selects_mode_with_higher_corr_score(tmp_path: Path) -
 
     assert source == "corr"
     assert int(np.asarray(corr_windows.iloc[0]["logits"]).argmax()) == 1
-    np.testing.assert_allclose(corr_windows.iloc[0]["logits"], [-1.0, 1.0])
+    np.testing.assert_allclose(corr_windows.iloc[0]["logits"], [-3.0, 3.0])
     np.testing.assert_allclose(nn_windows.iloc[0]["logits"], [0.0, 0.0])
+
+
+def test_corr_logit_source_uses_centered_scores_without_zscore(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                start_step=0,
+                logits=[0.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            )
+        ]
+    )
+    windows["corr_scores"] = [np.asarray([0.0, 10.0], dtype=np.float32)]
+
+    corr_windows, _ = apply_tracker_logit_source(
+        windows,
+        logit_source="corr",
+        run_dir=tmp_path,
+        ranker_logits=None,
+        tau_ft=5.0,
+        ranker_beta=0.5,
+        corr_beta=1.0,
+    )
+
+    assert np.asarray(corr_windows.iloc[0]["logits"]).tolist() == pytest.approx([-5.0, 5.0])
+
+
+def test_corr_beta_grid_writes_suffix_candidates(tmp_path: Path) -> None:
+    windows = pd.DataFrame(
+        [
+            _mode_window(
+                start_step=0,
+                logits=[0.0, 0.0],
+                paths=[[101.0, 102.0], [130.0, 131.0]],
+            )
+        ]
+    )
+    windows["corr_scores"] = [np.asarray([3.0, -3.0], dtype=np.float32)]
+    cfg = MTPConfig(
+        window=WindowConfig(history_steps=1, future_steps=2, rows_per_step=1),
+        run=RunConfig(name="tiny_corr_grid", output_dir=tmp_path),
+    )
+
+    summary = run_tracker_corr_beta_grid_from_frames(
+        run_dir=tmp_path,
+        cfg=cfg,
+        mode_windows=windows,
+        hidden_rows_all=_hidden_rows([1, 2]),
+        track_config=TrackConfig(keep_top=4, n_realizations=4, merge_tolerance_ft=0.5),
+        beta_grid=(0.25, 0.5, 1.0),
+    )
+
+    candidates = {item["candidate"] for item in summary["candidates"]}
+    assert "mtp_track_corr_b025_top1" in candidates
+    assert "mtp_track_corr_b05_weighted" in candidates
+    assert "mtp_track_corr_b10_weighted" in candidates
+    assert (tmp_path / "track_metrics.json").exists()
+    assert (tmp_path / "track_candidates.csv").exists()
+    assert (tmp_path / "track_metrics_corr_b025.json").exists()
+    assert (tmp_path / "track_candidates_corr_b05.csv").exists()
+    assert (tmp_path / "track_report_corr_b10.md").exists()
 
 
 def test_corr_logit_source_requires_corr_scores(tmp_path: Path) -> None:

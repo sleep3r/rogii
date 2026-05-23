@@ -788,6 +788,7 @@ def apply_tracker_logit_source(
     tau_ft: float,
     ranker_beta: float,
     corr_beta: float = 0.5,
+    corr_score_normalization: str = "centered",
 ) -> tuple[pd.DataFrame, str]:
     run_path = Path(run_dir)
     windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
@@ -801,12 +802,21 @@ def apply_tracker_logit_source(
         def combine(row: Any) -> np.ndarray:
             logits = np.asarray(row.logits, dtype=np.float32)
             corr = np.asarray(row.corr_scores, dtype=np.float32)
-            scale = float(corr.std())
-            if scale <= 1e-8:
-                corr_z = np.zeros_like(corr, dtype=np.float32)
+            centered = (corr - float(corr.mean())).astype(np.float32)
+            if corr_score_normalization == "centered":
+                corr_signal = centered
+            elif corr_score_normalization == "zscore":
+                scale = float(corr.std())
+                corr_signal = (
+                    np.zeros_like(corr, dtype=np.float32)
+                    if scale <= 1e-8
+                    else (centered / scale).astype(np.float32)
+                )
             else:
-                corr_z = ((corr - float(corr.mean())) / scale).astype(np.float32)
-            return (logits + float(corr_beta) * corr_z).astype(np.float32)
+                raise ValueError(
+                    "corr_score_normalization must be 'centered' or 'zscore'"
+                )
+            return (logits + float(corr_beta) * corr_signal).astype(np.float32)
 
         out["logits"] = out.apply(combine, axis=1)
         out["probs"] = out["logits"].map(_softmax_np)
@@ -836,6 +846,122 @@ def apply_tracker_logit_source(
     raise ValueError("logit_source must be 'corr', 'ranker', 'ranker_oof', or 'nn'")
 
 
+def run_tracker_corr_beta_grid_from_frames(
+    *,
+    run_dir: str | Path,
+    cfg: MTPConfig,
+    mode_windows: pd.DataFrame,
+    hidden_rows_all: pd.DataFrame,
+    track_config: TrackConfig,
+    beta_grid: tuple[float, ...],
+    score_normalization: str = "centered",
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
+    candidate_metrics: list[dict[str, Any]] = []
+    beta_summaries: dict[str, Any] = {}
+    beta_candidates: dict[str, list[dict[str, Any]]] = {}
+    nn_summary = _run_tracker_metrics_only(
+        cfg=cfg,
+        mode_windows=windows,
+        hidden_rows_all=hidden_rows_all,
+        track_config=track_config,
+        prefix="mtp_track_nn",
+    )
+    for beta in beta_grid:
+        corr_windows, _ = apply_tracker_logit_source(
+            windows,
+            logit_source="corr",
+            run_dir=run_path,
+            ranker_logits=None,
+            tau_ft=5.0,
+            ranker_beta=0.5,
+            corr_beta=float(beta),
+            corr_score_normalization=score_normalization,
+        )
+        suffix = _beta_suffix(float(beta))
+        beta_summary = _run_tracker_metrics_only(
+            cfg=cfg,
+            mode_windows=corr_windows,
+            hidden_rows_all=hidden_rows_all,
+            track_config=track_config,
+            prefix=f"mtp_track_corr_{suffix}",
+        )
+        beta_summaries[suffix] = {
+            "beta": float(beta),
+            "best": beta_summary["best"],
+            "coverage": beta_summary["coverage"],
+        }
+        beta_candidates[suffix] = beta_summary["candidates"]
+        candidate_metrics.extend(beta_summary["candidates"])
+    base_metrics = _baseline_metrics(hidden_rows_all, "base_tvt", "base_schema10_pp")
+    b2_metrics = _baseline_metrics(hidden_rows_all, "b2_tvt", "b2_guarded_submit")
+    best_corr = min(candidate_metrics, key=lambda item: item.get("rmse", float("inf")))
+    best_beta = next(
+        (
+            value["beta"]
+            for value in beta_summaries.values()
+            if value["best"]["candidate"] == best_corr["candidate"]
+        ),
+        None,
+    )
+    summary: dict[str, Any] = {
+        "tracker": {
+            "n_realizations": track_config.n_realizations,
+            "keep_top": track_config.keep_top,
+            "merge_tolerance_ft": track_config.merge_tolerance_ft,
+            "overlap_penalty": track_config.overlap_penalty,
+            "max_modes_per_window": track_config.max_modes_per_window,
+            "logit_source": "corr",
+            "corr_beta_grid": [float(beta) for beta in beta_grid],
+            "corr_score_normalization": score_normalization,
+            "beta_summaries": beta_summaries,
+            "nn_best": nn_summary["best"],
+            "corr_beta_best": best_beta,
+            "corr_tracker_gain_vs_nn": float(
+                nn_summary["best"]["rmse"] - best_corr["rmse"]
+            ),
+        },
+        "coverage": next(iter(beta_summaries.values()))["coverage"] if beta_summaries else {},
+        "baselines": {
+            "base_schema10_pp": base_metrics,
+            "b2_guarded_submit": b2_metrics,
+        },
+        "candidates": candidate_metrics,
+    }
+    pd.DataFrame(candidate_metrics).sort_values("rmse").to_csv(
+        run_path / "track_candidates.csv", index=False
+    )
+    (run_path / "track_metrics.json").write_text(
+        json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
+    )
+    for suffix, candidates in beta_candidates.items():
+        beta_summary = {
+            **summary,
+            "coverage": beta_summaries[suffix]["coverage"],
+            "candidates": candidates,
+            "tracker": {
+                **summary["tracker"],
+                "corr_beta": beta_summaries[suffix]["beta"],
+            },
+        }
+        (run_path / f"track_metrics_corr_{suffix}.json").write_text(
+            json.dumps(_json_safe(beta_summary), indent=2), encoding="utf-8"
+        )
+        pd.DataFrame(candidates).sort_values("rmse").to_csv(
+            run_path / f"track_candidates_corr_{suffix}.csv", index=False
+        )
+        report_path = _write_track_report(
+            run_path, summary=beta_summary, candidates=candidates
+        )
+        (run_path / f"track_report_corr_{suffix}.md").write_text(
+            report_path.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    _write_track_report(run_path, summary=summary, candidates=candidate_metrics)
+    return summary
+
+
 def run_tracker(
     run_dir: str | Path,
     *,
@@ -848,7 +974,7 @@ def run_tracker(
     ranker_logits: str | Path | None = None,
     tau_ft: float = 5.0,
     ranker_beta: float = 0.5,
-    corr_beta: float = 0.5,
+    corr_beta: float | None = None,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     cfg = _load_run_config(run_path)
@@ -857,14 +983,37 @@ def run_tracker(
         raise FileNotFoundError(
             f"Missing {windows_path}; run `make stitch RUN_DIR={run_path}` first"
         )
+    raw_mode_windows = pd.read_parquet(windows_path)
+    if logit_source == "corr" and corr_beta is None:
+        summary = run_tracker_corr_beta_grid_from_frames(
+            run_dir=run_path,
+            cfg=cfg,
+            mode_windows=raw_mode_windows,
+            hidden_rows_all=_load_hidden_rows(
+                cfg, set(raw_mode_windows["well_id"].astype(str))
+            ),
+            track_config=TrackConfig(
+                n_realizations=n_realizations,
+                keep_top=keep_top,
+                merge_tolerance_ft=merge_tolerance_ft,
+                overlap_penalty=overlap_penalty,
+                max_modes_per_window=max_modes_per_window,
+            ),
+            beta_grid=cfg.corr_head.tracker_beta_grid,
+            score_normalization=cfg.corr_head.score_normalization,
+        )
+        best = min(summary["candidates"], key=lambda item: item.get("rmse", float("inf")))
+        print(json.dumps(_json_safe(best), indent=2), flush=True)
+        return summary
     mode_windows, logit_source = apply_tracker_logit_source(
-        pd.read_parquet(windows_path),
+        raw_mode_windows,
         logit_source=logit_source,
         run_dir=run_path,
         ranker_logits=ranker_logits,
         tau_ft=tau_ft,
         ranker_beta=ranker_beta,
-        corr_beta=corr_beta,
+        corr_beta=0.5 if corr_beta is None else corr_beta,
+        corr_score_normalization=cfg.corr_head.score_normalization,
     )
     well_ids = set(mode_windows["well_id"].astype(str))
     hidden_rows = _load_hidden_rows(cfg, well_ids)
@@ -885,6 +1034,7 @@ def run_tracker(
     summary["tracker"]["tau_ft"] = tau_ft
     summary["tracker"]["ranker_beta"] = ranker_beta
     summary["tracker"]["corr_beta"] = corr_beta
+    summary["tracker"]["corr_score_normalization"] = cfg.corr_head.score_normalization
     (run_path / "track_metrics.json").write_text(
         json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
     )

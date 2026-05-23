@@ -103,7 +103,11 @@ def test_bad_prior_changes_anchor_channels() -> None:
 def test_stretch_changes_gr_timing_but_keeps_target_bins_aligned() -> None:
     sequence = np.array([0.0, 1.0, 4.0, 9.0, 16.0], dtype=np.float32)
     stretched = stretch_gr_sequence(sequence, factor=1.25)
-    sample = generate_synthetic_sample(_template(), _cfg(stretch_range=(1.25, 1.25)), index=0)
+    sample = generate_synthetic_sample(
+        _template(),
+        _cfg(stretch_range=(1.25, 1.25), path_families=("real_residual",)),
+        index=0,
+    )
 
     assert not np.allclose(stretched, sequence)
     np.testing.assert_allclose(sample.target_bins, _template().target_bins, atol=1e-5)
@@ -118,3 +122,41 @@ def test_horizontal_flip_twice_recovers_target_and_gr_order() -> None:
     assert recovered.horizontal_gr is not None
     assert sample.horizontal_gr is not None
     np.testing.assert_allclose(recovered.horizontal_gr, sample.horizontal_gr)
+
+
+def test_synthetic_dropout_interpolates_gr_like_real_finite_mask() -> None:
+    template = SyntheticTemplate(
+        crop_tvt=np.linspace(1000.0, 1080.0, 8, dtype=np.float32),
+        typewell_gr=np.array([10.0, 11.0, 17.0, 31.0, 50.0, 80.0, 121.0, 170.0], dtype=np.float32),
+        target_bins=np.array([3.0, 3.5, 4.0], dtype=np.float32),
+        history_bins=np.array([2.0, 2.5], dtype=np.float32),
+        well_id="synthetic_source",
+        start_step=10,
+        center_tvt=1040.0,
+    )
+    sample = None
+    for index in range(30):
+        candidate = generate_synthetic_sample(
+            template,
+            _cfg(
+                dropout_max_frac=1.0,
+                path_families=("real_residual",),
+                noise_std_range=(0.0, 0.0),
+            ),
+            index=index,
+        )
+        finite = candidate.x[6, 0] > 0.5
+        if finite.any() and (~finite).any():
+            sample = candidate
+            break
+    assert sample is not None
+    assert sample.horizontal_gr is not None
+    finite = sample.x[6, 0] > 0.5
+    steps = np.arange(len(sample.horizontal_gr), dtype=np.float32)
+    expected = np.interp(
+        steps,
+        steps[finite],
+        sample.horizontal_gr[finite],
+    ).astype(np.float32)
+
+    np.testing.assert_allclose(sample.horizontal_gr, expected, atol=1e-5)

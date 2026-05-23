@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     track_parser.add_argument("--ranker-logits", type=Path)
     track_parser.add_argument("--tau-ft", type=float, default=5.0)
     track_parser.add_argument("--ranker-beta", type=float, default=0.5)
-    track_parser.add_argument("--corr-beta", type=float, default=0.5)
+    track_parser.add_argument("--corr-beta", type=float)
 
     track_audit_parser = sub.add_parser(
         "track-audit", help="Audit MTP tracker on ranker train/valid well splits"
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     oof_parser.add_argument("--merge-tolerance-ft", type=float, default=3.0)
     oof_parser.add_argument("--overlap-penalty", type=float, default=0.10)
     oof_parser.add_argument("--max-modes-per-window", type=int, default=8)
-    oof_parser.add_argument("--corr-beta", type=float, default=0.5)
+    oof_parser.add_argument("--corr-beta", type=float)
     oof_parser.add_argument(
         "--full-stitch",
         action="store_true",

@@ -49,6 +49,8 @@ class SampleSplits:
     train_buckets: dict[str, list[WindowSample]]
     train_mix_counts: dict[str, int]
     primary_valid_name: str
+    synthetic_templates: list[Any] | None = None
+    synthetic_count: int = 0
 
 
 def set_seed(seed: int) -> None:
@@ -279,15 +281,8 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
                     )
                 ),
             )
-        synthetic_train = generate_synthetic_samples(
-            train_templates, cfg, count=synthetic_count, seed_offset=100_000
-        )
-        if cfg.synthetic.real_fraction <= 0.0:
-            train_samples = synthetic_train
-        else:
-            train_samples = [*train_samples, *synthetic_train]
-        train_buckets = {**train_buckets, "synthetic": synthetic_train}
-        train_mix_counts = {**train_mix_counts, "synthetic": len(synthetic_train)}
+        train_buckets = {**train_buckets, "synthetic_templates": []}
+        train_mix_counts = {**train_mix_counts, "synthetic": synthetic_count}
         synthetic_valid = generate_synthetic_samples(
             valid_templates or train_templates,
             cfg,
@@ -305,6 +300,8 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
         train_buckets=train_buckets,
         train_mix_counts=train_mix_counts,
         primary_valid_name=primary_valid_name,
+        synthetic_templates=train_templates if cfg.synthetic.enabled else None,
+        synthetic_count=synthetic_count if cfg.synthetic.enabled else 0,
     )
 
 
@@ -322,12 +319,44 @@ def _loader(samples: list[WindowSample], cfg: MTPConfig, shuffle: bool) -> DataL
     )
 
 
-def _selection_score(metrics: dict[str, Any]) -> float:
+def _epoch_train_samples(
+    splits: SampleSplits, cfg: MTPConfig, *, epoch: int
+) -> list[WindowSample]:
+    if not cfg.synthetic.enabled:
+        return splits.train_samples
+    if not splits.synthetic_templates or splits.synthetic_count <= 0:
+        return splits.train_samples
+    seed_offset = 100_000 + (int(epoch) - 1) * int(cfg.synthetic.windows_per_epoch)
+    synthetic = generate_synthetic_samples(
+        splits.synthetic_templates,
+        cfg,
+        count=splits.synthetic_count,
+        seed_offset=seed_offset,
+    )
+    if cfg.synthetic.real_fraction <= 0.0:
+        return synthetic
+    return [*splits.train_samples, *synthetic]
+
+
+def _path_selection_score(metrics: dict[str, Any]) -> float:
     return float(
         0.5 * metrics["oracle_topk_rmse_bins"]
         + 0.3 * metrics["weighted_mean_rmse_bins"]
         + 0.2 * metrics["top1_rmse_bins"]
     )
+
+
+def _selection_score(metrics: dict[str, Any], *, selection_source: str = "real") -> float:
+    path_score = _path_selection_score(metrics)
+    if "corr_nll" not in metrics:
+        return path_score
+    if selection_source == "synthetic":
+        return float(
+            0.4 * path_score
+            + 0.4 * float(metrics["corr_nll"])
+            + 0.2 * (1.0 - float(metrics.get("corr_target_top3_rate", 0.0)))
+        )
+    return float(0.8 * path_score + 0.2 * float(metrics["corr_nll"]))
 
 
 def _epoch_progress_record(
@@ -1158,10 +1187,6 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('base_b2_a_only', 'weighted_mean_rmse_ft'))}",
         "  base_b2_a_only baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('base_b2_a_only', 'oracle_topk_rmse_ft'))}",
-        "  no_corr_head top1_ft: "
-        f"{_metric_value(sanity, ('no_corr_head', 'top1_rmse_ft'))}",
-        "  no_corr_head weighted_ft: "
-        f"{_metric_value(sanity, ('no_corr_head', 'weighted_mean_rmse_ft'))}",
         "",
         "static modes:",
         "  static_top1_ft: "
@@ -1191,6 +1216,7 @@ def write_geometry_report(
         "  contrastive_margin_bins: "
         f"{_metric_value(metrics, ('loss', 'contrastive_margin_bins'))}",
         f"  selection_source: {_metric_value(metrics, ('train_config', 'selection_source'))}",
+        f"  pretrain_scope: {metrics.get('pretrain_scope', 'n/a')}",
         f"  synthetic_enabled: {_metric_value(metrics, ('synthetic', 'enabled'))}",
         f"  synthetic_real_fraction: {_metric_value(metrics, ('synthetic', 'real_fraction'))}",
         f"  corr_head_enabled: {_metric_value(metrics, ('corr_head', 'enabled'))}",
@@ -1251,6 +1277,46 @@ def _json_safe_config(cfg: MTPConfig) -> dict[str, Any]:
     return convert(asdict(cfg))
 
 
+def _load_init_checkpoint_checked(
+    model: MTPNet, checkpoint_path: Path, device: torch.device
+) -> None:
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Missing init_checkpoint: {checkpoint_path}")
+    init_state = torch.load(checkpoint_path, map_location=device)
+    state = init_state.get("model", init_state)
+    current = model.state_dict()
+    compatible: dict[str, torch.Tensor] = {}
+    incompatible: list[str] = []
+    unexpected: list[str] = []
+    for key, value in state.items():
+        if key not in current:
+            unexpected.append(key)
+            continue
+        if tuple(value.shape) != tuple(current[key].shape):
+            incompatible.append(key)
+            continue
+        compatible[key] = value
+    missing = sorted(set(current).difference(compatible))
+    allowed_prefixes = ("corr_head.",)
+    disallowed_unexpected = [
+        key for key in unexpected if not key.startswith(allowed_prefixes)
+    ]
+    disallowed_incompatible = [
+        key for key in incompatible if not key.startswith(allowed_prefixes)
+    ]
+    disallowed_missing = [
+        key for key in missing if not key.startswith(allowed_prefixes)
+    ]
+    if disallowed_unexpected or disallowed_incompatible or disallowed_missing:
+        raise ValueError(
+            "Incompatible init_checkpoint: "
+            f"unexpected={disallowed_unexpected[:5]} "
+            f"incompatible={disallowed_incompatible[:5]} "
+            f"missing={disallowed_missing[:5]}"
+        )
+    model.load_state_dict(compatible, strict=False)
+
+
 def train_from_config(
     config_path: str | Path,
     *,
@@ -1297,10 +1363,7 @@ def train_from_config(
         corr_head=cfg.corr_head,
     ).to(device)
     if cfg.train.init_checkpoint is not None:
-        if not cfg.train.init_checkpoint.exists():
-            raise FileNotFoundError(f"Missing init_checkpoint: {cfg.train.init_checkpoint}")
-        init_state = torch.load(cfg.train.init_checkpoint, map_location=device)
-        model.load_state_dict(init_state.get("model", init_state), strict=False)
+        _load_init_checkpoint_checked(model, cfg.train.init_checkpoint, device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.train.learning_rate,
@@ -1308,10 +1371,13 @@ def train_from_config(
     )
     best_valid = float("inf")
     history: list[dict[str, float]] = []
+    last_epoch_train_samples = train_samples
     for epoch in range(1, cfg.train.epochs + 1):
+        epoch_train_samples = _epoch_train_samples(splits, cfg, epoch=epoch)
+        last_epoch_train_samples = epoch_train_samples
         model.train()
         losses: list[float] = []
-        for batch in _loader(train_samples, cfg, shuffle=True):
+        for batch in _loader(epoch_train_samples, cfg, shuffle=True):
             optimizer.zero_grad(set_to_none=True)
             x = batch["x"].to(device)
             target = batch["target_bins"].to(device)
@@ -1334,18 +1400,23 @@ def train_from_config(
                     cfg.window.history_steps : cfg.window.history_steps
                     + cfg.window.future_steps,
                 ]
-                corr_alpha_values = [
-                    cfg.corr_head.alpha_synth
-                    if str(sample_type).startswith("synthetic")
-                    else cfg.corr_head.alpha_real
-                    for sample_type in batch["sample_type"]
-                ]
-                corr_alpha = float(np.mean(corr_alpha_values))
-                loss = loss + corr_alpha * corr_vertical_kl_loss(
+                corr_alpha = torch.tensor(
+                    [
+                        cfg.corr_head.alpha_synth
+                        if str(sample_type).startswith("synthetic")
+                        else cfg.corr_head.alpha_real
+                        for sample_type in batch["sample_type"]
+                    ],
+                    device=device,
+                    dtype=future_corr.dtype,
+                )
+                corr_loss = corr_vertical_kl_loss(
                     future_corr,
                     target,
                     tau_bins=cfg.corr_head.target_tau_bins,
+                    reduction="none",
                 )
+                loss = loss + (corr_alpha * corr_loss).mean()
             if cfg.loss.contrastive_alpha > 0.0:
                 corrupted_x = _contrastive_corruption_batch(x, cfg)
                 corrupted_paths, _ = model(corrupted_x)
@@ -1362,7 +1433,9 @@ def train_from_config(
             losses.append(float(loss.detach().cpu()))
         valid_metrics, _ = _evaluate(model, valid_samples, cfg, device)
         train_loss = float(np.mean(losses))
-        valid_score = _selection_score(valid_metrics)
+        valid_score = _selection_score(
+            valid_metrics, selection_source=cfg.train.selection_source
+        )
         is_best = valid_score < best_valid
         if valid_score < best_valid:
             best_valid = valid_score
@@ -1398,7 +1471,7 @@ def train_from_config(
         _, pred_frame = _evaluate(
             model, splits.valid_sets[splits.primary_valid_name], cfg, device
         )
-    train_metrics, _ = _evaluate(model, train_samples, cfg, device)
+    train_metrics, _ = _evaluate(model, last_epoch_train_samples, cfg, device)
     sanity_metrics = {
         "no_gr": _evaluate(
             model,
@@ -1461,9 +1534,6 @@ def train_from_config(
             device,
         )[0],
     }
-    sanity_metrics["no_corr_head"] = {
-        key: value for key, value in valid_metrics.items() if not key.startswith("corr_")
-    }
     sanity_gaps = {
         "no_gr_top1_gap_ft": _sanity_gap(valid_metrics, sanity_metrics, "no_gr", "top1_rmse_ft"),
         "shuffled_gr_top1_gap_ft": _sanity_gap(
@@ -1525,6 +1595,14 @@ def train_from_config(
         "synthetic": _json_safe_config(cfg)["synthetic"],
         "corr_head": _json_safe_config(cfg)["corr_head"],
         "train_config": _json_safe_config(cfg)["train"],
+        "pretrain_scope": (
+            "fold_local"
+            if cfg.train.init_checkpoint is not None
+            and "pretrain" in cfg.train.init_checkpoint.parts
+            else "single_split/global"
+            if cfg.train.init_checkpoint is not None
+            else "none"
+        ),
         "static_modes": _static_mode_metrics(valid_samples, cfg, device),
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),

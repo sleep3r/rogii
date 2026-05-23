@@ -352,6 +352,7 @@ def test_v4_synthetic_and_corr_head_config_loads(tmp_path: Path) -> None:
                 },
                 "corr_head": {
                     "enabled": True,
+                    "source": "input_shallow",
                     "target_sigma_bins": 1.5,
                     "target_tau_bins": 1.5,
                     "loss": "vertical_kl",
@@ -384,6 +385,7 @@ def test_v4_synthetic_and_corr_head_config_loads(tmp_path: Path) -> None:
     assert cfg.synthetic.no_prior_prob == pytest.approx(0.10)
     assert cfg.synthetic.seed == 1729
     assert cfg.corr_head.enabled is True
+    assert cfg.corr_head.source == "input_shallow"
     assert cfg.corr_head.target_sigma_bins == pytest.approx(1.5)
     assert cfg.corr_head.target_tau_bins == pytest.approx(1.5)
     assert cfg.corr_head.loss == "vertical_kl"
@@ -404,6 +406,7 @@ def test_mtp_v4_configs_load() -> None:
     assert pretrain.synthetic.enabled is True
     assert pretrain.synthetic.real_fraction == pytest.approx(0.0)
     assert pretrain.corr_head.enabled is True
+    assert pretrain.corr_head.source == "input_shallow"
     assert pretrain.corr_head.alpha_synth == pytest.approx(0.5)
     assert pretrain.train.selection_source == "synthetic"
     assert finetune.run.name == "mtp_v4_sim2real"

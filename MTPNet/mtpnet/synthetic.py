@@ -37,6 +37,16 @@ def stretch_gr_sequence(values: np.ndarray, factor: float) -> np.ndarray:
     return np.interp(query, source, arr).astype(np.float32)
 
 
+def interpolate_dropped_gr(values: np.ndarray, finite: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32).copy()
+    mask = np.asarray(finite, dtype=bool)
+    if mask.all() or not mask.any():
+        return arr
+    steps = np.arange(arr.size, dtype=np.float32)
+    arr[~mask] = np.interp(steps[~mask], steps[mask], arr[mask]).astype(np.float32)
+    return arr
+
+
 def _rng(cfg: MTPConfig, index: int) -> np.random.Generator:
     return np.random.default_rng(int(cfg.synthetic.seed) + int(index))
 
@@ -203,8 +213,10 @@ def generate_synthetic_sample(
         if dropout_count > 0:
             dropped = rng.choice(np.arange(width), size=dropout_count, replace=False)
             finite[dropped] = 0.0
-    prior_kind = prior_kind or _choose_prior_kind(cfg, rng)
-    prior_bins, prior_values = _prior_paths(full_path, cfg, rng, prior_kind)
+            horizontal_gr = interpolate_dropped_gr(horizontal_gr, finite)
+    prior_rng = np.random.default_rng(int(cfg.synthetic.seed) + 10_000_000 + int(index))
+    prior_kind = prior_kind or _choose_prior_kind(cfg, prior_rng)
+    prior_bins, prior_values = _prior_paths(full_path, cfg, prior_rng, prior_kind)
     if horizontal_flip:
         full_path = full_path[::-1].copy()
         history = full_path[:history_steps]
