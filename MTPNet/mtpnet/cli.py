@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     rank_crossfit_parser.add_argument("--output-dir", type=Path)
     rank_crossfit_parser.add_argument("--n-folds", type=int, default=5)
     rank_crossfit_parser.add_argument("--seed", type=int, default=42)
+    rank_crossfit_parser.add_argument(
+        "--ranker-variant",
+        choices=("conservative_regression", "pairwise"),
+        default="conservative_regression",
+    )
 
     track_parser = sub.add_parser(
         "track", help="Sequentially track MTP modes as particle realizations"
@@ -109,6 +114,7 @@ def main(argv: list[str] | None = None) -> None:
             output_dir=args.output_dir,
             n_folds=args.n_folds,
             seed=args.seed,
+            ranker_variant=args.ranker_variant,
         )
         return
     if args.command == "track":

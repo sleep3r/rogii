@@ -17,6 +17,7 @@ from mtpnet.ranker import (
     run_ranker_crossfit_from_frames,
     run_ranker_from_frames,
     split_ranker_wells,
+    train_catboost_pairwise_ranker,
     train_catboost_ranker,
 )
 from mtpnet.stitch import aggregate_mode_windows
@@ -218,6 +219,31 @@ def test_catboost_ranker_learns_lower_error_mode() -> None:
     assert ordered.head(1)["is_best_mode"].tolist() == [1, 1]
 
 
+def test_pairwise_ranker_learns_to_score_best_mode_higher() -> None:
+    wells = ["a", "b", "c", "d"]
+    features = build_mode_feature_frame(
+        _windows_for_wells(wells),
+        _hidden_rows_for_wells(wells),
+        _gr_context(wells),
+        history_steps=1,
+        future_steps=2,
+    )
+    train_wells, valid_wells = split_ranker_wells(wells, valid_fraction=0.5, seed=3)
+
+    model, _ = train_catboost_pairwise_ranker(
+        features,
+        train_wells=train_wells,
+        valid_wells=valid_wells,
+        seed=3,
+        params={"iterations": 60, "depth": 2, "od_wait": 20},
+    )
+    valid = features[features["well_id"].isin(valid_wells)].copy()
+    valid["ranker_score"] = model.predict(valid[list(FEATURE_COLUMNS)])
+
+    ordered = valid.sort_values(["window_id", "ranker_score"], ascending=[True, False])
+    assert ordered.groupby("window_id").head(1)["is_best_mode"].tolist() == [1, 1]
+
+
 def test_ranker_logits_plug_into_overlap_aggregation() -> None:
     wells = ["a"]
     windows = _windows_for_wells(wells)
@@ -334,3 +360,29 @@ def test_run_ranker_crossfit_from_frames_writes_oof_predictions(tmp_path: Path) 
     assert oof["predicted_error_ft"].notna().all()
     assert summary["folds"] == 3
     assert summary["oof_rows"] == len(oof)
+
+
+def test_run_pairwise_ranker_crossfit_writes_ranker_scores(tmp_path: Path) -> None:
+    wells = ["a", "b", "c", "d", "e"]
+    cfg = MTPConfig(
+        window=WindowConfig(history_steps=1, future_steps=2, rows_per_step=1),
+        run=RunConfig(name="tiny_pairwise_crossfit", output_dir=tmp_path),
+    )
+
+    summary = run_ranker_crossfit_from_frames(
+        run_dir=tmp_path,
+        cfg=cfg,
+        mode_windows=_windows_for_wells(wells),
+        hidden_rows_all=_hidden_rows_for_wells(wells),
+        gr_context=_gr_context(wells),
+        n_folds=3,
+        seed=9,
+        ranker_params={"iterations": 30, "depth": 2, "od_wait": 10},
+        ranker_variant="pairwise",
+    )
+    oof = pd.read_parquet(tmp_path / "oof_ranker_logits.parquet")
+
+    assert summary["variant"] == "pairwise"
+    assert "ranker_score" in oof.columns
+    assert oof["ranker_score"].notna().all()
+    assert "combined_logit_b0.5" in oof.columns

@@ -76,6 +76,21 @@ DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
     "verbose": False,
 }
 
+DEFAULT_PAIRWISE_CATBOOST_PARAMS: dict[str, Any] = {
+    "loss_function": "YetiRank",
+    "iterations": 1000,
+    "learning_rate": 0.05,
+    "depth": 4,
+    "l2_leaf_reg": 20.0,
+    "random_strength": 0.2,
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "od_type": "Iter",
+    "od_wait": 100,
+    "allow_writing_files": False,
+    "verbose": False,
+}
+
 
 def split_ranker_wells(
     well_ids: list[str] | set[str] | tuple[str, ...],
@@ -524,8 +539,76 @@ def train_catboost_ranker(
     }
 
 
+def _query_sorted_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.sort_values(["window_id", "mode_id"], kind="mergesort").reset_index(drop=True)
+
+
+def _ranking_relevance(frame: pd.DataFrame) -> np.ndarray:
+    errors = frame["mode_rmse_ft"].to_numpy(dtype=np.float32)
+    max_by_window = frame.groupby("window_id")["mode_rmse_ft"].transform("max").to_numpy(
+        dtype=np.float32
+    )
+    relevance = max_by_window - errors
+    return np.maximum(relevance, 0.0).astype(np.float32)
+
+
+def train_catboost_pairwise_ranker(
+    features: pd.DataFrame,
+    *,
+    train_wells: set[str],
+    valid_wells: set[str],
+    seed: int,
+    params: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, float]]:
+    from catboost import CatBoostRanker, Pool
+
+    train = _query_sorted_frame(features[features["well_id"].isin(train_wells)].copy())
+    valid = _query_sorted_frame(features[features["well_id"].isin(valid_wells)].copy())
+    if train.empty or valid.empty:
+        raise ValueError("ranker train and valid splits must both be non-empty")
+    model_params = dict(DEFAULT_PAIRWISE_CATBOOST_PARAMS)
+    model_params.update(params or {})
+    if len(train) < 10:
+        model_params["bootstrap_type"] = "No"
+    if str(model_params.get("bootstrap_type", "")).lower() == "no":
+        model_params.pop("subsample", None)
+    model_params["random_seed"] = seed
+    train_pool = Pool(
+        train[list(FEATURE_COLUMNS)],
+        label=_ranking_relevance(train),
+        group_id=train["window_id"].astype(str).to_numpy(),
+        cat_features=list(CAT_FEATURES),
+    )
+    valid_pool = Pool(
+        valid[list(FEATURE_COLUMNS)],
+        label=_ranking_relevance(valid),
+        group_id=valid["window_id"].astype(str).to_numpy(),
+        cat_features=list(CAT_FEATURES),
+    )
+    model = CatBoostRanker(**model_params)
+    model.fit(train_pool, eval_set=valid_pool, use_best_model=True)
+    train_pred = np.asarray(model.predict(train[list(FEATURE_COLUMNS)]), dtype=np.float32)
+    valid_pred = np.asarray(model.predict(valid[list(FEATURE_COLUMNS)]), dtype=np.float32)
+
+    def top1_rate(frame: pd.DataFrame, scores: np.ndarray) -> float:
+        scored = frame.copy()
+        scored["ranker_score"] = scores
+        top = scored.sort_values(["window_id", "ranker_score"], ascending=[True, False])
+        return float(top.groupby("window_id").head(1)["is_best_mode"].mean())
+
+    return model, {
+        "train_pairwise_best_mode_top1_rate": top1_rate(train, train_pred),
+        "valid_pairwise_best_mode_top1_rate": top1_rate(valid, valid_pred),
+        "best_iteration": int(getattr(model, "get_best_iteration", lambda: -1)() or -1),
+    }
+
+
 def _predict_ranker_errors(model: Any, features: pd.DataFrame) -> np.ndarray:
     return np.expm1(model.predict(features[list(FEATURE_COLUMNS)])).astype(np.float32)
+
+
+def _predict_pairwise_scores(model: Any, features: pd.DataFrame) -> np.ndarray:
+    return np.asarray(model.predict(features[list(FEATURE_COLUMNS)]), dtype=np.float32)
 
 
 def _zscore(values: np.ndarray) -> np.ndarray:
@@ -541,31 +624,83 @@ def _zscore(values: np.ndarray) -> np.ndarray:
 
 
 def _ranker_oof_metrics(oof: pd.DataFrame) -> dict[str, float]:
+    score_column = "ranker_score" if "ranker_score" in oof.columns else "predicted_error_ft"
+    ascending = score_column == "predicted_error_ft"
     best_rows = (
-        oof.sort_values(["window_id", "predicted_error_ft"])
+        oof.sort_values(["window_id", score_column], ascending=[True, ascending])
         .groupby("window_id", as_index=False)
         .head(1)
     )
     top3 = (
-        oof.sort_values(["window_id", "predicted_error_ft"])
+        oof.sort_values(["window_id", score_column], ascending=[True, ascending])
         .groupby("window_id", as_index=False)
         .head(3)
     )
-    return {
-        "oof_mode_rmse_mae": float(
-            np.mean(
-                np.abs(
-                    oof["predicted_error_ft"].to_numpy(dtype=np.float32)
-                    - oof["mode_rmse_ft"].to_numpy(dtype=np.float32)
-                )
-            )
-        ),
+    metrics = {
         "oof_top1_ft": float(best_rows["mode_rmse_ft"].mean()),
         "oof_best_mode_top1_rate": float(best_rows["is_best_mode"].mean()),
         "oof_best_mode_top3_rate": float(
             top3.groupby("window_id")["is_best_mode"].max().mean()
         ),
     }
+    if "predicted_error_ft" in oof.columns:
+        metrics["oof_mode_rmse_mae"] = float(
+            np.mean(
+                np.abs(
+                    oof["predicted_error_ft"].to_numpy(dtype=np.float32)
+                    - oof["mode_rmse_ft"].to_numpy(dtype=np.float32)
+                )
+            )
+        )
+    return metrics
+
+
+def _spearman_score_error(oof: pd.DataFrame) -> float:
+    if "ranker_score" not in oof.columns:
+        return float("nan")
+    corr = oof[["ranker_score", "mode_rmse_ft"]].corr(method="spearman").iloc[0, 1]
+    return float(corr) if np.isfinite(corr) else 0.0
+
+
+def _crossfit_window_metrics(
+    mode_windows: pd.DataFrame,
+    oof: pd.DataFrame,
+    gr_context: dict[str, dict[str, np.ndarray]],
+    *,
+    history_steps: int,
+    future_steps: int,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "nn": _window_metrics_from_mode_windows(mode_windows),
+        "spearman_score_error": _spearman_score_error(oof),
+    }
+    if gr_context:
+        gr_windows = attach_gr_rerank_scores(
+            mode_windows,
+            gr_context,
+            history_steps=history_steps,
+            future_steps=future_steps,
+            beta=1.0,
+        )
+        metrics["simple_gr_beta_1"] = _window_metrics_from_mode_windows(gr_windows)
+    for beta in DEFAULT_RANKER_BETA_GRID:
+        ranker_windows = apply_ranker_logits(mode_windows, oof, tau_ft=5.0, beta=beta)
+        metrics[f"ranker_beta_{beta:g}"] = _window_metrics_from_mode_windows(
+            ranker_windows
+        )
+    return metrics
+
+
+def _model_params_for_variant(
+    variant: str, params: dict[str, Any] | None
+) -> dict[str, Any]:
+    base = (
+        dict(DEFAULT_PAIRWISE_CATBOOST_PARAMS)
+        if variant == "pairwise"
+        else dict(DEFAULT_CATBOOST_PARAMS)
+    )
+    base.update(params or {})
+    return base
 
 
 def _write_crossfit_report(
@@ -574,21 +709,28 @@ def _write_crossfit_report(
     summary: dict[str, Any],
 ) -> Path:
     lines = [
-        "MTP_RANKER_CROSSFIT_V0_REPORT",
+        "MTP_RANKER_CROSSFIT_REPORT",
         "",
-        "dataset:",
+        "ranker setup:",
+        f"  variant: {summary['variant']}",
+        f"  folds: {summary['folds']}",
         f"  feature_rows: {summary['feature_rows']}",
         f"  oof_rows: {summary['oof_rows']}",
         f"  wells: {summary['wells']}",
-        f"  folds: {summary['folds']}",
-        f"  variant: {summary['variant']}",
+        f"  features: {summary['feature_columns']}",
+        "  model_params:",
+        json.dumps(summary["model_params"], indent=2),
         f"  beta_grid: {summary['beta_grid']}",
         "",
-        "oof metrics:",
+        "window-level:",
         json.dumps(summary["oof_metrics"], indent=2),
+        json.dumps(summary["window_metrics"], indent=2),
         "",
         "folds:",
         json.dumps(summary["fold_summaries"], indent=2),
+        "",
+        "tracker:",
+        "  run `make track` with `LOGIT_SOURCE=ranker_oof` and this output's logits.",
     ]
     path = run_dir / "crossfit_ranker_report.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -605,6 +747,7 @@ def run_ranker_crossfit_from_frames(
     n_folds: int = 5,
     seed: int = 42,
     ranker_params: dict[str, Any] | None = None,
+    ranker_variant: str = "conservative_regression",
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
@@ -626,26 +769,46 @@ def run_ranker_crossfit_from_frames(
     for fold in folds:
         train_wells = set(fold["train_wells"])
         valid_wells = set(fold["valid_wells"])
-        model, train_metrics = train_catboost_ranker(
-            features,
-            train_wells=train_wells,
-            valid_wells=valid_wells,
-            seed=seed + int(fold["fold"]),
-            params=ranker_params,
-        )
+        if ranker_variant == "conservative_regression":
+            model, train_metrics = train_catboost_ranker(
+                features,
+                train_wells=train_wells,
+                valid_wells=valid_wells,
+                seed=seed + int(fold["fold"]),
+                params=ranker_params,
+            )
+        elif ranker_variant == "pairwise":
+            model, train_metrics = train_catboost_pairwise_ranker(
+                features,
+                train_wells=train_wells,
+                valid_wells=valid_wells,
+                seed=seed + int(fold["fold"]),
+                params=ranker_params,
+            )
+        else:
+            raise ValueError("ranker_variant must be 'conservative_regression' or 'pairwise'")
         model_path = run_path / "checkpoints" / f"mtp_ranker_crossfit_fold{fold['fold']}.cbm"
         model.save_model(str(model_path))
         valid = features[features["well_id"].isin(valid_wells)].copy()
         valid["fold"] = int(fold["fold"])
-        valid["predicted_error_ft"] = _predict_ranker_errors(model, valid)
-        valid["ranker_score"] = -valid["predicted_error_ft"]
-        valid["ranker_logit_t5"] = -valid["predicted_error_ft"] / 5.0
+        if ranker_variant == "pairwise":
+            valid["ranker_score"] = _predict_pairwise_scores(model, valid)
+        else:
+            valid["predicted_error_ft"] = _predict_ranker_errors(model, valid)
+            valid["ranker_score"] = -valid["predicted_error_ft"]
+        valid["ranker_logit_t5"] = valid["ranker_score"] / 5.0
         oof_parts.append(valid)
         fold_summaries.append(
             {
                 "fold": int(fold["fold"]),
                 "train_wells": sorted(train_wells),
                 "valid_wells": sorted(valid_wells),
+                "train_windows": int(
+                    features[features["well_id"].isin(train_wells)]["window_id"].nunique()
+                ),
+                "valid_windows": int(
+                    features[features["well_id"].isin(valid_wells)]["window_id"].nunique()
+                ),
                 **train_metrics,
             }
         )
@@ -671,10 +834,18 @@ def run_ranker_crossfit_from_frames(
         "wells": int(oof["well_id"].nunique()),
         "folds": int(n_folds),
         "seed": int(seed),
-        "variant": "conservative_regression",
+        "variant": ranker_variant,
         "feature_columns": list(FEATURE_COLUMNS),
+        "model_params": _model_params_for_variant(ranker_variant, ranker_params),
         "beta_grid": list(DEFAULT_RANKER_BETA_GRID),
         "oof_metrics": _ranker_oof_metrics(oof),
+        "window_metrics": _crossfit_window_metrics(
+            mode_windows,
+            oof,
+            gr_context or {},
+            history_steps=cfg.window.history_steps,
+            future_steps=cfg.window.future_steps,
+        ),
         "fold_summaries": fold_summaries,
     }
     (run_path / "crossfit_ranker_metrics.json").write_text(
@@ -692,16 +863,22 @@ def apply_ranker_logits(
     beta: float | None = None,
 ) -> pd.DataFrame:
     out = mode_windows.copy()
-    pred_lookup = predictions.set_index(["window_id", "mode_id"])["predicted_error_ft"]
+    pred_frame = predictions.set_index(["window_id", "mode_id"])
+    if "ranker_score" in pred_frame.columns:
+        score_lookup = pred_frame["ranker_score"]
+    elif "predicted_error_ft" in pred_frame.columns:
+        score_lookup = -pred_frame["predicted_error_ft"]
+    else:
+        raise ValueError("ranker predictions require ranker_score or predicted_error_ft")
     new_logits: list[np.ndarray] = []
     for window_id, row in zip(_window_ids(out), out.itertuples(index=False), strict=True):
         logits = _as_float_array(row.logits)
-        errors = []
+        scores = []
         for mode_index in range(len(logits)):
             key = (window_id, int(mode_index))
-            value = pred_lookup.get(key, np.nan)
-            errors.append(float(value) if np.isfinite(value) else 1e6)
-        ranker_score = -np.asarray(errors, dtype=np.float32)
+            value = score_lookup.get(key, np.nan)
+            scores.append(float(value) if np.isfinite(value) else -1e6)
+        ranker_score = np.asarray(scores, dtype=np.float32)
         if beta is None:
             values = (ranker_score / float(tau_ft)).astype(np.float32)
         else:
@@ -1044,6 +1221,7 @@ def run_ranker_crossfit(
     output_dir: str | Path | None = None,
     n_folds: int = 5,
     seed: int = 42,
+    ranker_variant: str = "conservative_regression",
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     out_path = Path(output_dir) if output_dir is not None else run_path
@@ -1065,6 +1243,7 @@ def run_ranker_crossfit(
         gr_context=gr_context,
         n_folds=n_folds,
         seed=seed,
+        ranker_variant=ranker_variant,
     )
     print(json.dumps(_json_safe(summary["oof_metrics"]), indent=2), flush=True)
     return summary

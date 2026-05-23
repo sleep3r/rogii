@@ -19,6 +19,58 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### EXP-MTPRANKER-PAIRWISE-V0 - Query-level CatBoostRanker
+
+- Command/config:
+  - `make mtp-ranker-crossfit RUN_DIR=artifacts/mtp_v1_prior_conditioned N_FOLDS=5 OUTPUT=artifacts/mtp_ranker_crossfit_pairwise_v0 RANKER_VARIANT=pairwise`;
+  - `make track RUN_DIR=artifacts/mtp_v1_prior_conditioned LOGIT_SOURCE=ranker_oof RANKER_LOGITS=artifacts/mtp_ranker_crossfit_pairwise_v0/oof_ranker_logits.parquet RANKER_BETA={0.25,0.5,1.0}`;
+  - query group: `window_id`;
+  - objective: CatBoostRanker `YetiRank`;
+  - model params: depth `4`, learning rate `0.05`, iterations `1000`,
+    `l2_leaf_reg=20`, early stopping `100`.
+- What changed:
+  - added pair/listwise CatBoost ranker variant for window-level mode ordering;
+  - labels are relevance within each window, with lower mode error receiving
+    higher relevance;
+  - kept the same conservative feature whitelist and the same
+    `nn_logit + beta * z(ranker_score)` tracker interface;
+  - `rank-crossfit` now accepts `--ranker-variant pairwise`;
+  - cross-fit report now includes feature list, model params, per-fold window
+    counts, NN/simple-GR/ranker window metrics, and Spearman score-error
+    diagnostic.
+- Cross-fit ranker OOF metrics:
+  - OOF top1 mode RMSE: `7.37252 ft`;
+  - best-mode top1 rate: `0.46124`;
+  - best-mode top3 rate: `0.91487`;
+  - Spearman score-error: `-0.92393`.
+- Window-level beta metrics:
+  - NN top1/weighted: `7.85912 / 7.44794 ft`;
+  - simple GR beta1 top1/weighted: `10.95025 / 8.54118 ft`;
+  - pairwise beta `0.25` top1/weighted: `7.79958 / 7.43962 ft`;
+  - pairwise beta `0.5` top1/weighted: `7.74097 / 7.43395 ft`;
+  - pairwise beta `1.0` top1/weighted: `7.63276 / 7.42751 ft`.
+- OOF tracker beta grid:
+  - beta `0.25`: best guarded RMSE `9.93541 ft`, gain `+0.01245 ft`;
+  - beta `0.5`: best guarded RMSE `9.93329 ft`, gain `+0.01457 ft`;
+  - beta `1.0`: best guarded RMSE `9.93514 ft`, gain `+0.01272 ft`;
+  - B2 baseline RMSE: `9.94786 ft`.
+- Takeaway:
+  - pairwise ranking improves window-level top1 more than conservative
+    regression;
+  - the row-level tracker still does not convert that improvement into a useful
+    B2 gain;
+  - best pairwise tracker is worse than prior OOF ranker-only `9.92943 ft` and
+    conservative beta1 `9.93099 ft`.
+- Decision:
+  - pairwise ranker is NO-GO as deployable selector;
+  - current supervised ranker family does not transfer enough to row-level path
+    selection;
+  - next path should be training-time improvement or a different selector
+    objective, not wider beta/search.
+- Verification:
+  - pairwise focused tests: `3 passed`;
+  - real pairwise cross-fit and beta-grid tracker jobs completed.
+
 ### EXP-MTPRANKER-CONSERVATIVE-V0 - Conservative beta-blend selector
 
 - Command/config:

@@ -7,6 +7,7 @@ RUN_DIR ?= artifacts/mtp_v0
 OUTPUT ?=
 N_FOLDS ?= 5
 SEED ?= 42
+RANKER_VARIANT ?= conservative_regression
 LOGIT_SOURCE ?= ranker
 RANKER_LOGITS ?=
 TAU_FT ?= 5.0
@@ -42,7 +43,7 @@ rank:
 	$(UV) run --extra dev python -m mtpnet.cli rank --run-dir $(RUN_DIR)
 
 rank-crossfit:
-	$(UV) run --extra dev python -m mtpnet.cli rank-crossfit --run-dir $(RUN_DIR) --n-folds $(N_FOLDS) --seed $(SEED) $(if $(OUTPUT),--output-dir $(OUTPUT),)
+	$(UV) run --extra dev python -m mtpnet.cli rank-crossfit --run-dir $(RUN_DIR) --n-folds $(N_FOLDS) --seed $(SEED) --ranker-variant $(RANKER_VARIANT) $(if $(OUTPUT),--output-dir $(OUTPUT),)
 
 mtp-ranker-crossfit: rank-crossfit
 
