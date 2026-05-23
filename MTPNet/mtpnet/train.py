@@ -215,6 +215,7 @@ def prepare_sample_splits(cfg: MTPConfig) -> SampleSplits:
         )
         train_buckets = {"legacy_train": train_samples}
         train_mix_counts = {"legacy_train": len(train_samples)}
+    train_samples = _augment_prior_conditioning_samples(train_samples, cfg)
 
     if cfg.window.valid_sample_types:
         valid_sets = {
@@ -556,6 +557,95 @@ def _channel_indices(cfg: MTPConfig, names: set[str]) -> list[int]:
     return [index for index, name in enumerate(cfg.window.channels) if name in names]
 
 
+ANCHOR_CHANNELS = {
+    "anchor_sdf",
+    "base_sdf",
+    "anchor_offset_value",
+    "base_offset_value",
+}
+B2_CHANNELS = {"b2_sdf", "b2_delta_value"}
+A_CHANNELS = {"a_p50_sdf", "a_density", "a_p10_p90_band"}
+ALL_PRIOR_CHANNELS = ANCHOR_CHANNELS | B2_CHANNELS | A_CHANNELS
+
+
+def _apply_anchor_jitter(x: np.ndarray, cfg: MTPConfig, jitter_ft: float) -> None:
+    if abs(float(jitter_ft)) < 1e-8:
+        return
+    height = max(int(x.shape[1]), 1)
+    bin_size_ft = (2.0 * cfg.window.vertical_radius_ft) / max(height - 1, 1)
+    jitter_bins = float(jitter_ft) / max(bin_size_ft, 1e-6)
+    for channel_index in _channel_indices(cfg, {"anchor_sdf", "base_sdf"}):
+        x[channel_index] = x[channel_index] - float(jitter_bins / height)
+    for channel_index in _channel_indices(
+        cfg, {"anchor_offset_value", "base_offset_value"}
+    ):
+        x[channel_index] = x[channel_index] + float(jitter_ft / cfg.window.vertical_radius_ft)
+
+
+def _swap_anchor_channels(x: np.ndarray, cfg: MTPConfig, target: str) -> None:
+    channels = tuple(cfg.window.channels)
+
+    def copy_channel(src_name: str, dst_names: set[str]) -> None:
+        if src_name not in channels:
+            return
+        src = channels.index(src_name)
+        for dst in dst_names:
+            if dst in channels:
+                x[channels.index(dst)] = x[src]
+
+    normalized = target.lower()
+    if normalized in {"schema10", "anchor", "base"}:
+        return
+    if normalized == "b2":
+        copy_channel("b2_sdf", {"anchor_sdf", "base_sdf"})
+        return
+    if normalized in {"a_p50", "a_weighted_mean"}:
+        copy_channel("a_p50_sdf", {"anchor_sdf", "base_sdf"})
+        return
+    if normalized == "noisy_anchor":
+        return
+    raise ValueError(f"Unsupported anchor_swap target: {target}")
+
+
+def _augment_prior_conditioning_samples(
+    samples: list[WindowSample], cfg: MTPConfig
+) -> list[WindowSample]:
+    aug = cfg.augmentation
+    if not aug.enabled:
+        return samples
+    rng = np.random.default_rng(cfg.train.seed + 2027)
+    all_prior = _channel_indices(cfg, ALL_PRIOR_CHANNELS)
+    anchor = _channel_indices(cfg, ANCHOR_CHANNELS)
+    b2 = _channel_indices(cfg, B2_CHANNELS)
+    a_density = _channel_indices(cfg, {"a_density"})
+    out: list[WindowSample] = []
+    for sample in samples:
+        x = sample.x.copy()
+        if all_prior and rng.random() < aug.drop_all_priors_prob:
+            for channel_index in all_prior:
+                x[channel_index] = 0.0
+            out.append(replace(sample, x=x))
+            continue
+        if aug.anchor_swap and rng.random() < aug.anchor_swap_prob:
+            target = str(rng.choice(np.asarray(aug.anchor_swap, dtype=object)))
+            _swap_anchor_channels(x, cfg, target)
+        if aug.anchor_jitter_ft:
+            magnitude = float(rng.choice(np.asarray(aug.anchor_jitter_ft, dtype=np.float32)))
+            sign = -1.0 if rng.random() < 0.5 else 1.0
+            _apply_anchor_jitter(x, cfg, sign * magnitude)
+        if rng.random() < aug.drop_anchor_sdf_prob:
+            for channel_index in anchor:
+                x[channel_index] = 0.0
+        if rng.random() < aug.drop_b2_sdf_prob:
+            for channel_index in b2:
+                x[channel_index] = 0.0
+        if rng.random() < aug.drop_a_density_prob:
+            for channel_index in a_density:
+                x[channel_index] = 0.0
+        out.append(replace(sample, x=x))
+    return out
+
+
 class _StaticModeModel(torch.nn.Module):
     bounded_output = True
 
@@ -612,16 +702,9 @@ def _sanity_samples(
     history_channels = _channel_indices(cfg, {"history_mask", "history_sdf"})
     prior_channels = _channel_indices(
         cfg,
-        {
-            "base_sdf",
-            "b2_sdf",
-            "a_p50_sdf",
-            "a_density",
-            "a_p10_p90_band",
-            "base_offset_value",
-            "b2_delta_value",
-        },
+        ALL_PRIOR_CHANNELS,
     )
+    anchor_channels = _channel_indices(cfg, ANCHOR_CHANNELS)
     rng = np.random.default_rng(cfg.train.seed + 1009)
     transformed: list[WindowSample] = []
     for sample in samples:
@@ -641,6 +724,11 @@ def _sanity_samples(
         elif kind == "no_base_b2_a":
             for channel_index in prior_channels:
                 x[channel_index] = 0.0
+        elif kind == "no_anchor":
+            for channel_index in anchor_channels:
+                x[channel_index] = 0.0
+        elif kind == "anchor_jitter_20ft":
+            _apply_anchor_jitter(x, cfg, 20.0)
         elif kind == "base_b2_a_only":
             keep = set(prior_channels)
             for channel_index in range(x.shape[0]):
@@ -739,6 +827,14 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('no_base_b2_a', 'weighted_mean_rmse_ft'))}",
         "  no_base_b2_a baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_base_b2_a', 'oracle_topk_rmse_ft'))}",
+        "  no_anchor baseline top1_ft: "
+        f"{_metric_value(sanity, ('no_anchor', 'top1_rmse_ft'))}",
+        "  no_anchor baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('no_anchor', 'oracle_topk_rmse_ft'))}",
+        "  anchor_jitter_20ft baseline top1_ft: "
+        f"{_metric_value(sanity, ('anchor_jitter_20ft', 'top1_rmse_ft'))}",
+        "  anchor_jitter_20ft baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('anchor_jitter_20ft', 'oracle_topk_rmse_ft'))}",
         "  base_b2_a_only baseline top1_ft: "
         f"{_metric_value(sanity, ('base_b2_a_only', 'top1_rmse_ft'))}",
         "  base_b2_a_only baseline weighted_ft: "
@@ -916,6 +1012,18 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             cfg,
             device,
         )[0],
+        "no_anchor": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="no_anchor"),
+            cfg,
+            device,
+        )[0],
+        "anchor_jitter_20ft": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="anchor_jitter_20ft"),
+            cfg,
+            device,
+        )[0],
         "base_b2_a_only": _evaluate(
             model,
             _sanity_samples(valid_samples, cfg, kind="base_b2_a_only"),
@@ -955,6 +1063,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             "soft_prob_tau_bins": cfg.loss.soft_prob_tau_bins,
         },
         "priors": _json_safe_config(cfg)["priors"],
+        "augmentation": _json_safe_config(cfg)["augmentation"],
         "static_modes": _static_mode_metrics(valid_samples, cfg, device),
         "best_epoch": int(checkpoint["best_epoch"]),
         "best_valid_score": float(checkpoint["best_valid_score"]),

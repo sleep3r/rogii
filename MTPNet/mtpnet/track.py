@@ -445,7 +445,7 @@ def run_tracker_from_frames(
             for alpha in (0.1, 0.2, 0.3):
                 for clip in (20.0, 30.0):
                     add_candidate(
-                        f"b2_plus_{name}_a{alpha:g}_clip{int(clip)}",
+                        _anchored_candidate_name(name, alpha, clip),
                         _blend_with_anchor(
                             rows,
                             anchor_column="b2_tvt",
@@ -498,6 +498,11 @@ def _best_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
     return min(metrics, key=lambda item: item.get("rmse", float("inf")))
 
 
+def _anchored_candidate_name(name: str, alpha: float, clip: float) -> str:
+    local = str(name).removeprefix("mtp_track_")
+    return f"mtp_track_anchored_{local}_a{alpha:g}_clip{int(clip)}"
+
+
 def _run_tracker_metrics_only(
     *,
     cfg: MTPConfig,
@@ -541,7 +546,7 @@ def _run_tracker_metrics_only(
                         evaluate_with_b2_fallback(
                             hidden_rows_all,
                             blended,
-                            f"b2_plus_{name}_a{alpha:g}_clip{int(clip)}",
+                            _anchored_candidate_name(name, alpha, clip),
                         )
                     )
     return {

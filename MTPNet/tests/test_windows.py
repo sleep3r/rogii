@@ -240,6 +240,58 @@ def test_build_channels_supports_prior_sdf_density_and_value_channels() -> None:
     np.testing.assert_allclose(channels[6, 0], np.array([0.0, -0.5, -1.0]))
 
 
+def test_build_channels_supports_anchor_alias_channels() -> None:
+    channels = build_channels(
+        horizontal_gr=np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        typewell_gr=np.array([5.0, 15.0, 25.0, 35.0], dtype=np.float32),
+        history_bins=np.array([1.0, np.nan, np.nan], dtype=np.float32),
+        finite_steps=np.ones(3, dtype=np.float32),
+        channels=("anchor_sdf", "base_sdf", "anchor_offset_value"),
+        prior_bins={
+            "anchor": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            "base": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        },
+        prior_values={
+            "anchor_offset": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+            "base_offset": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        },
+    )
+
+    assert channels.shape == (3, 4, 3)
+    np.testing.assert_allclose(channels[0], channels[1])
+    np.testing.assert_allclose(channels[2, 0], np.array([0.1, 0.2, 0.3]))
+
+
+def test_prior_windows_can_emit_anchor_sdf_alias() -> None:
+    cfg = WindowConfig(
+        rows_per_step=4,
+        history_steps=4,
+        future_steps=6,
+        vertical_bins=32,
+        vertical_radius_ft=60.0,
+        stride_steps=4,
+        max_windows_per_well=1,
+        channels=("anchor_sdf", "base_sdf", "anchor_offset_value"),
+    )
+    horizontal = synthetic_horizontal()
+    tvt = horizontal["TVT"].to_numpy(dtype=np.float32)
+    ids = horizontal["id"].astype(str).to_numpy()
+    prior_frame = pd.DataFrame({"base_tvt": tvt + 5.0}, index=ids)
+
+    windows = build_windows_for_well(
+        "well_a",
+        horizontal,
+        synthetic_typewell(),
+        cfg,
+        history_mode="base_path",
+        center_source="base_path",
+        prior_tables=PriorTables(frame=prior_frame),
+    )
+
+    assert windows[0].x.shape == (3, 32, 10)
+    np.testing.assert_allclose(windows[0].x[0], windows[0].x[1])
+
+
 def test_split_wells_keeps_well_boundaries() -> None:
     train, valid = split_wells(["a", "b", "c", "d", "e"], valid_fraction=0.4, seed=7)
     assert set(train).isdisjoint(valid)

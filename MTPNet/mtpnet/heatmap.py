@@ -11,21 +11,25 @@ KNOWN_CHANNELS = {
     "history_mask",
     "history_sdf",
     "finite_mask",
+    "anchor_sdf",
     "base_sdf",
     "b2_sdf",
     "a_p50_sdf",
     "a_density",
     "a_p10_p90_band",
+    "anchor_offset_value",
     "base_offset_value",
     "b2_delta_value",
 }
 
 PRIOR_CHANNELS = {
+    "anchor_sdf",
     "base_sdf",
     "b2_sdf",
     "a_p50_sdf",
     "a_density",
     "a_p10_p90_band",
+    "anchor_offset_value",
     "base_offset_value",
     "b2_delta_value",
 }
@@ -169,9 +173,14 @@ def build_channels(
     }
     prior_bins = prior_bins or {}
     prior_values = prior_values or {}
+    if "anchor" not in prior_bins and "base" in prior_bins:
+        prior_bins = {**prior_bins, "anchor": prior_bins["base"]}
+    if "anchor_offset" not in prior_values and "base_offset" in prior_values:
+        prior_values = {**prior_values, "anchor_offset": prior_values["base_offset"]}
     if PRIOR_CHANNELS.intersection(channels):
         missing: list[str] = []
         for key, channel in (
+            ("anchor", "anchor_sdf"),
             ("base", "base_sdf"),
             ("b2", "b2_sdf"),
             ("a_p50", "a_p50_sdf"),
@@ -182,6 +191,7 @@ def build_channels(
             if channel in channels and key not in prior_bins:
                 missing.append(key)
         for key, channel in (
+            ("anchor_offset", "anchor_offset_value"),
             ("base_offset", "base_offset_value"),
             ("b2_delta", "b2_delta_value"),
         ):
@@ -191,6 +201,8 @@ def build_channels(
             raise ValueError(
                 f"Prior channels requested but missing priors: {sorted(set(missing))}"
             )
+    if "anchor_sdf" in channels:
+        values["anchor_sdf"] = path_sdf(prior_bins["anchor"], height=height, width=width)
     if "base_sdf" in channels:
         values["base_sdf"] = path_sdf(prior_bins["base"], height=height, width=width)
     if "b2_sdf" in channels:
@@ -208,6 +220,10 @@ def build_channels(
     if "a_p10_p90_band" in channels:
         values["a_p10_p90_band"] = band_mask(
             prior_bins["a_p10"], prior_bins["a_p90"], height=height, width=width
+        )
+    if "anchor_offset_value" in channels:
+        values["anchor_offset_value"] = broadcast_values(
+            prior_values["anchor_offset"], height=height, width=width
         )
     if "base_offset_value" in channels:
         values["base_offset_value"] = broadcast_values(

@@ -37,6 +37,18 @@ class PriorConfig:
 
 
 @dataclass(frozen=True)
+class AugmentationConfig:
+    enabled: bool = False
+    drop_anchor_sdf_prob: float = 0.0
+    drop_b2_sdf_prob: float = 0.0
+    drop_a_density_prob: float = 0.0
+    drop_all_priors_prob: float = 0.0
+    anchor_jitter_ft: tuple[float, ...] = ()
+    anchor_swap_prob: float = 0.0
+    anchor_swap: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WindowConfig:
     rows_per_step: int = 32
     history_steps: int = 8
@@ -114,6 +126,7 @@ class RunConfig:
 class MTPConfig:
     data: DataConfig = field(default_factory=DataConfig)
     priors: PriorConfig = field(default_factory=PriorConfig)
+    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -182,6 +195,51 @@ def load_config(path: str | Path) -> MTPConfig:
             priors_raw.get("a_p90_column", default_priors.a_p90_column)
         ),
         strict=bool(priors_raw.get("strict", default_priors.strict)),
+    )
+
+    augmentation_raw = _section(raw, "augmentation")
+    default_augmentation = AugmentationConfig()
+    augmentation = AugmentationConfig(
+        enabled=bool(augmentation_raw.get("enabled", default_augmentation.enabled)),
+        drop_anchor_sdf_prob=float(
+            augmentation_raw.get(
+                "drop_anchor_sdf_prob", default_augmentation.drop_anchor_sdf_prob
+            )
+        ),
+        drop_b2_sdf_prob=float(
+            augmentation_raw.get(
+                "drop_b2_sdf_prob", default_augmentation.drop_b2_sdf_prob
+            )
+        ),
+        drop_a_density_prob=float(
+            augmentation_raw.get(
+                "drop_a_density_prob", default_augmentation.drop_a_density_prob
+            )
+        ),
+        drop_all_priors_prob=float(
+            augmentation_raw.get(
+                "drop_all_priors_prob", default_augmentation.drop_all_priors_prob
+            )
+        ),
+        anchor_jitter_ft=tuple(
+            float(value)
+            for value in _tuple(
+                augmentation_raw.get("anchor_jitter_ft"),
+                default_augmentation.anchor_jitter_ft,
+            )
+        ),
+        anchor_swap_prob=float(
+            augmentation_raw.get(
+                "anchor_swap_prob", default_augmentation.anchor_swap_prob
+            )
+        ),
+        anchor_swap=tuple(
+            str(value)
+            for value in _tuple(
+                augmentation_raw.get("anchor_swap"),
+                default_augmentation.anchor_swap,
+            )
+        ),
     )
 
     window_raw = _section(raw, "window")
@@ -337,6 +395,7 @@ def load_config(path: str | Path) -> MTPConfig:
     return MTPConfig(
         data=data,
         priors=priors,
+        augmentation=augmentation,
         window=window,
         model=model,
         loss=loss,

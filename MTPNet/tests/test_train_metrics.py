@@ -3,8 +3,9 @@ import pytest
 import torch
 from torch import Tensor, nn
 
-from mtpnet.config import MTPConfig, TrainConfig, WindowConfig
+from mtpnet.config import AugmentationConfig, MTPConfig, TrainConfig, WindowConfig
 from mtpnet.train import (
+    _augment_prior_conditioning_samples,
     _epoch_progress_record,
     _evaluate,
     _sanity_samples,
@@ -213,6 +214,70 @@ def test_sanity_samples_can_ablate_gr_history_and_prior_channels() -> None:
     assert np.all(no_prior.x[:2] == 1.0)
     assert np.all(prior_only.x[:2] == 0.0)
     assert np.all(prior_only.x[2:] == 1.0)
+
+
+def test_prior_augmentation_can_drop_anchor_and_jitter_anchor_channels() -> None:
+    cfg = MTPConfig(
+        train=TrainConfig(seed=11),
+        window=WindowConfig(
+            vertical_bins=4,
+            vertical_radius_ft=40.0,
+            channels=("anchor_sdf", "anchor_offset_value", "b2_sdf", "a_density"),
+        ),
+        augmentation=AugmentationConfig(
+            enabled=True,
+            drop_anchor_sdf_prob=1.0,
+            drop_b2_sdf_prob=0.0,
+            drop_a_density_prob=0.0,
+            drop_all_priors_prob=0.0,
+        ),
+    )
+    sample = WindowSample(
+        x=np.ones((4, 4, 2), dtype=np.float32),
+        target_bins=np.array([0.0, 0.0], dtype=np.float32),
+        target_tvt=np.array([0.0, 0.0], dtype=np.float32),
+        history_tvt=np.array([0.0], dtype=np.float32),
+        crop_tvt=np.linspace(-40.0, 40.0, 4, dtype=np.float32),
+        well_id="a",
+        start_step=0,
+        center_tvt=0.0,
+    )
+
+    augmented = _augment_prior_conditioning_samples([sample], cfg)[0]
+
+    assert np.all(augmented.x[0] == 0.0)
+    assert np.all(augmented.x[1] == 0.0)
+    assert np.all(augmented.x[2:] == 1.0)
+
+
+def test_sanity_samples_can_remove_anchor_and_jitter_anchor() -> None:
+    cfg = MTPConfig(
+        window=WindowConfig(
+            vertical_bins=4,
+            vertical_radius_ft=40.0,
+            channels=("anchor_sdf", "anchor_offset_value", "b2_sdf"),
+        )
+    )
+    x = np.ones((3, 4, 2), dtype=np.float32)
+    sample = WindowSample(
+        x=x,
+        target_bins=np.array([0.0, 0.0], dtype=np.float32),
+        target_tvt=np.array([0.0, 0.0], dtype=np.float32),
+        history_tvt=np.array([0.0], dtype=np.float32),
+        crop_tvt=np.linspace(-40.0, 40.0, 4, dtype=np.float32),
+        well_id="a",
+        start_step=0,
+        center_tvt=0.0,
+    )
+
+    no_anchor = _sanity_samples([sample], cfg, kind="no_anchor")[0]
+    jittered = _sanity_samples([sample], cfg, kind="anchor_jitter_20ft")[0]
+
+    assert np.all(no_anchor.x[0] == 0.0)
+    assert np.all(no_anchor.x[1] == 0.0)
+    assert np.all(no_anchor.x[2] == 1.0)
+    assert not np.allclose(jittered.x[0], sample.x[0])
+    assert not np.allclose(jittered.x[1], sample.x[1])
 
 
 def test_auto_device_prefers_mps_when_cuda_unavailable(monkeypatch) -> None:

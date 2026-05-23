@@ -184,6 +184,63 @@ def test_mtp_v1_prior_conditioned_config_loads() -> None:
     assert cfg.loss.soft_prob_alpha == pytest.approx(0.2)
 
 
+def test_v2_anchor_dropout_config_loads(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "augmentation": {
+                    "enabled": True,
+                    "drop_anchor_sdf_prob": 0.15,
+                    "drop_b2_sdf_prob": 0.30,
+                    "drop_a_density_prob": 0.20,
+                    "drop_all_priors_prob": 0.10,
+                    "anchor_jitter_ft": [10.0, 20.0, 30.0],
+                    "anchor_swap_prob": 0.25,
+                    "anchor_swap": [
+                        "schema10",
+                        "B2",
+                        "A_p50",
+                        "A_weighted_mean",
+                        "noisy_anchor",
+                    ],
+                },
+                "window": {
+                    "channels": ["anchor_sdf", "b2_sdf", "a_density", "anchor_offset_value"]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.augmentation.enabled is True
+    assert cfg.augmentation.drop_anchor_sdf_prob == pytest.approx(0.15)
+    assert cfg.augmentation.drop_b2_sdf_prob == pytest.approx(0.30)
+    assert cfg.augmentation.drop_a_density_prob == pytest.approx(0.20)
+    assert cfg.augmentation.drop_all_priors_prob == pytest.approx(0.10)
+    assert cfg.augmentation.anchor_jitter_ft == (10.0, 20.0, 30.0)
+    assert cfg.augmentation.anchor_swap_prob == pytest.approx(0.25)
+    assert cfg.augmentation.anchor_swap == (
+        "schema10",
+        "B2",
+        "A_p50",
+        "A_weighted_mean",
+        "noisy_anchor",
+    )
+    assert "anchor_sdf" in cfg.window.channels
+
+
+def test_mtp_v2_anchor_dropout_config_loads() -> None:
+    cfg = load_config(Path("configs/mtp_v2_anchor_dropout.yml"))
+
+    assert cfg.run.name == "mtp_v2_anchor_dropout"
+    assert cfg.augmentation.enabled is True
+    assert cfg.augmentation.drop_all_priors_prob > 0.0
+    assert "anchor_sdf" in cfg.window.channels
+
+
 def test_zero_k_wells_fails(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError, match="data.k_wells must be -1 or a positive integer"

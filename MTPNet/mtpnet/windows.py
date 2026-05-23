@@ -185,9 +185,13 @@ def _prior_channels_for_window(
         else a_p50
     )
     prior_bins: dict[str, np.ndarray] = {
+        "anchor": _target_bins_with_nan(base, crop_tvt),
         "base": _target_bins_with_nan(base, crop_tvt),
     }
     prior_values: dict[str, np.ndarray] = {
+        "anchor_offset": ((base - float(center_tvt)) / cfg.vertical_radius_ft).astype(
+            np.float32
+        ),
         "base_offset": ((base - float(center_tvt)) / cfg.vertical_radius_ft).astype(
             np.float32
         )
@@ -280,10 +284,12 @@ def build_windows_for_well(
     if PRIOR_CHANNELS.intersection(cfg.channels) and prior_tables is None:
         raise ValueError("Prior channels requested but no prior tables were loaded")
     if (
-        {"base_sdf", "base_offset_value"}.intersection(cfg.channels)
+        {"anchor_sdf", "anchor_offset_value", "base_sdf", "base_offset_value"}.intersection(
+            cfg.channels
+        )
         and "base_tvt" not in comp_priors
     ):
-        raise ValueError("base prior channels require loaded base_tvt priors")
+        raise ValueError("anchor/base prior channels require loaded base_tvt priors")
     min_start = max(0, first_hidden - cfg.history_steps)
     max_start = len(comp_tvt) - total_steps
     if history_mode == "known_tail_start":
