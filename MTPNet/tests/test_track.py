@@ -241,4 +241,5 @@ def test_run_tracker_requires_oof_logits_for_ranker_oof(tmp_path: Path) -> None:
             run_dir=tmp_path,
             ranker_logits=None,
             tau_ft=5.0,
+            ranker_beta=0.5,
         )

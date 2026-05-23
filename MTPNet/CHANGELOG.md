@@ -19,6 +19,47 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### EXP-MTPRANKER-CONSERVATIVE-V0 - Conservative beta-blend selector
+
+- Command/config:
+  - `make mtp-ranker-crossfit RUN_DIR=artifacts/mtp_v1_prior_conditioned N_FOLDS=5 OUTPUT=artifacts/mtp_ranker_crossfit_conservative_v0`;
+  - `make track RUN_DIR=artifacts/mtp_v1_prior_conditioned LOGIT_SOURCE=ranker_oof RANKER_LOGITS=artifacts/mtp_ranker_crossfit_conservative_v0/oof_ranker_logits.parquet RANKER_BETA={0.25,0.5,1.0}`;
+  - CNN was not retrained.
+- What changed:
+  - replaced the ranker training whitelist with a conservative regression
+    feature set;
+  - removed high-flex context/categorical features from the CatBoost pool;
+  - added explicit feature aliases for NN posterior, GR/NCC, B2/base/A
+    distances, path geometry, and compact context;
+  - ranker application now supports
+    `combined_logit = nn_logit + beta * z(-predicted_error_ft)`;
+  - cross-fit OOF parquet now includes combined logits/probabilities for
+    beta `0.25`, `0.5`, and `1.0`;
+  - tracker accepts `--ranker-beta` / `RANKER_BETA`.
+- Cross-fit ranker OOF metrics:
+  - mode error MAE: `6.55487 ft`;
+  - OOF top1 mode RMSE: `7.50400 ft`;
+  - best-mode top1 rate: `0.44770`;
+  - best-mode top3 rate: `0.92192`.
+- OOF tracker beta grid:
+  - beta `0.25`: best guarded RMSE `9.93706 ft`, gain `+0.01080 ft`;
+  - beta `0.5`: best guarded RMSE `9.93364 ft`, gain `+0.01422 ft`;
+  - beta `1.0`: best guarded RMSE `9.93099 ft`, gain `+0.01687 ft`;
+  - B2 baseline RMSE: `9.94786 ft`.
+- Takeaway:
+  - conservative features slightly improve window-level OOF ranker top1;
+  - conservative beta-blend does not improve row-level tracker versus the prior
+    OOF ranker-only result `9.92943 ft`;
+  - selector overfit risk is lower, but the deployable gain remains too small.
+- Decision:
+  - keep as a cleaner ranker baseline;
+  - performance remains NO-GO for submit by the `+0.10 ft` criterion;
+  - next selector work needs a better objective, not a wider beta grid.
+- Verification:
+  - focused conservative-ranker tests: `3 passed`;
+  - ranker/track tests after implementation: `19 passed`;
+  - real cross-fit and beta-grid tracker jobs completed.
+
 ### EXP-MTPRANKER-CROSSFIT-V0 - OOF ranker logits for tracker
 
 - Command/config:

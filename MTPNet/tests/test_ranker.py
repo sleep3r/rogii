@@ -8,6 +8,7 @@ import pytest
 
 from mtpnet.config import MTPConfig, RunConfig, WindowConfig
 from mtpnet.ranker import (
+    CONSERVATIVE_FEATURE_COLUMNS,
     FEATURE_COLUMNS,
     apply_ranker_logits,
     build_mode_feature_frame,
@@ -121,8 +122,10 @@ def test_feature_columns_exclude_target_and_oracle_leakage() -> None:
     }
 
     assert forbidden.isdisjoint(FEATURE_COLUMNS)
-    assert "logit" in FEATURE_COLUMNS
-    assert "sample_type" in FEATURE_COLUMNS
+    assert FEATURE_COLUMNS == CONSERVATIVE_FEATURE_COLUMNS
+    assert "nn_logit" in FEATURE_COLUMNS
+    assert "sample_type" not in FEATURE_COLUMNS
+    assert "entropy" not in FEATURE_COLUMNS
 
 
 def test_build_mode_feature_frame_emits_finite_features() -> None:
@@ -141,6 +144,19 @@ def test_build_mode_feature_frame_emits_finite_features() -> None:
     assert np.isfinite(numeric.to_numpy()).all()
     assert set(features["sample_type"]) == {"base_center_hidden"}
     assert features.groupby("window_id")["is_best_mode"].sum().tolist() == [1, 1]
+    for column in (
+        "nn_logit",
+        "nn_prob",
+        "nn_rank",
+        "mode_mean_tvt",
+        "mean_abs_to_b2",
+        "A_density_mean",
+        "A_uncertainty",
+        "GR_nan_ratio",
+        "slope_p95",
+        "roughness",
+    ):
+        assert column in features.columns
 
 
 def test_build_mode_feature_frame_accepts_parquet_style_nested_arrays() -> None:
@@ -225,6 +241,24 @@ def test_ranker_logits_plug_into_overlap_aggregation() -> None:
     assert stitched["pred_tvt"].tolist() == pytest.approx([100.0, 101.0])
 
 
+def test_ranker_logits_can_blend_conservatively_with_nn_logits() -> None:
+    windows = _windows_for_wells(["a"])
+    features = build_mode_feature_frame(
+        windows,
+        _hidden_rows_for_wells(["a"]),
+        _gr_context(["a"]),
+        history_steps=1,
+        future_steps=2,
+    )
+    features["predicted_error_ft"] = [10.0, 0.0]
+
+    blended = apply_ranker_logits(windows, features, tau_ft=5.0, beta=0.5)
+    logits = blended.iloc[0]["logits"]
+
+    assert logits.tolist() == pytest.approx([-0.5, 1.5])
+    assert int(np.argmax(logits)) == 1
+
+
 def test_ranker_logits_keep_window_ids_after_filtering() -> None:
     wells = ["a", "b"]
     windows = _windows_for_wells(wells)
@@ -261,7 +295,7 @@ def test_run_ranker_from_frames_writes_artifacts(tmp_path: Path) -> None:
         seed=5,
         valid_fraction=0.5,
         ranker_params={"iterations": 40, "depth": 2, "od_wait": 10},
-        tau_grid=(5.0,),
+        beta_grid=(0.5,),
     )
 
     assert (tmp_path / "ranker_mode_features.parquet").exists()

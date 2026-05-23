@@ -23,49 +23,43 @@ from .stitch import (
     evaluate_with_b2_fallback,
 )
 
-CAT_FEATURES: tuple[str, ...] = ("sample_type",)
+CAT_FEATURES: tuple[str, ...] = ()
 
-FEATURE_COLUMNS: list[str] = [
-    "logit",
-    "prob",
-    "logit_rank",
+CONSERVATIVE_FEATURE_COLUMNS: list[str] = [
+    "nn_logit",
+    "nn_prob",
+    "nn_rank",
     "logit_gap_to_top1",
-    "entropy",
     "mode_index",
-    "path_mean",
-    "path_std",
-    "path_start",
-    "path_end",
-    "path_delta",
-    "slope_mean",
-    "slope_abs_mean",
-    "slope_std",
-    "curvature_abs_mean",
-    "base_mae",
-    "base_p95_abs",
-    "base_endpoint_abs",
-    "b2_mae",
-    "b2_p95_abs",
-    "b2_endpoint_abs",
-    "a_p50_mae",
-    "a_p50_p95_abs",
-    "a_p50_endpoint_abs",
-    "a_band_inside_frac",
-    "a_band_width_mean",
-    "base_b2_gap_mean",
-    "b2_danger_mean",
-    "gr_score",
+    "mode_mean_tvt",
+    "mode_std_tvt",
     "gr_corr",
     "dgr_corr",
-    "gr_mad",
-    "gr_finite_frac",
     "ncc8",
     "ncc15",
     "ncc25",
-    "start_step",
-    "hidden_pos_frac",
-    "sample_type",
+    "gr_mad",
+    "gr_finite_frac",
+    "mean_abs_to_b2",
+    "p95_abs_to_b2",
+    "endpoint_abs_to_b2",
+    "mean_abs_to_base",
+    "mean_abs_to_A_p50",
+    "inside_A_band_frac",
+    "A_density_mean",
+    "slope_mean",
+    "slope_p95",
+    "curvature_mean",
+    "roughness",
+    "window_hidden_pos_frac",
+    "GR_nan_ratio",
+    "B2_danger",
+    "A_uncertainty",
+    "base_b2_gap",
 ]
+
+FEATURE_COLUMNS: list[str] = list(CONSERVATIVE_FEATURE_COLUMNS)
+DEFAULT_RANKER_BETA_GRID: tuple[float, ...] = (0.25, 0.5, 1.0)
 
 DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
     "loss_function": "RMSE",
@@ -203,6 +197,22 @@ def _endpoint_abs_diff(path: np.ndarray, ref: np.ndarray) -> float:
     if not np.isfinite(path[-1]) or not np.isfinite(ref[-1]):
         return 0.0
     return float(abs(path[-1] - ref[-1]))
+
+
+def _density_mean_from_quantiles(
+    path: np.ndarray,
+    p50: np.ndarray,
+    p10: np.ndarray,
+    p90: np.ndarray,
+) -> float:
+    mask = np.isfinite(path) & np.isfinite(p50)
+    if not mask.any():
+        return 0.0
+    width = np.abs(p90 - p10)
+    sigma = np.where(np.isfinite(width), np.maximum(width / 2.563, 1.0), 2.0)
+    z = (path - p50) / sigma
+    density = np.exp(-0.5 * np.square(z))
+    return _mean(density[mask])
 
 
 def _corr(a: np.ndarray, b: np.ndarray) -> float:
@@ -388,6 +398,20 @@ def build_mode_feature_frame(
                 & (path >= np.minimum(a_p10, a_p90))
                 & (path <= np.maximum(a_p10, a_p90))
             )
+            a_band_inside_frac = float(inside_band.mean()) if len(inside_band) else 0.0
+            a_uncertainty = _mean(np.abs(a_p90 - a_p10))
+            base_b2_gap = _mean(np.abs(base - b2))
+            b2_danger_mean = _mean(b2_danger)
+            gr_nan_ratio = float(1.0 - gr["gr_finite_frac"])
+            slope_p95 = _p95_abs(slope)
+            curvature_mean = _mean(curvature)
+            roughness = _mean(np.abs(curvature))
+            a_density_mean = _density_mean_from_quantiles(path, a_p50, a_p10, a_p90)
+            mean_abs_to_base = _mean_abs_diff(path, base)
+            mean_abs_to_b2 = _mean_abs_diff(path, b2)
+            mean_abs_to_a_p50 = _mean_abs_diff(path, a_p50)
+            p95_abs_to_b2 = _p95_abs_diff(path, b2)
+            endpoint_abs_to_b2 = _endpoint_abs_diff(path, b2)
             item = {
                 "well_id": well_id,
                 "window_id": window_id,
@@ -411,26 +435,45 @@ def build_mode_feature_frame(
                 "slope_abs_mean": _mean(np.abs(slope)),
                 "slope_std": float(np.nanstd(slope)) if np.isfinite(slope).any() else 0.0,
                 "curvature_abs_mean": _mean(np.abs(curvature)),
-                "base_mae": _mean_abs_diff(path, base),
+                "base_mae": mean_abs_to_base,
                 "base_p95_abs": _p95_abs_diff(path, base),
                 "base_endpoint_abs": _endpoint_abs_diff(path, base),
-                "b2_mae": _mean_abs_diff(path, b2),
-                "b2_p95_abs": _p95_abs_diff(path, b2),
-                "b2_endpoint_abs": _endpoint_abs_diff(path, b2),
-                "a_p50_mae": _mean_abs_diff(path, a_p50),
+                "b2_mae": mean_abs_to_b2,
+                "b2_p95_abs": p95_abs_to_b2,
+                "b2_endpoint_abs": endpoint_abs_to_b2,
+                "a_p50_mae": mean_abs_to_a_p50,
                 "a_p50_p95_abs": _p95_abs_diff(path, a_p50),
                 "a_p50_endpoint_abs": _endpoint_abs_diff(path, a_p50),
-                "a_band_inside_frac": float(inside_band.mean()) if len(inside_band) else 0.0,
-                "a_band_width_mean": _mean(np.abs(a_p90 - a_p10)),
-                "base_b2_gap_mean": _mean(np.abs(base - b2)),
-                "b2_danger_mean": _mean(b2_danger),
+                "a_band_inside_frac": a_band_inside_frac,
+                "a_band_width_mean": a_uncertainty,
+                "base_b2_gap_mean": base_b2_gap,
+                "b2_danger_mean": b2_danger_mean,
                 "start_step": int(row.start_step),
                 "hidden_pos_frac": hidden_pos_frac,
+                "nn_logit": float(logits[mode_index]),
+                "nn_prob": float(probs[mode_index]),
+                "nn_rank": int(logit_ranks[mode_index]),
+                "mode_mean_tvt": _mean(path),
+                "mode_std_tvt": float(np.nanstd(path)) if np.isfinite(path).any() else 0.0,
+                "mean_abs_to_b2": mean_abs_to_b2,
+                "p95_abs_to_b2": p95_abs_to_b2,
+                "endpoint_abs_to_b2": endpoint_abs_to_b2,
+                "mean_abs_to_base": mean_abs_to_base,
+                "mean_abs_to_A_p50": mean_abs_to_a_p50,
+                "inside_A_band_frac": a_band_inside_frac,
+                "A_density_mean": a_density_mean,
+                "slope_p95": slope_p95,
+                "curvature_mean": curvature_mean,
+                "roughness": roughness,
+                "window_hidden_pos_frac": hidden_pos_frac,
+                "GR_nan_ratio": gr_nan_ratio,
+                "B2_danger": b2_danger_mean,
+                "A_uncertainty": a_uncertainty,
+                "base_b2_gap": base_b2_gap,
                 **gr,
             }
             for column in FEATURE_COLUMNS:
-                if column != "sample_type":
-                    item[column] = float(_finite_or_zero(np.asarray([item[column]]))[0])
+                item[column] = float(_finite_or_zero(np.asarray([item[column]]))[0])
             rows.append(item)
     return pd.DataFrame(rows)
 
@@ -485,6 +528,18 @@ def _predict_ranker_errors(model: Any, features: pd.DataFrame) -> np.ndarray:
     return np.expm1(model.predict(features[list(FEATURE_COLUMNS)])).astype(np.float32)
 
 
+def _zscore(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return np.zeros_like(arr, dtype=np.float32)
+    mean = float(np.mean(arr[finite]))
+    std = float(np.std(arr[finite]))
+    if std < 1e-8:
+        return np.zeros_like(arr, dtype=np.float32)
+    return ((arr - mean) / std).astype(np.float32)
+
+
 def _ranker_oof_metrics(oof: pd.DataFrame) -> dict[str, float]:
     best_rows = (
         oof.sort_values(["window_id", "predicted_error_ft"])
@@ -526,6 +581,8 @@ def _write_crossfit_report(
         f"  oof_rows: {summary['oof_rows']}",
         f"  wells: {summary['wells']}",
         f"  folds: {summary['folds']}",
+        f"  variant: {summary['variant']}",
+        f"  beta_grid: {summary['beta_grid']}",
         "",
         "oof metrics:",
         json.dumps(summary["oof_metrics"], indent=2),
@@ -581,6 +638,7 @@ def run_ranker_crossfit_from_frames(
         valid = features[features["well_id"].isin(valid_wells)].copy()
         valid["fold"] = int(fold["fold"])
         valid["predicted_error_ft"] = _predict_ranker_errors(model, valid)
+        valid["ranker_score"] = -valid["predicted_error_ft"]
         valid["ranker_logit_t5"] = -valid["predicted_error_ft"] / 5.0
         oof_parts.append(valid)
         fold_summaries.append(
@@ -593,9 +651,18 @@ def run_ranker_crossfit_from_frames(
         )
     oof = pd.concat(oof_parts, ignore_index=True)
     oof["ranker_prob_t5"] = 0.0
+    for beta in DEFAULT_RANKER_BETA_GRID:
+        oof[f"combined_logit_b{beta:g}"] = 0.0
+        oof[f"combined_prob_b{beta:g}"] = 0.0
     for _, index in oof.groupby("window_id").groups.items():
         local = oof.loc[index, "ranker_logit_t5"].to_numpy(dtype=np.float32)
         oof.loc[index, "ranker_prob_t5"] = _softmax_np(local)
+        ranker_z = _zscore(oof.loc[index, "ranker_score"].to_numpy(dtype=np.float32))
+        nn_logits = oof.loc[index, "nn_logit"].to_numpy(dtype=np.float32)
+        for beta in DEFAULT_RANKER_BETA_GRID:
+            combined = (nn_logits + float(beta) * ranker_z).astype(np.float32)
+            oof.loc[index, f"combined_logit_b{beta:g}"] = combined
+            oof.loc[index, f"combined_prob_b{beta:g}"] = _softmax_np(combined)
     oof.to_parquet(run_path / "oof_ranker_logits.parquet", index=False)
     features.to_parquet(run_path / "crossfit_ranker_mode_features.parquet", index=False)
     summary: dict[str, Any] = {
@@ -604,6 +671,9 @@ def run_ranker_crossfit_from_frames(
         "wells": int(oof["well_id"].nunique()),
         "folds": int(n_folds),
         "seed": int(seed),
+        "variant": "conservative_regression",
+        "feature_columns": list(FEATURE_COLUMNS),
+        "beta_grid": list(DEFAULT_RANKER_BETA_GRID),
         "oof_metrics": _ranker_oof_metrics(oof),
         "fold_summaries": fold_summaries,
     }
@@ -619,6 +689,7 @@ def apply_ranker_logits(
     predictions: pd.DataFrame,
     *,
     tau_ft: float,
+    beta: float | None = None,
 ) -> pd.DataFrame:
     out = mode_windows.copy()
     pred_lookup = predictions.set_index(["window_id", "mode_id"])["predicted_error_ft"]
@@ -630,7 +701,12 @@ def apply_ranker_logits(
             key = (window_id, int(mode_index))
             value = pred_lookup.get(key, np.nan)
             errors.append(float(value) if np.isfinite(value) else 1e6)
-        new_logits.append((-np.asarray(errors, dtype=np.float32) / float(tau_ft)).astype(np.float32))
+        ranker_score = -np.asarray(errors, dtype=np.float32)
+        if beta is None:
+            values = (ranker_score / float(tau_ft)).astype(np.float32)
+        else:
+            values = (logits + float(beta) * _zscore(ranker_score)).astype(np.float32)
+        new_logits.append(values)
     out["logits"] = new_logits
     out["probs"] = [_softmax_np(values) for values in new_logits]
     return out
@@ -736,14 +812,14 @@ def _ranker_window_metrics(
     base_windows: pd.DataFrame,
     predictions: pd.DataFrame,
     *,
-    tau_grid: tuple[float, ...],
+    beta_grid: tuple[float, ...],
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "nn_logits": _window_metrics_from_mode_windows(base_windows)
     }
-    for tau in tau_grid:
-        reranked = apply_ranker_logits(base_windows, predictions, tau_ft=tau)
-        metrics[f"ranker_tau_{tau:g}"] = _window_metrics_from_mode_windows(reranked)
+    for beta in beta_grid:
+        reranked = apply_ranker_logits(base_windows, predictions, tau_ft=5.0, beta=beta)
+        metrics[f"ranker_beta_{beta:g}"] = _window_metrics_from_mode_windows(reranked)
     return metrics
 
 
@@ -757,7 +833,7 @@ def run_ranker_from_frames(
     seed: int = 42,
     valid_fraction: float = 0.35,
     ranker_params: dict[str, Any] | None = None,
-    tau_grid: tuple[float, ...] = (2.5, 5.0, 10.0),
+    beta_grid: tuple[float, ...] = DEFAULT_RANKER_BETA_GRID,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
@@ -787,13 +863,14 @@ def run_ranker_from_frames(
     )
     model.save_model(str(run_path / "checkpoints" / "mtp_ranker_catboost.cbm"))
     features["predicted_error_ft"] = np.expm1(model.predict(features[list(FEATURE_COLUMNS)]))
+    features["ranker_score"] = -features["predicted_error_ft"]
     features.to_parquet(run_path / "ranker_predictions.parquet", index=False)
 
     valid_windows = mode_windows[mode_windows["well_id"].astype(str).isin(valid_wells)].copy()
     valid_features = features[features["well_id"].isin(valid_wells)].copy()
     valid_hidden = hidden_rows_all[hidden_rows_all["well_id"].astype(str).isin(valid_wells)].copy()
     window_metrics = _ranker_window_metrics(
-        valid_windows, valid_features, tau_grid=tau_grid
+        valid_windows, valid_features, beta_grid=beta_grid
     )
     if gr_context:
         for beta in (0.25, 0.5, 1.0, 2.0):
@@ -838,8 +915,10 @@ def run_ranker_from_frames(
                 strategy="weighted",
             )
     wrote_top1 = False
-    for tau in tau_grid:
-        ranker_windows = apply_ranker_logits(valid_windows, valid_features, tau_ft=tau)
+    for beta in beta_grid:
+        ranker_windows = apply_ranker_logits(
+            valid_windows, valid_features, tau_ft=5.0, beta=beta
+        )
         if not wrote_top1:
             candidate_steps["mtp_ranker_top1_overlap"] = aggregate_mode_windows(
                 ranker_windows,
@@ -848,13 +927,13 @@ def run_ranker_from_frames(
                 strategy="top1",
             )
             wrote_top1 = True
-        candidate_steps[f"mtp_ranker_weighted_t{tau:g}"] = aggregate_mode_windows(
+        candidate_steps[f"mtp_ranker_weighted_b{beta:g}"] = aggregate_mode_windows(
             ranker_windows,
             history_steps=cfg.window.history_steps,
             future_steps=cfg.window.future_steps,
             strategy="weighted",
         )
-        candidate_steps[f"mtp_ranker_top3_t{tau:g}"] = aggregate_mode_windows(
+        candidate_steps[f"mtp_ranker_top3_b{beta:g}"] = aggregate_mode_windows(
             ranker_windows,
             history_steps=cfg.window.history_steps,
             future_steps=cfg.window.future_steps,

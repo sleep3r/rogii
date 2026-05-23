@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     track_parser.add_argument("--ranker-logits", type=Path)
     track_parser.add_argument("--tau-ft", type=float, default=5.0)
+    track_parser.add_argument("--ranker-beta", type=float, default=0.5)
 
     track_audit_parser = sub.add_parser(
         "track-audit", help="Audit MTP tracker on ranker train/valid well splits"
@@ -65,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     track_audit_parser.add_argument("--overlap-penalty", type=float, default=0.10)
     track_audit_parser.add_argument("--max-modes-per-window", type=int, default=8)
     track_audit_parser.add_argument("--tau-ft", type=float, default=5.0)
+    track_audit_parser.add_argument("--ranker-beta", type=float, default=0.5)
     return parser
 
 
@@ -122,6 +124,7 @@ def main(argv: list[str] | None = None) -> None:
             logit_source=args.logit_source,
             ranker_logits=args.ranker_logits,
             tau_ft=args.tau_ft,
+            ranker_beta=args.ranker_beta,
         )
         return
     if args.command == "track-audit":
@@ -135,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
             overlap_penalty=args.overlap_penalty,
             max_modes_per_window=args.max_modes_per_window,
             tau_ft=args.tau_ft,
+            ranker_beta=args.ranker_beta,
         )
         return
     raise SystemExit(f"Unknown command: {args.command}")

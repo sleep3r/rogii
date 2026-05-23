@@ -565,6 +565,7 @@ def _subset_summary(
     wells: set[str],
     track_config: TrackConfig,
     tau_ft: float,
+    ranker_beta: float,
 ) -> dict[str, Any]:
     subset_windows = mode_windows[mode_windows["well_id"].astype(str).isin(wells)].copy()
     subset_hidden = hidden_rows_all[hidden_rows_all["well_id"].astype(str).isin(wells)].copy()
@@ -576,7 +577,7 @@ def _subset_summary(
         prefix="mtp_track_nn",
     )
     ranker_windows = apply_ranker_logits(
-        subset_windows, ranker_predictions, tau_ft=tau_ft
+        subset_windows, ranker_predictions, tau_ft=tau_ft, beta=ranker_beta
     )
     ranker = _run_tracker_metrics_only(
         cfg=cfg,
@@ -655,6 +656,7 @@ def run_track_split_audit_from_frames(
     ranker_valid_wells: set[str],
     track_config: TrackConfig,
     tau_ft: float = 5.0,
+    ranker_beta: float = 0.5,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
@@ -670,6 +672,7 @@ def run_track_split_audit_from_frames(
             wells=all_wells,
             track_config=track_config,
             tau_ft=tau_ft,
+            ranker_beta=ranker_beta,
         ),
         "ranker_train": _subset_summary(
             cfg=cfg,
@@ -679,6 +682,7 @@ def run_track_split_audit_from_frames(
             wells=set(ranker_train_wells),
             track_config=track_config,
             tau_ft=tau_ft,
+            ranker_beta=ranker_beta,
         ),
         "ranker_valid": _subset_summary(
             cfg=cfg,
@@ -688,6 +692,7 @@ def run_track_split_audit_from_frames(
             wells=set(ranker_valid_wells),
             track_config=track_config,
             tau_ft=tau_ft,
+            ranker_beta=ranker_beta,
         ),
     }
     train_gain = subsets["ranker_train"]["ranker_gain_vs_b2"]
@@ -710,6 +715,7 @@ def run_track_split_audit_from_frames(
             "overlap_penalty": track_config.overlap_penalty,
             "max_modes_per_window": track_config.max_modes_per_window,
             "tau_ft": tau_ft,
+            "ranker_beta": ranker_beta,
         },
         "subsets": subsets,
         "decision": decision,
@@ -730,6 +736,7 @@ def run_track_split_audit(
     overlap_penalty: float = 0.10,
     max_modes_per_window: int = 8,
     tau_ft: float = 5.0,
+    ranker_beta: float = 0.5,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     cfg = _load_run_config(run_path)
@@ -756,6 +763,7 @@ def run_track_split_audit(
             max_modes_per_window=max_modes_per_window,
         ),
         tau_ft=tau_ft,
+        ranker_beta=ranker_beta,
     )
     print(json.dumps(_json_safe(summary["decision"]), indent=2), flush=True)
     return summary
@@ -768,6 +776,7 @@ def apply_tracker_logit_source(
     run_dir: str | Path,
     ranker_logits: str | Path | None,
     tau_ft: float,
+    ranker_beta: float,
 ) -> tuple[pd.DataFrame, str]:
     run_path = Path(run_dir)
     windows = _ensure_window_ids(normalize_mode_windows(mode_windows))
@@ -778,7 +787,9 @@ def apply_tracker_logit_source(
         if not ranker_path.exists():
             return windows, "nn"
         return (
-            apply_ranker_logits(windows, pd.read_parquet(ranker_path), tau_ft=tau_ft),
+            apply_ranker_logits(
+                windows, pd.read_parquet(ranker_path), tau_ft=tau_ft, beta=ranker_beta
+            ),
             "ranker",
         )
     if logit_source == "ranker_oof":
@@ -788,7 +799,9 @@ def apply_tracker_logit_source(
         if not ranker_path.exists():
             raise FileNotFoundError(f"Missing ranker_oof logits: {ranker_path}")
         return (
-            apply_ranker_logits(windows, pd.read_parquet(ranker_path), tau_ft=tau_ft),
+            apply_ranker_logits(
+                windows, pd.read_parquet(ranker_path), tau_ft=tau_ft, beta=ranker_beta
+            ),
             "ranker_oof",
         )
     raise ValueError("logit_source must be 'ranker', 'ranker_oof', or 'nn'")
@@ -805,6 +818,7 @@ def run_tracker(
     logit_source: str = "ranker",
     ranker_logits: str | Path | None = None,
     tau_ft: float = 5.0,
+    ranker_beta: float = 0.5,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
     cfg = _load_run_config(run_path)
@@ -819,6 +833,7 @@ def run_tracker(
         run_dir=run_path,
         ranker_logits=ranker_logits,
         tau_ft=tau_ft,
+        ranker_beta=ranker_beta,
     )
     well_ids = set(mode_windows["well_id"].astype(str))
     hidden_rows = _load_hidden_rows(cfg, well_ids)
@@ -837,6 +852,7 @@ def run_tracker(
     )
     summary["tracker"]["logit_source"] = logit_source
     summary["tracker"]["tau_ft"] = tau_ft
+    summary["tracker"]["ranker_beta"] = ranker_beta
     (run_path / "track_metrics.json").write_text(
         json.dumps(_json_safe(summary), indent=2), encoding="utf-8"
     )

@@ -10,6 +10,7 @@ SEED ?= 42
 LOGIT_SOURCE ?= ranker
 RANKER_LOGITS ?=
 TAU_FT ?= 5.0
+RANKER_BETA ?= 0.5
 COPY_SOURCE ?= ../old/data
 COPY_TARGET ?= data
 CODEBASE_BUNDLE ?= artifacts/codebase_bundle.md
@@ -46,7 +47,7 @@ rank-crossfit:
 mtp-ranker-crossfit: rank-crossfit
 
 track:
-	$(UV) run --extra dev python -m mtpnet.cli track --run-dir $(RUN_DIR) --logit-source $(LOGIT_SOURCE) --tau-ft $(TAU_FT) $(if $(RANKER_LOGITS),--ranker-logits $(RANKER_LOGITS),)
+	$(UV) run --extra dev python -m mtpnet.cli track --run-dir $(RUN_DIR) --logit-source $(LOGIT_SOURCE) --tau-ft $(TAU_FT) --ranker-beta $(RANKER_BETA) $(if $(RANKER_LOGITS),--ranker-logits $(RANKER_LOGITS),)
 
 track-audit:
 	$(UV) run --extra dev python -m mtpnet.cli track-audit --run-dir $(RUN_DIR)
