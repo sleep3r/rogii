@@ -97,6 +97,10 @@ class LossConfig:
     diversity_margin_bins: float = 0.0
     soft_prob_alpha: float = 0.0
     soft_prob_tau_bins: float = 2.0
+    top3_margin_alpha: float = 0.0
+    top3_margin: float = 0.0
+    continuation_alpha: float = 0.0
+    continuation_tau_bins: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -359,6 +363,18 @@ def load_config(path: str | Path) -> MTPConfig:
         ),
         soft_prob_tau_bins=float(
             loss_raw.get("soft_prob_tau_bins", default_loss.soft_prob_tau_bins)
+        ),
+        top3_margin_alpha=float(
+            loss_raw.get("top3_margin_alpha", default_loss.top3_margin_alpha)
+        ),
+        top3_margin=float(
+            loss_raw.get("top3_margin", default_loss.top3_margin)
+        ),
+        continuation_alpha=float(
+            loss_raw.get("continuation_alpha", default_loss.continuation_alpha)
+        ),
+        continuation_tau_bins=float(
+            loss_raw.get("continuation_tau_bins", default_loss.continuation_tau_bins)
         ),
     )
 

@@ -170,6 +170,30 @@ def test_v1_prior_and_soft_probability_config_loads(tmp_path: Path) -> None:
     assert cfg.loss.soft_prob_tau_bins == pytest.approx(2.0)
 
 
+def test_train_time_selection_loss_knobs_are_configurable(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "loss": {
+                    "top3_margin_alpha": 0.05,
+                    "top3_margin": 0.1,
+                    "continuation_alpha": 0.02,
+                    "continuation_tau_bins": 3.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    assert cfg.loss.top3_margin_alpha == pytest.approx(0.05)
+    assert cfg.loss.top3_margin == pytest.approx(0.1)
+    assert cfg.loss.continuation_alpha == pytest.approx(0.02)
+    assert cfg.loss.continuation_tau_bins == pytest.approx(3.0)
+
+
 def test_mtp_v1_prior_conditioned_config_loads() -> None:
     cfg = load_config(Path("configs/mtp_v1_prior_conditioned.yml"))
 
@@ -238,6 +262,17 @@ def test_mtp_v2_anchor_dropout_config_loads() -> None:
     assert cfg.run.name == "mtp_v2_anchor_dropout"
     assert cfg.augmentation.enabled is True
     assert cfg.augmentation.drop_all_priors_prob > 0.0
+    assert "anchor_sdf" in cfg.window.channels
+
+
+def test_mtp_v2_train_time_selection_config_loads() -> None:
+    cfg = load_config(Path("configs/mtp_v2_train_time_selection.yml"))
+
+    assert cfg.run.name == "mtp_v2_train_time_selection"
+    assert cfg.loss.soft_prob_alpha == pytest.approx(0.2)
+    assert cfg.loss.top3_margin_alpha == pytest.approx(0.05)
+    assert cfg.loss.continuation_alpha == pytest.approx(0.02)
+    assert cfg.augmentation.enabled is True
     assert "anchor_sdf" in cfg.window.channels
 
 

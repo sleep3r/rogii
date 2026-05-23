@@ -862,6 +862,10 @@ def write_geometry_report(
         f"  diversity_lambda: {_metric_value(metrics, ('loss', 'diversity_lambda'))}",
         f"  soft_prob_alpha: {_metric_value(metrics, ('loss', 'soft_prob_alpha'))}",
         f"  soft_prob_tau_bins: {_metric_value(metrics, ('loss', 'soft_prob_tau_bins'))}",
+        f"  top3_margin_alpha: {_metric_value(metrics, ('loss', 'top3_margin_alpha'))}",
+        f"  top3_margin: {_metric_value(metrics, ('loss', 'top3_margin'))}",
+        f"  continuation_alpha: {_metric_value(metrics, ('loss', 'continuation_alpha'))}",
+        f"  continuation_tau_bins: {_metric_value(metrics, ('loss', 'continuation_tau_bins'))}",
         "  raw_path_oob_frac_before_bound: "
         f"{valid.get('raw_path_oob_frac_before_bound', 'n/a')}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
@@ -943,8 +947,16 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             optimizer.zero_grad(set_to_none=True)
             x = batch["x"].to(device)
             target = batch["target_bins"].to(device)
+            history_bins = batch["history_bins"].to(device)
             paths, logits = model(x)
-            loss, _ = mtp_loss(paths, logits, target, cfg.loss, epoch=epoch)
+            loss, _ = mtp_loss(
+                paths,
+                logits,
+                target,
+                cfg.loss,
+                epoch=epoch,
+                history_bins=history_bins,
+            )
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
@@ -1061,6 +1073,10 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             "diversity_margin_bins": cfg.loss.diversity_margin_bins,
             "soft_prob_alpha": cfg.loss.soft_prob_alpha,
             "soft_prob_tau_bins": cfg.loss.soft_prob_tau_bins,
+            "top3_margin_alpha": cfg.loss.top3_margin_alpha,
+            "top3_margin": cfg.loss.top3_margin,
+            "continuation_alpha": cfg.loss.continuation_alpha,
+            "continuation_tau_bins": cfg.loss.continuation_tau_bins,
         },
         "priors": _json_safe_config(cfg)["priors"],
         "augmentation": _json_safe_config(cfg)["augmentation"],

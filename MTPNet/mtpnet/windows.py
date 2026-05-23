@@ -406,11 +406,14 @@ class WindowDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, object]:
         sample = self.samples[index]
+        history_bins = _target_bins(sample.history_tvt, sample.crop_tvt)
+        history_bins[~np.isfinite(sample.history_tvt)] = np.nan
         return {
             "x": torch.from_numpy(sample.x).float(),
             "target_bins": torch.from_numpy(sample.target_bins).float(),
             "target_tvt": torch.from_numpy(sample.target_tvt).float(),
             "crop_tvt": torch.from_numpy(sample.crop_tvt).float(),
+            "history_bins": torch.from_numpy(history_bins).float(),
             "well_id": sample.well_id,
             "start_step": sample.start_step,
             "sample_type": sample.sample_type,

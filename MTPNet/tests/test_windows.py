@@ -5,7 +5,7 @@ import pytest
 from mtpnet.config import WindowConfig
 from mtpnet.heatmap import build_channels
 from mtpnet.priors import PriorTables
-from mtpnet.windows import build_windows_for_well, split_wells
+from mtpnet.windows import WindowDataset, build_windows_for_well, split_wells
 
 
 def synthetic_horizontal(n: int = 160) -> pd.DataFrame:
@@ -43,6 +43,27 @@ def test_build_windows_shape_and_metadata() -> None:
     assert sample.crop_tvt.shape == (32,)
     assert sample.well_id == "well_a"
     assert np.isfinite(sample.x).all()
+
+
+def test_window_dataset_emits_history_bins_for_continuation_loss() -> None:
+    cfg = WindowConfig(
+        rows_per_step=4,
+        history_steps=4,
+        future_steps=6,
+        vertical_bins=32,
+        vertical_radius_ft=60.0,
+        stride_steps=2,
+        max_windows_per_well=1,
+    )
+    sample = build_windows_for_well(
+        "well_a", synthetic_horizontal(), synthetic_typewell(), cfg
+    )[0]
+
+    item = WindowDataset([sample])[0]
+
+    assert "history_bins" in item
+    assert item["history_bins"].shape == (cfg.history_steps,)
+    assert np.isfinite(item["history_bins"].numpy()).all()
 
 
 def test_typewell_crop_uses_regular_vertical_radius_grid() -> None:

@@ -152,3 +152,57 @@ def test_mtp_loss_soft_probability_calibration_prefers_error_order() -> None:
     assert aligned_loss.item() < reversed_loss.item()
     aligned_loss.backward()
     assert aligned_logits.grad is not None
+
+
+def test_mtp_loss_top3_margin_penalizes_best_mode_outside_top3() -> None:
+    target = torch.tensor([[0.0, 0.0]])
+    pred = torch.tensor(
+        [[[0.0, 0.0], [5.0, 5.0], [6.0, 6.0], [7.0, 7.0], [8.0, 8.0]]],
+        requires_grad=True,
+    )
+    outside_top3_logits = torch.tensor([[0.0, 4.0, 3.0, 2.0, 1.0]], requires_grad=True)
+    inside_top3_logits = torch.tensor([[3.0, 4.0, 2.0, 1.0, 0.0]], requires_grad=True)
+    cfg = LossConfig(
+        alpha_cls=0.0,
+        smooth_lambda=0.0,
+        top3_margin_alpha=0.5,
+        top3_margin=0.0,
+    )
+
+    outside_loss, outside_metrics = mtp_loss(
+        pred, outside_top3_logits, target, cfg, epoch=1
+    )
+    inside_loss, inside_metrics = mtp_loss(
+        pred, inside_top3_logits, target, cfg, epoch=1
+    )
+
+    assert outside_metrics["top3_margin_loss"] > 0.0
+    assert inside_metrics["top3_margin_loss"] == pytest.approx(0.0)
+    assert outside_loss.item() > inside_loss.item()
+
+
+def test_mtp_loss_continuation_probability_prefers_smooth_history_extension() -> None:
+    target = torch.tensor([[2.0, 2.0]])
+    pred = torch.tensor(
+        [[[2.0, 2.0], [8.0, 8.0], [20.0, 20.0]]],
+        requires_grad=True,
+    )
+    aligned_logits = torch.tensor([[3.0, 0.0, -3.0]], requires_grad=True)
+    reversed_logits = torch.tensor([[-3.0, 0.0, 3.0]], requires_grad=True)
+    history_bins = torch.tensor([[0.0, 1.0]])
+    cfg = LossConfig(
+        alpha_cls=0.0,
+        smooth_lambda=0.0,
+        continuation_alpha=0.5,
+        continuation_tau_bins=2.0,
+    )
+
+    aligned_loss, aligned_metrics = mtp_loss(
+        pred, aligned_logits, target, cfg, epoch=1, history_bins=history_bins
+    )
+    reversed_loss, reversed_metrics = mtp_loss(
+        pred, reversed_logits, target, cfg, epoch=1, history_bins=history_bins
+    )
+
+    assert aligned_metrics["continuation_loss"] < reversed_metrics["continuation_loss"]
+    assert aligned_loss.item() < reversed_loss.item()

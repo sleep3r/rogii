@@ -63,6 +63,51 @@ def _soft_probability_loss(errors: Tensor, logits: Tensor, tau_bins: float) -> T
     return F.kl_div(F.log_softmax(logits, dim=1), target_prob, reduction="batchmean")
 
 
+def _top3_margin_loss(
+    logits: Tensor, best_k: Tensor, *, margin: float = 0.0, top_k: int = 3
+) -> Tensor:
+    k_modes = logits.shape[1]
+    if k_modes <= top_k:
+        return logits.new_tensor(0.0)
+    batch_index = torch.arange(logits.shape[0], device=logits.device)
+    best_logit = logits[batch_index, best_k]
+    competitors = logits.clone()
+    competitors[batch_index, best_k] = torch.finfo(logits.dtype).min
+    kth_competitor = torch.topk(competitors, k=top_k, dim=1).values[:, -1]
+    return F.relu(kth_competitor + float(margin) - best_logit).mean()
+
+
+def _continuation_probability_loss(
+    pred: Tensor,
+    logits: Tensor,
+    history_bins: Tensor | None,
+    tau_bins: float,
+) -> Tensor:
+    if history_bins is None or history_bins.numel() == 0:
+        return logits.new_tensor(0.0)
+    history = history_bins.to(device=pred.device, dtype=pred.dtype)
+    last = history[:, -1]
+    if history.shape[1] >= 2:
+        prev = history[:, -2]
+        slope = torch.where(torch.isfinite(prev), last - prev, torch.zeros_like(last))
+    else:
+        slope = torch.zeros_like(last)
+    expected_first = last + slope
+    valid = torch.isfinite(expected_first)
+    if not bool(valid.any()):
+        return logits.new_tensor(0.0)
+    continuation_error = torch.abs(
+        pred[valid, :, 0] - expected_first[valid, None]
+    )
+    tau = max(float(tau_bins), 1e-6)
+    target_prob = F.softmax(-continuation_error.detach() / tau, dim=1)
+    return F.kl_div(
+        F.log_softmax(logits[valid], dim=1),
+        target_prob,
+        reduction="batchmean",
+    )
+
+
 def mtp_loss(
     pred: Tensor,
     logits: Tensor,
@@ -70,6 +115,7 @@ def mtp_loss(
     cfg: LossConfig,
     *,
     epoch: int | None = None,
+    history_bins: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, Any]]:
     errors = _path_error(pred, target, cfg.path_loss)
     best_k = errors.argmin(dim=1)
@@ -83,12 +129,20 @@ def mtp_loss(
     smooth_loss = _smoothness(best_paths)
     entropy_loss = _entropy(logits)
     diversity_loss = _diversity_margin(pred, cfg.diversity_margin_bins)
+    top3_margin_loss = _top3_margin_loss(
+        logits, best_k, margin=cfg.top3_margin, top_k=3
+    )
+    continuation_loss = _continuation_probability_loss(
+        pred, logits, history_bins, cfg.continuation_tau_bins
+    )
     alpha_cls = _effective_alpha_cls(cfg, epoch)
     entropy_lambda = _effective_entropy_lambda(cfg, epoch)
     loss = (
         reg_loss
         + alpha_cls * cls_loss
         + cfg.soft_prob_alpha * soft_prob_loss
+        + cfg.top3_margin_alpha * top3_margin_loss
+        + cfg.continuation_alpha * continuation_loss
         + cfg.smooth_lambda * smooth_loss
         - entropy_lambda * entropy_loss
         + cfg.diversity_lambda * diversity_loss
@@ -98,6 +152,8 @@ def mtp_loss(
         "reg_loss": float(reg_loss.detach().cpu()),
         "cls_loss": float(cls_loss.detach().cpu()),
         "soft_prob_loss": float(soft_prob_loss.detach().cpu()),
+        "top3_margin_loss": float(top3_margin_loss.detach().cpu()),
+        "continuation_loss": float(continuation_loss.detach().cpu()),
         "smooth_loss": float(smooth_loss.detach().cpu()),
         "entropy_loss": float(entropy_loss.detach().cpu()),
         "diversity_loss": float(diversity_loss.detach().cpu()),
