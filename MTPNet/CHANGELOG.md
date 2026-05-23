@@ -19,6 +19,56 @@ run is treated as a candidate.
 
 ## 2026-05-23
 
+### EXP-MTPTRACK-V0 - Sequential multi-realization particle tracker
+
+- Command/config:
+  - `make track RUN_DIR=artifacts/mtp_v1_prior_conditioned`;
+  - logit source: `ranker`;
+  - tau: `5.0 ft`;
+  - `n_realizations=32`, `keep_top=32`;
+  - merge tolerance: `3.0 ft`;
+  - overlap penalty: `0.10`;
+  - max modes per window: `8`.
+- What changed:
+  - added `mtpnet.track` as the first sequential multi-realization tracker;
+  - tracker carries top particle realizations well-by-well through ordered MTP
+    windows;
+  - each window expands existing particles by K trajectory modes, scores by mode
+    probability and overlap consistency, merges near-duplicate trajectories, and
+    prunes to `keep_top`;
+  - added CLI/Make target `track`;
+  - writes `track_particles.parquet`, `track_row_predictions.parquet`,
+    `track_candidates.csv`, `track_metrics.json`, and `track_report.md`.
+- Result on full validation hidden rows:
+  - hidden rows: `758,962`;
+  - covered rows: `747,218`;
+  - coverage: `98.45%`;
+  - B2 baseline RMSE: `9.94786 ft`;
+  - base schema10 RMSE: `10.47385 ft`;
+  - raw `mtp_track_top1`: `9.83750 ft`;
+  - raw `mtp_track_weighted`: `9.83993 ft`;
+  - best guarded candidate `b2_plus_mtp_track_weighted_a0.3_clip20`:
+    `9.82704 ft`;
+  - gain vs B2: `+0.12082 ft`;
+  - covered RMSE: `9.74524 ft`;
+  - P95 shift vs B2: `1.69434 ft`;
+  - worst well RMSE: `43.70971 ft`.
+- Takeaway:
+  - sequential carry-forward tracking now exists and beats B2 by more than the
+    `+0.10 ft` threshold on this validation setup;
+  - raw tracker is already stronger than previous overlap/ranker stitched
+    candidates;
+  - strong GO threshold `<=9.80 ft` is close but not reached.
+- Decision:
+  - tracker infrastructure GO;
+  - performance GO for `+0.10 ft` blend criterion;
+  - next work should tune tracker/ranker jointly, improve coverage beyond
+    `98.45%`, and then validate with fold-safe OOF before submit packaging.
+- Verification:
+  - focused tracker tests: `5 passed`;
+  - full suite after implementation: `70 passed`;
+  - real tracker job completed and wrote all tracker artifacts.
+
 ### EXP-MTPRANKER-V0 - CatBoost mode selector over MTP hypotheses
 
 - Command/config:
