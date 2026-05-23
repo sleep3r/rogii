@@ -46,6 +46,9 @@ class AugmentationConfig:
     anchor_jitter_ft: tuple[float, ...] = ()
     anchor_swap_prob: float = 0.0
     anchor_swap: tuple[str, ...] = ()
+    wrong_anchor_prob: float = 0.0
+    wrong_anchor_shift_ft: tuple[float, ...] = ()
+    batch_mix: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,8 @@ class LossConfig:
     top3_margin: float = 0.0
     continuation_alpha: float = 0.0
     continuation_tau_bins: float = 3.0
+    contrastive_alpha: float = 0.0
+    contrastive_margin_bins: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -246,6 +251,24 @@ def load_config(path: str | Path) -> MTPConfig:
                 default_augmentation.anchor_swap,
             )
         ),
+        wrong_anchor_prob=float(
+            augmentation_raw.get(
+                "wrong_anchor_prob", default_augmentation.wrong_anchor_prob
+            )
+        ),
+        wrong_anchor_shift_ft=tuple(
+            float(value)
+            for value in _tuple(
+                augmentation_raw.get("wrong_anchor_shift_ft"),
+                default_augmentation.wrong_anchor_shift_ft,
+            )
+        ),
+        batch_mix={
+            str(key): float(value)
+            for key, value in dict(
+                augmentation_raw.get("batch_mix", default_augmentation.batch_mix)
+            ).items()
+        },
     )
 
     window_raw = _section(raw, "window")
@@ -377,6 +400,14 @@ def load_config(path: str | Path) -> MTPConfig:
         ),
         continuation_tau_bins=float(
             loss_raw.get("continuation_tau_bins", default_loss.continuation_tau_bins)
+        ),
+        contrastive_alpha=float(
+            loss_raw.get("contrastive_alpha", default_loss.contrastive_alpha)
+        ),
+        contrastive_margin_bins=float(
+            loss_raw.get(
+                "contrastive_margin_bins", default_loss.contrastive_margin_bins
+            )
         ),
     )
 

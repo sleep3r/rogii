@@ -248,9 +248,21 @@ def test_v2_anchor_dropout_config_loads(tmp_path: Path) -> None:
                         "A_weighted_mean",
                         "noisy_anchor",
                     ],
+                    "wrong_anchor_prob": 0.10,
+                    "wrong_anchor_shift_ft": [40.0, 80.0],
+                    "batch_mix": {
+                        "normal": 0.55,
+                        "no_priors": 0.20,
+                        "jittered_priors": 0.15,
+                        "wrong_priors": 0.10,
+                    },
                 },
                 "window": {
                     "channels": ["anchor_sdf", "b2_sdf", "a_density", "anchor_offset_value"]
+                },
+                "loss": {
+                    "contrastive_alpha": 0.02,
+                    "contrastive_margin_bins": 0.3,
                 },
             }
         ),
@@ -273,6 +285,16 @@ def test_v2_anchor_dropout_config_loads(tmp_path: Path) -> None:
         "A_weighted_mean",
         "noisy_anchor",
     )
+    assert cfg.augmentation.wrong_anchor_prob == pytest.approx(0.10)
+    assert cfg.augmentation.wrong_anchor_shift_ft == (40.0, 80.0)
+    assert cfg.augmentation.batch_mix == {
+        "normal": 0.55,
+        "no_priors": 0.20,
+        "jittered_priors": 0.15,
+        "wrong_priors": 0.10,
+    }
+    assert cfg.loss.contrastive_alpha == pytest.approx(0.02)
+    assert cfg.loss.contrastive_margin_bins == pytest.approx(0.3)
     assert "anchor_sdf" in cfg.window.channels
 
 
@@ -294,6 +316,18 @@ def test_mtp_v2_train_time_selection_config_loads() -> None:
     assert cfg.loss.continuation_alpha == pytest.approx(0.02)
     assert cfg.augmentation.enabled is True
     assert "anchor_sdf" in cfg.window.channels
+
+
+def test_mtp_v3_gr_forced_config_loads() -> None:
+    cfg = load_config(Path("configs/mtp_v3_gr_forced.yml"))
+
+    assert cfg.run.name == "mtp_v3_gr_forced"
+    assert cfg.augmentation.drop_all_priors_prob == pytest.approx(0.25)
+    assert cfg.augmentation.wrong_anchor_prob == pytest.approx(0.10)
+    assert cfg.augmentation.wrong_anchor_shift_ft == (40.0, 80.0)
+    assert cfg.augmentation.batch_mix["no_priors"] == pytest.approx(0.20)
+    assert cfg.loss.contrastive_alpha == pytest.approx(0.02)
+    assert cfg.loss.top3_margin_alpha == pytest.approx(0.05)
 
 
 def test_zero_k_wells_fails(tmp_path: Path) -> None:

@@ -315,6 +315,32 @@ def _epoch_progress_record(
     }
 
 
+def _contrastive_corruption_batch(x: torch.Tensor, cfg: MTPConfig) -> torch.Tensor:
+    corrupted = x.clone()
+    gr_channels = _channel_indices(
+        cfg, {"gr_diff", "abs_gr_diff", "gr_z_diff", "dgr_diff"}
+    )
+    for channel_index in gr_channels:
+        channel = corrupted[:, channel_index]
+        order = torch.rand(channel.shape, device=corrupted.device).argsort(dim=-1)
+        corrupted[:, channel_index] = torch.gather(channel, dim=-1, index=order)
+    anchor_channels = _channel_indices(cfg, ANCHOR_CHANNELS)
+    if anchor_channels:
+        height = max(int(corrupted.shape[2]), 1)
+        bin_size_ft = (2.0 * cfg.window.vertical_radius_ft) / max(height - 1, 1)
+        jitter_bins = 80.0 / max(bin_size_ft, 1e-6)
+        for channel_index in anchor_channels:
+            corrupted[:, channel_index] = corrupted[:, channel_index] - float(
+                jitter_bins / height
+            )
+    return corrupted
+
+
+def _best_mode_mae(paths: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    errors = torch.abs(paths - target[:, None, :]).mean(dim=-1)
+    return errors.min(dim=1).values
+
+
 def _bins_to_tvt(paths: np.ndarray, crop_tvt: np.ndarray) -> np.ndarray:
     paths_np = np.asarray(paths, dtype=np.float32)
     crops_np = np.asarray(crop_tvt, dtype=np.float32)
@@ -586,20 +612,82 @@ ANCHOR_CHANNELS = {
 B2_CHANNELS = {"b2_sdf", "b2_delta_value"}
 A_CHANNELS = {"a_p50_sdf", "a_density", "a_p10_p90_band"}
 ALL_PRIOR_CHANNELS = ANCHOR_CHANNELS | B2_CHANNELS | A_CHANNELS
+SDF_JITTER_CHANNELS = {"anchor_sdf", "base_sdf", "b2_sdf", "a_p50_sdf"}
+VALUE_JITTER_CHANNELS = {
+    "anchor_offset_value",
+    "base_offset_value",
+    "b2_delta_value",
+}
+BATCH_AUGMENTATION_VARIANTS = {
+    "normal",
+    "no_priors",
+    "jittered_priors",
+    "wrong_priors",
+}
 
 
-def _apply_anchor_jitter(x: np.ndarray, cfg: MTPConfig, jitter_ft: float) -> None:
+def _zero_channels(x: np.ndarray, indices: list[int]) -> None:
+    for channel_index in indices:
+        x[channel_index] = 0.0
+
+
+def _apply_path_jitter(
+    x: np.ndarray, cfg: MTPConfig, names: set[str], jitter_ft: float
+) -> None:
     if abs(float(jitter_ft)) < 1e-8:
         return
     height = max(int(x.shape[1]), 1)
     bin_size_ft = (2.0 * cfg.window.vertical_radius_ft) / max(height - 1, 1)
     jitter_bins = float(jitter_ft) / max(bin_size_ft, 1e-6)
-    for channel_index in _channel_indices(cfg, {"anchor_sdf", "base_sdf"}):
+    sdf_names = names.intersection(SDF_JITTER_CHANNELS)
+    for channel_index in _channel_indices(cfg, sdf_names):
         x[channel_index] = x[channel_index] - float(jitter_bins / height)
-    for channel_index in _channel_indices(
-        cfg, {"anchor_offset_value", "base_offset_value"}
-    ):
-        x[channel_index] = x[channel_index] + float(jitter_ft / cfg.window.vertical_radius_ft)
+    value_names = names.intersection(VALUE_JITTER_CHANNELS)
+    for channel_index in _channel_indices(cfg, value_names):
+        x[channel_index] = x[channel_index] + float(
+            jitter_ft / max(cfg.window.vertical_radius_ft, 1e-6)
+        )
+
+
+def _apply_anchor_jitter(x: np.ndarray, cfg: MTPConfig, jitter_ft: float) -> None:
+    _apply_path_jitter(x, cfg, ANCHOR_CHANNELS, jitter_ft)
+
+
+def _apply_wrong_anchor(
+    x: np.ndarray,
+    cfg: MTPConfig,
+    rng: np.random.Generator,
+    shifts_ft: tuple[float, ...],
+) -> None:
+    if not shifts_ft:
+        return
+    magnitude = float(rng.choice(np.asarray(shifts_ft, dtype=np.float32)))
+    sign = -1.0 if rng.random() < 0.5 else 1.0
+    _apply_anchor_jitter(x, cfg, sign * magnitude)
+
+
+def _apply_stochastic_prior_dropout(
+    x: np.ndarray,
+    cfg: MTPConfig,
+    rng: np.random.Generator,
+    *,
+    include_all_priors: bool = True,
+) -> bool:
+    aug = cfg.augmentation
+    all_prior = _channel_indices(cfg, ALL_PRIOR_CHANNELS)
+    if include_all_priors and all_prior and rng.random() < aug.drop_all_priors_prob:
+        _zero_channels(x, all_prior)
+        return True
+    anchor = _channel_indices(cfg, ANCHOR_CHANNELS)
+    b2 = _channel_indices(cfg, B2_CHANNELS)
+    a_density = _channel_indices(cfg, {"a_density"})
+    if rng.random() < aug.drop_anchor_sdf_prob:
+        _zero_channels(x, anchor)
+    if rng.random() < aug.drop_b2_sdf_prob:
+        _zero_channels(x, b2)
+    if rng.random() < aug.drop_a_density_prob:
+        _zero_channels(x, a_density)
+    return False
 
 
 def _swap_anchor_channels(x: np.ndarray, cfg: MTPConfig, target: str) -> None:
@@ -635,17 +723,56 @@ def _augment_prior_conditioning_samples(
         return samples
     rng = np.random.default_rng(cfg.train.seed + 2027)
     all_prior = _channel_indices(cfg, ALL_PRIOR_CHANNELS)
-    anchor = _channel_indices(cfg, ANCHOR_CHANNELS)
-    b2 = _channel_indices(cfg, B2_CHANNELS)
-    a_density = _channel_indices(cfg, {"a_density"})
+    if aug.batch_mix:
+        if any(variant not in BATCH_AUGMENTATION_VARIANTS for variant in aug.batch_mix):
+            raise ValueError(
+                f"augmentation.batch_mix supports {sorted(BATCH_AUGMENTATION_VARIANTS)}"
+            )
+        if any(weight <= 0.0 for weight in aug.batch_mix.values()):
+            raise ValueError("augmentation.batch_mix weights must be positive")
+        total_weight = float(sum(aug.batch_mix.values()))
+        total = len(samples)
+        mixed: list[WindowSample] = []
+        items = list(aug.batch_mix.items())
+        for index, (variant, weight) in enumerate(items):
+            count = (
+                total - len(mixed)
+                if index == len(items) - 1
+                else int(round(total * float(weight) / total_weight))
+            )
+            selected = rng.choice(
+                np.arange(len(samples)), size=count, replace=count > len(samples)
+            )
+            for sample_index in selected:
+                sample = samples[int(sample_index)]
+                x = sample.x.copy()
+                if variant == "no_priors":
+                    _zero_channels(x, all_prior)
+                else:
+                    if aug.anchor_swap and rng.random() < aug.anchor_swap_prob:
+                        target = str(rng.choice(np.asarray(aug.anchor_swap, dtype=object)))
+                        _swap_anchor_channels(x, cfg, target)
+                if variant == "jittered_priors":
+                    if aug.anchor_jitter_ft:
+                        magnitude = float(
+                            rng.choice(np.asarray(aug.anchor_jitter_ft, dtype=np.float32))
+                        )
+                        sign = -1.0 if rng.random() < 0.5 else 1.0
+                        _apply_anchor_jitter(x, cfg, sign * magnitude)
+                elif variant == "wrong_priors":
+                    _apply_wrong_anchor(x, cfg, rng, aug.wrong_anchor_shift_ft)
+                elif variant not in {"normal", "no_priors"}:
+                    raise ValueError(f"Unsupported augmentation variant: {variant}")
+                if variant != "no_priors":
+                    _apply_stochastic_prior_dropout(
+                        x, cfg, rng, include_all_priors=False
+                    )
+                mixed.append(replace(sample, x=x, sample_type=f"{sample.sample_type}:{variant}"))
+        rng.shuffle(mixed)
+        return mixed
     out: list[WindowSample] = []
     for sample in samples:
         x = sample.x.copy()
-        if all_prior and rng.random() < aug.drop_all_priors_prob:
-            for channel_index in all_prior:
-                x[channel_index] = 0.0
-            out.append(replace(sample, x=x))
-            continue
         if aug.anchor_swap and rng.random() < aug.anchor_swap_prob:
             target = str(rng.choice(np.asarray(aug.anchor_swap, dtype=object)))
             _swap_anchor_channels(x, cfg, target)
@@ -653,15 +780,9 @@ def _augment_prior_conditioning_samples(
             magnitude = float(rng.choice(np.asarray(aug.anchor_jitter_ft, dtype=np.float32)))
             sign = -1.0 if rng.random() < 0.5 else 1.0
             _apply_anchor_jitter(x, cfg, sign * magnitude)
-        if rng.random() < aug.drop_anchor_sdf_prob:
-            for channel_index in anchor:
-                x[channel_index] = 0.0
-        if rng.random() < aug.drop_b2_sdf_prob:
-            for channel_index in b2:
-                x[channel_index] = 0.0
-        if rng.random() < aug.drop_a_density_prob:
-            for channel_index in a_density:
-                x[channel_index] = 0.0
+        if rng.random() < aug.wrong_anchor_prob:
+            _apply_wrong_anchor(x, cfg, rng, aug.wrong_anchor_shift_ft)
+        _apply_stochastic_prior_dropout(x, cfg, rng, include_all_priors=True)
         out.append(replace(sample, x=x))
     return out
 
@@ -741,14 +862,16 @@ def _sanity_samples(
         elif kind == "no_history":
             for channel_index in history_channels:
                 x[channel_index] = 0.0
-        elif kind == "no_base_b2_a":
-            for channel_index in prior_channels:
-                x[channel_index] = 0.0
+        elif kind in {"no_base_b2_a", "no_all_priors"}:
+            _zero_channels(x, prior_channels)
         elif kind == "no_anchor":
-            for channel_index in anchor_channels:
-                x[channel_index] = 0.0
-        elif kind == "anchor_jitter_20ft":
+            _zero_channels(x, anchor_channels)
+        elif kind in {"anchor_jitter_20ft", "anchor_jitter_20"}:
             _apply_anchor_jitter(x, cfg, 20.0)
+        elif kind in {"anchor_jitter_40ft", "anchor_jitter_40"}:
+            _apply_anchor_jitter(x, cfg, 40.0)
+        elif kind in {"wrong_anchor_80ft", "wrong_anchor_80"}:
+            _apply_anchor_jitter(x, cfg, 80.0)
         elif kind == "base_b2_a_only":
             keep = set(prior_channels)
             for channel_index in range(x.shape[0]):
@@ -783,7 +906,11 @@ def write_geometry_report(
     sanity = metrics.get("sanity", {})
     run_name = str(metrics.get("run_name", ""))
     title = (
-        "MTP_V1_CONDITIONING_REPORT"
+        "GEOMTP_V3_GR_FORCED_REPORT"
+        if "mtp_v3_gr_forced" in run_name
+        else "GEOMTP_V2_ANCHOR_DROPOUT_REPORT"
+        if "mtp_v2_anchor_dropout" in run_name
+        else "MTP_V1_CONDITIONING_REPORT"
         if "mtp_v1" in run_name
         else "MTP_V0_2_MIXED_REPORT"
         if "mtp_v0_2" in run_name
@@ -847,6 +974,10 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('no_base_b2_a', 'weighted_mean_rmse_ft'))}",
         "  no_base_b2_a baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('no_base_b2_a', 'oracle_topk_rmse_ft'))}",
+        "  no_all_priors baseline top1_ft: "
+        f"{_metric_value(sanity, ('no_all_priors', 'top1_rmse_ft'))}",
+        "  no_all_priors baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('no_all_priors', 'oracle_topk_rmse_ft'))}",
         "  no_anchor baseline top1_ft: "
         f"{_metric_value(sanity, ('no_anchor', 'top1_rmse_ft'))}",
         "  no_anchor baseline oracle_topK_ft: "
@@ -855,6 +986,14 @@ def write_geometry_report(
         f"{_metric_value(sanity, ('anchor_jitter_20ft', 'top1_rmse_ft'))}",
         "  anchor_jitter_20ft baseline oracle_topK_ft: "
         f"{_metric_value(sanity, ('anchor_jitter_20ft', 'oracle_topk_rmse_ft'))}",
+        "  anchor_jitter_40ft baseline top1_ft: "
+        f"{_metric_value(sanity, ('anchor_jitter_40ft', 'top1_rmse_ft'))}",
+        "  anchor_jitter_40ft baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('anchor_jitter_40ft', 'oracle_topk_rmse_ft'))}",
+        "  wrong_anchor_80ft baseline top1_ft: "
+        f"{_metric_value(sanity, ('wrong_anchor_80ft', 'top1_rmse_ft'))}",
+        "  wrong_anchor_80ft baseline oracle_topK_ft: "
+        f"{_metric_value(sanity, ('wrong_anchor_80ft', 'oracle_topk_rmse_ft'))}",
         "  base_b2_a_only baseline top1_ft: "
         f"{_metric_value(sanity, ('base_b2_a_only', 'top1_rmse_ft'))}",
         "  base_b2_a_only baseline weighted_ft: "
@@ -886,6 +1025,9 @@ def write_geometry_report(
         f"  top3_margin: {_metric_value(metrics, ('loss', 'top3_margin'))}",
         f"  continuation_alpha: {_metric_value(metrics, ('loss', 'continuation_alpha'))}",
         f"  continuation_tau_bins: {_metric_value(metrics, ('loss', 'continuation_tau_bins'))}",
+        f"  contrastive_alpha: {_metric_value(metrics, ('loss', 'contrastive_alpha'))}",
+        "  contrastive_margin_bins: "
+        f"{_metric_value(metrics, ('loss', 'contrastive_margin_bins'))}",
         "  raw_path_oob_frac_before_bound: "
         f"{valid.get('raw_path_oob_frac_before_bound', 'n/a')}",
         f"  pred_bin_oob_frac: {valid.get('pred_bin_oob_frac', 'n/a')}",
@@ -1002,6 +1144,17 @@ def train_from_config(
                 epoch=epoch,
                 history_bins=history_bins,
             )
+            if cfg.loss.contrastive_alpha > 0.0:
+                corrupted_x = _contrastive_corruption_batch(x, cfg)
+                corrupted_paths, _ = model(corrupted_x)
+                normal_best = _best_mode_mae(paths, target)
+                corrupted_best = _best_mode_mae(corrupted_paths, target).detach()
+                contrastive = F.relu(
+                    normal_best
+                    - corrupted_best
+                    + float(cfg.loss.contrastive_margin_bins)
+                ).mean()
+                loss = loss + float(cfg.loss.contrastive_alpha) * contrastive
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
@@ -1069,6 +1222,12 @@ def train_from_config(
             cfg,
             device,
         )[0],
+        "no_all_priors": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="no_all_priors"),
+            cfg,
+            device,
+        )[0],
         "no_anchor": _evaluate(
             model,
             _sanity_samples(valid_samples, cfg, kind="no_anchor"),
@@ -1078,6 +1237,18 @@ def train_from_config(
         "anchor_jitter_20ft": _evaluate(
             model,
             _sanity_samples(valid_samples, cfg, kind="anchor_jitter_20ft"),
+            cfg,
+            device,
+        )[0],
+        "anchor_jitter_40ft": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="anchor_jitter_40ft"),
+            cfg,
+            device,
+        )[0],
+        "wrong_anchor_80ft": _evaluate(
+            model,
+            _sanity_samples(valid_samples, cfg, kind="wrong_anchor_80ft"),
             cfg,
             device,
         )[0],
@@ -1122,6 +1293,8 @@ def train_from_config(
             "top3_margin": cfg.loss.top3_margin,
             "continuation_alpha": cfg.loss.continuation_alpha,
             "continuation_tau_bins": cfg.loss.continuation_tau_bins,
+            "contrastive_alpha": cfg.loss.contrastive_alpha,
+            "contrastive_margin_bins": cfg.loss.contrastive_margin_bins,
         },
         "priors": _json_safe_config(cfg)["priors"],
         "augmentation": _json_safe_config(cfg)["augmentation"],

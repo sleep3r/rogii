@@ -250,6 +250,93 @@ def test_prior_augmentation_can_drop_anchor_and_jitter_anchor_channels() -> None
     assert np.all(augmented.x[2:] == 1.0)
 
 
+def test_prior_augmentation_batch_mix_forces_no_priors_and_wrong_priors() -> None:
+    cfg = MTPConfig(
+        train=TrainConfig(seed=11),
+        window=WindowConfig(
+            vertical_bins=4,
+            vertical_radius_ft=40.0,
+            channels=(
+                "anchor_sdf",
+                "anchor_offset_value",
+                "b2_sdf",
+                "b2_delta_value",
+                "a_p50_sdf",
+                "a_density",
+                "a_p10_p90_band",
+            ),
+        ),
+        augmentation=AugmentationConfig(
+            enabled=True,
+            wrong_anchor_shift_ft=(40.0,),
+            batch_mix={"no_priors": 0.5, "wrong_priors": 0.5},
+        ),
+    )
+    sample = WindowSample(
+        x=np.ones((7, 4, 2), dtype=np.float32),
+        target_bins=np.array([0.0, 0.0], dtype=np.float32),
+        target_tvt=np.array([0.0, 0.0], dtype=np.float32),
+        history_tvt=np.array([0.0], dtype=np.float32),
+        crop_tvt=np.linspace(-40.0, 40.0, 4, dtype=np.float32),
+        well_id="a",
+        start_step=0,
+        center_tvt=0.0,
+    )
+
+    augmented = _augment_prior_conditioning_samples([sample, sample], cfg)
+    no_prior = [item for item in augmented if item.sample_type.endswith(":no_priors")]
+    wrong = [item for item in augmented if item.sample_type.endswith(":wrong_priors")]
+
+    assert no_prior
+    assert wrong
+    assert all(np.all(item.x == 0.0) for item in no_prior)
+    assert any(not np.allclose(item.x[0], sample.x[0]) for item in wrong)
+    assert all(np.all(item.x[5:] == 1.0) for item in wrong)
+
+
+def test_prior_augmentation_batch_mix_still_applies_channel_dropout() -> None:
+    cfg = MTPConfig(
+        train=TrainConfig(seed=11),
+        window=WindowConfig(
+            vertical_bins=4,
+            vertical_radius_ft=40.0,
+            channels=(
+                "anchor_sdf",
+                "anchor_offset_value",
+                "b2_sdf",
+                "b2_delta_value",
+                "a_p50_sdf",
+                "a_density",
+                "a_p10_p90_band",
+            ),
+        ),
+        augmentation=AugmentationConfig(
+            enabled=True,
+            drop_anchor_sdf_prob=1.0,
+            drop_b2_sdf_prob=1.0,
+            drop_a_density_prob=1.0,
+            batch_mix={"normal": 1.0},
+        ),
+    )
+    sample = WindowSample(
+        x=np.ones((7, 4, 2), dtype=np.float32),
+        target_bins=np.array([0.0, 0.0], dtype=np.float32),
+        target_tvt=np.array([0.0, 0.0], dtype=np.float32),
+        history_tvt=np.array([0.0], dtype=np.float32),
+        crop_tvt=np.linspace(-40.0, 40.0, 4, dtype=np.float32),
+        well_id="a",
+        start_step=0,
+        center_tvt=0.0,
+    )
+
+    augmented = _augment_prior_conditioning_samples([sample], cfg)[0]
+
+    assert np.all(augmented.x[0:4] == 0.0)
+    assert np.all(augmented.x[5] == 0.0)
+    assert np.all(augmented.x[4] == 1.0)
+    assert np.all(augmented.x[6] == 1.0)
+
+
 def test_sanity_samples_can_remove_anchor_and_jitter_anchor() -> None:
     cfg = MTPConfig(
         window=WindowConfig(
@@ -271,13 +358,19 @@ def test_sanity_samples_can_remove_anchor_and_jitter_anchor() -> None:
     )
 
     no_anchor = _sanity_samples([sample], cfg, kind="no_anchor")[0]
+    no_all = _sanity_samples([sample], cfg, kind="no_all_priors")[0]
     jittered = _sanity_samples([sample], cfg, kind="anchor_jitter_20ft")[0]
+    jittered_40 = _sanity_samples([sample], cfg, kind="anchor_jitter_40ft")[0]
+    wrong = _sanity_samples([sample], cfg, kind="wrong_anchor_80ft")[0]
 
     assert np.all(no_anchor.x[0] == 0.0)
     assert np.all(no_anchor.x[1] == 0.0)
     assert np.all(no_anchor.x[2] == 1.0)
+    assert np.all(no_all.x == 0.0)
     assert not np.allclose(jittered.x[0], sample.x[0])
     assert not np.allclose(jittered.x[1], sample.x[1])
+    assert not np.allclose(jittered_40.x[0], sample.x[0])
+    assert not np.allclose(wrong.x[0], sample.x[0])
 
 
 def test_auto_device_prefers_mps_when_cuda_unavailable(monkeypatch) -> None:
