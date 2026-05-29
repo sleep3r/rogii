@@ -1,0 +1,57 @@
+# PathFormer v0 — full-well TVT transformer
+# Target: direct hidden-row TVT path prediction with tail-class improvement.
+# Run: make pf-train
+# Smoke: make pf-smoke
+
+run:
+  name: pathformer_v0
+  output_dir: artifacts/pathformer_v0
+
+data:
+  rows_per_step: 16
+  max_seq_len: 512    # 512 steps * 16 rows = 8192 raw rows; covers all but extreme wells
+
+model:
+  d_model: 192
+  n_heads: 8
+  n_encoder_layers: 4
+  ffn_dim: 768        # 4 * d_model
+  dropout: 0.10
+  anchor_skip: true
+  anchor_feature_index: 17
+  anchor_valid_index: 22
+  anchor_scale: 100.0
+
+augmentation:
+  drop_b2_prob: 0.0
+  drop_base_prob: 0.20
+  drop_a_prob: 0.25
+  drop_all_priors_prob: 0.15
+
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  device: auto        # auto → MPS on Apple Silicon, CUDA if available, else CPU
+  seed: 42
+  valid_fraction: 0.15
+  tail_oversample_factor: 2.0
+  huber_delta: 5.0    # ft
+  smooth_lambda: 0.005
+  clip_grad_norm: 1.0
+  save_every_n_epochs: 4
+
+priors:
+  enabled: true
+  id_column: id
+  base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+  base_column: schema10_oof_pp
+  a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+  a_p50_column: formation_sample_median
+  a_p10_column: formation_sample_p10
+  a_p90_column: formation_sample_p90
+
+data_dir: data/train
+k_wells: -1           # -1 = all wells
+tail_audit_path: artifacts/tail_audit_v1/well_tail_audit.csv

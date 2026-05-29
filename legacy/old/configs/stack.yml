@@ -1,0 +1,208 @@
+seed: 42
+project_name: ROGII/Wellbore
+output_uri: s3://s3-basket-cold.wb.ru/ds-experiments
+
+data:
+  data_dir: data
+  train_dir:
+  test_dir:
+  sample_submission:
+  max_train_wells:
+  max_test_wells:
+  target_rows: hidden_only
+  clearml:
+    enabled: false
+    project:
+    name: rogii-wellbore-geology-prediction
+    version:
+    dataset_id:
+    alias:
+    cache_dir: ~/.cache/clearml/rogii
+
+features:
+  tail_windows: [25, 100, 250]
+  rolling_windows: [5, 25, 101]
+  prediction_baseline: last_known_tvt
+  num_workers: 1
+  progress_interval: 25
+  cache:
+    enabled: true
+    dir: artifacts/feature_cache
+  include_typewell: true
+  include_kaggle_top_signals: true
+  include_direct_path_features: true
+  k_segment_offset_predictions: ../MTPNet/artifacts/k_segment_offset_v0/k_offset_oof_predictions.parquet
+  top_state_predictions: ../MTPNet/artifacts/top_state_teacher_v0/top_state_oof_predictions.parquet
+  direct_path:
+    allow_current_well_formations: false
+    tail_rows: 384
+    cem_n_iter: 4
+    cem_pop_size: 200
+    cem_top_k: 5
+    cem_seed: 17
+    stage2_n_knots: 8
+    stage2_max_offset: 12.0
+    stage2_passes: 1
+  kaggle_top:
+    beam_configs:
+      - [10, 20.0, 144.0, 2, cons]
+      - [10, 8.0, 64.0, 2, loose]
+      - [8, 35.0, 220.0, 1, vcons]
+      - [10, 14.0, 90.0, 5, sm5]
+      - [20, 4.0, 36.0, 3, vloose]
+      - [12, 12.0, 100.0, 3, mid]
+      - [15, 25.0, 180.0, 2, stiff]
+    ncc_windows: [8, 15, 25]
+    ncc_stride: 3
+    dtw_enabled: true
+    dtw_max_query_points: 700
+    dtw_max_ref_points: 700
+    dtw_radii: [20, 50, 100, 200]
+    dtw_stochastic_enabled: true
+    dtw_stochastic_radius: 50
+    dtw_stochastic_k: 12
+    dtw_stochastic_temperature: 3.0
+    dwt_enabled: true
+    dwt_wavelet: db4
+    dwt_level: 3
+    dwt_max_query_points: 700
+    dwt_max_ref_points: 700
+    dwt_radii: [20, 50, 100, 200]
+    particle_enabled: true
+    particle_count: 600
+    ancc_particle_count: 600
+    spatial_k: 10
+    dense_k: 20
+    dense_fetch: 5000
+    dense_query_chunk: 512
+    dense_samples_per_well: 60
+    robust_expert_enabled: false
+
+model:
+  base_models:
+    - id: cat_lr025
+      name: catboost
+      params:
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr020
+      name: catboost
+      params:
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr030
+      name: catboost
+      params:
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: lgb_lr025
+      name: lightgbm
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr020
+      name: lightgbm
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: lgb_lr030
+      name: lightgbm
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        num_leaves: 255
+        min_child_samples: 15
+        subsample: 0.8
+        subsample_freq: 1
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+  blend:
+    method: hill_climb
+    alpha_grid: [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
+    iterations: 1000
+    allow_negative_weights: false
+
+validation:
+  n_splits: 5
+  fold_safe_context: true
+  final_model_strategy: full_context
+
+postprocess:
+  search_method: optuna
+  optuna_trials: 500
+  optuna_seed: 42
+  progress_interval: 50
+  residual_weight: 1.0
+  residual_weight_grid: []
+  residual_clip: 250.0
+  notebook_blend:
+    enabled: true
+    pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
+    alpha_range: [0.95, 1.05, 0.01]
+    tau_range: [40, 120, 5]
+    w_pf_ancc_range: [0, 0.20, 0.01]
+    w_pf_z_range: [0, 0.10, 0.01]
+    w_pf_total_max: 0.30
+  smoothing:
+    enabled: true
+    window: 17
+    polyorder: 3
+    candidates: []
+
+outputs:
+  output_dir: artifacts/stack
+  submission_path: submission.csv
+
+tracking:
+  clearml:
+    enabled: false
+    project:
+    task_name:
+    output_uri:
+    tags: [rogii, kaggle, stack, dwt]
+    log_artifacts: true
+    log_model: true
+    fail_on_error: false

@@ -1,0 +1,14 @@
+inherits: quick.yml
+
+features:
+  include_direct_path_features: false
+  k_segment_offset_predictions:
+  top_state_predictions:
+
+outputs:
+  output_dir: artifacts/quick_baseline
+  submission_path: artifacts/quick_baseline/submission.csv
+
+tracking:
+  clearml:
+    tags: [rogii, quick, baseline]

@@ -1,0 +1,12 @@
+inherits: quick_baseline.yml
+
+features:
+  include_notebook_v4_features: true
+
+outputs:
+  output_dir: artifacts/quick_baseline_v4
+  submission_path: artifacts/quick_baseline_v4/submission.csv
+
+tracking:
+  clearml:
+    tags: [rogii, quick, baseline, notebook-v4]

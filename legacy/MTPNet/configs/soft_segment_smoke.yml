@@ -1,0 +1,17 @@
+data_dir: data
+output_dir: artifacts/soft_segment_smoke
+rows_per_step: 32
+vertical_bins: 64
+tau_bins: 1.5
+n_folds: 2
+train_fold: 0
+seed: 42
+k_wells: 20
+epochs: 1
+batch_size: 2
+hidden_channels: 16
+lr: 0.001
+weight_decay: 0.0001
+jump_penalty: 0.15
+curvature_penalty: 0.0
+device: auto

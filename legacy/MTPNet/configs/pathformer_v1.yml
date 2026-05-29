@@ -1,0 +1,58 @@
+# PathFormer v1 — add B2 prior (b2_delta feature was always 0 in v0)
+# Only change from v0: b2_path set, drop_b2_prob=0.30
+# Run: make pf-train PF_CONFIG=configs/pathformer_v1.yml
+
+run:
+  name: pathformer_v1
+  output_dir: artifacts/pathformer_v1
+
+data:
+  rows_per_step: 16
+  max_seq_len: 512
+
+model:
+  d_model: 192
+  n_heads: 8
+  n_encoder_layers: 4
+  ffn_dim: 768
+  dropout: 0.10
+  anchor_skip: true
+  anchor_feature_index: 17   # base_delta
+  anchor_valid_index: 22     # base_valid
+  anchor_scale: 100.0
+
+augmentation:
+  drop_b2_prob: 0.30         # was 0.0 in v0 (b2 was absent); now 0.30 so model learns without B2 for G_all_candidates_fail
+  drop_base_prob: 0.20
+  drop_a_prob: 0.25
+  drop_all_priors_prob: 0.15
+
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  device: auto
+  seed: 42
+  valid_fraction: 0.15
+  tail_oversample_factor: 2.0
+  huber_delta: 5.0
+  smooth_lambda: 0.005
+  clip_grad_norm: 1.0
+  save_every_n_epochs: 4
+
+priors:
+  enabled: true
+  id_column: id
+  base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+  base_column: schema10_oof_pp
+  b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+  b2_column: b2_guarded_submit
+  a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+  a_p50_column: formation_sample_median
+  a_p10_column: formation_sample_p10
+  a_p90_column: formation_sample_p90
+
+data_dir: data/train
+k_wells: -1
+tail_audit_path: artifacts/tail_audit_v1/well_tail_audit.csv

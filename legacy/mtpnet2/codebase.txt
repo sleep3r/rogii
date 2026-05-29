@@ -1,0 +1,4135 @@
+# CODEBASE DUMP — /Users/alexander/Desktop/mtpnet
+# 18 files
+
+========================================================================
+# FILE: dump_codebase.py
+========================================================================
+"""
+dump_codebase.py — собирает все исходные .py файлы проекта в один текстовый файл.
+
+Использование:
+    python dump_codebase.py [--out codebase.txt]
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+EXTENSIONS = {".py", ".toml", ".json"}
+SKIP_DIRS  = {"__pycache__", ".git", "artifacts", ".DS_Store"}
+
+
+def collect(root: Path, out_path: Path) -> int:
+    files = sorted(
+        p for p in root.rglob("*")
+        if p.is_file()
+        and p.suffix in EXTENSIONS
+        and not any(part in SKIP_DIRS for part in p.parts)
+        and p != out_path
+    )
+
+    lines_written = 0
+    with open(out_path, "w", encoding="utf-8") as fout:
+        fout.write(f"# CODEBASE DUMP — {root}\n")
+        fout.write(f"# {len(files)} files\n\n")
+        for path in files:
+            rel = path.relative_to(root)
+            header = f"{'=' * 72}\n# FILE: {rel}\n{'=' * 72}\n"
+            fout.write(header)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception as e:
+                text = f"# [READ ERROR: {e}]\n"
+            fout.write(text)
+            if not text.endswith("\n"):
+                fout.write("\n")
+            fout.write("\n")
+            n = text.count("\n")
+            lines_written += n
+            print(f"  {rel}  ({n} lines)")
+
+    return lines_written
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=".", help="Корневая директория проекта")
+    ap.add_argument("--out",  default="codebase.txt", help="Выходной файл")
+    args = ap.parse_args()
+
+    root     = Path(args.root).resolve()
+    out_path = (root / args.out).resolve()
+
+    print(f"Сканирую: {root}")
+    print(f"Вывод:    {out_path}\n")
+
+    total = collect(root, out_path)
+    size  = out_path.stat().st_size
+
+    print(f"\nГотово: {total} строк, {size / 1024:.1f} КБ → {out_path.name}")
+
+
+if __name__ == "__main__":
+    main()
+
+========================================================================
+# FILE: make_oof_table.py
+========================================================================
+#!/usr/bin/env python3
+"""Full OOF scoreboard: aggregate all experiment results into one table.
+
+Loads all saved OOF result .pkl files from artifacts/results/ and produces:
+  - artifacts/oof_scoreboard.csv  — full table
+  - Printed scoreboard
+
+Run:
+    python make_oof_table.py [--result-dir artifacts/results]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import numpy as np
+import pandas as pd
+
+from mtpnet.eval import load_oof_result
+from mtpnet.metrics import print_scoreboard
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build full OOF scoreboard")
+    parser.add_argument("--result-dir", type=Path, default=Path("artifacts/results"))
+    parser.add_argument("--output", type=Path, default=Path("artifacts/oof_scoreboard.csv"))
+    parser.add_argument("--oracle-report", type=Path, default=Path("artifacts/oracle_report.json"))
+    args = parser.parse_args()
+
+    rows = []
+
+    # Oracle ceilings from report
+    if args.oracle_report.exists():
+        import json
+        with open(args.oracle_report) as f:
+            oracle = json.load(f)
+        for key, val in oracle.items():
+            if key.endswith("_rmse") and isinstance(val, (int, float)):
+                rows.append({
+                    "experiment": f"[oracle] {key}",
+                    "pooled_rmse": float(val),
+                    "type": "oracle",
+                    "n_folds": None,
+                    "fold_rmses": None,
+                })
+
+    # OOF results
+    pkl_files = sorted(args.result_dir.glob("*.pkl"))
+    print(f"Found {len(pkl_files)} OOF result files in {args.result_dir}")
+
+    for path in pkl_files:
+        try:
+            result = load_oof_result(str(path))
+            rows.append({
+                "experiment":  result.experiment,
+                "pooled_rmse": result.pooled_rmse,
+                "type":        f"{result.mode}_K{result.K}",
+                "decoder":     result.decoder,
+                "alpha":       result.alpha,
+                "n_folds":     len(result.fold_rmses),
+                "fold_rmses":  str([f"{r:.4f}" for r in result.fold_rmses]),
+            })
+            print(f"  {result.experiment:<50s}  rmse={result.pooled_rmse:.4f}")
+        except Exception as e:
+            print(f"  [warn] Could not load {path.name}: {e}")
+
+    if not rows:
+        print("No results found. Run experiments first.")
+        return 1
+
+    df = pd.DataFrame(rows).sort_values("pooled_rmse").reset_index(drop=True)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(args.output, index=False)
+    print(f"\nSaved scoreboard → {args.output}")
+
+    # Print scoreboard
+    scoreboard = {
+        row["experiment"]: row["pooled_rmse"]
+        for _, row in df.iterrows()
+    }
+    print_scoreboard(scoreboard, title="Full OOF Scoreboard")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+========================================================================
+# FILE: make_oracle_report.py
+========================================================================
+#!/usr/bin/env python3
+"""Validate oracle numbers against established benchmarks.
+
+Expected output:
+    global_grid_oracle  : ~7.64 ft
+    K1_oracle           : ~7.59 ft
+    K3_oracle           : ~3.02 ft
+    K5_oracle           : ~1.82 ft
+    K15_oracle          : ~0.65 ft
+
+Run:
+    python make_oracle_report.py [--data-dir DATA_DIR] [--cache-dir CACHE_DIR]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# ---- project root on sys.path ----
+sys.path.insert(0, str(Path(__file__).parent))
+
+from mtpnet.data import load_offset_samples
+from mtpnet.oracle import compute_oracle_report
+
+
+# Expected benchmark values (from audit of rogii/MTPNet/mtpnet/k_segment_offset.py)
+EXPECTED: dict[str, tuple[float, float]] = {
+    "global_grid_oracle_rmse": (7.0,  8.5),   # expect ~7.64
+    "K1_oracle_rmse":          (7.0,  8.5),   # expect ~7.59
+    "K3_oracle_rmse":          (2.5,  3.5),   # expect ~3.02
+    "K5_oracle_rmse":          (1.5,  2.2),   # expect ~1.82
+    "K15_oracle_rmse":         (0.4,  0.9),   # expect ~0.65
+}
+
+TOLERANCE_REL = 0.15   # ±15% tolerance around expected midpoint
+
+
+def check_value(key: str, value: float) -> bool:
+    if key not in EXPECTED:
+        return True
+    lo, hi = EXPECTED[key]
+    if lo <= value <= hi:
+        print(f"  ✓  {key:<35s} = {value:.4f}  [expected {lo:.2f}–{hi:.2f}]")
+        return True
+    else:
+        mid = (lo + hi) / 2
+        print(f"  ✗  {key:<35s} = {value:.4f}  [expected {lo:.2f}–{hi:.2f}]  ← OUT OF RANGE")
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate oracle benchmark numbers")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("/Users/alexander/Desktop/rogii/MTPNet/data/train"),
+        help="Directory with *__horizontal_well.csv files",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("artifacts/mtpnet_cache"),
+        help="Cache directory for loaded samples",
+    )
+    parser.add_argument(
+        "--k-wells",
+        type=int,
+        default=-1,
+        help="Load only first k wells (for quick smoke test; -1 = all)",
+    )
+    parser.add_argument(
+        "--save-report",
+        type=Path,
+        default=Path("artifacts/oracle_report.json"),
+        help="Where to save the JSON report",
+    )
+    args = parser.parse_args()
+
+    cache_path = args.cache_dir / "samples.pkl" if args.k_wells < 0 else None
+    print(f"Loading wells from {args.data_dir} …")
+
+    samples = load_offset_samples(
+        args.data_dir,
+        k_wells=args.k_wells,
+        cache_path=cache_path,
+        verbose=True,
+    )
+
+    train_samples = [s for s in samples if s.has_true]
+    print(f"Training wells: {len(train_samples)}")
+
+    report = compute_oracle_report(
+        train_samples,
+        ks=[1, 3, 5, 15],
+        verbose=True,
+    )
+
+    print("\n=== Benchmark Validation ===")
+    all_pass = True
+    for key in [
+        "global_grid_oracle_rmse",
+        "K1_oracle_rmse",
+        "K3_oracle_rmse",
+        "K5_oracle_rmse",
+        "K15_oracle_rmse",
+    ]:
+        val = report.get(key, float("nan"))
+        ok = check_value(key, val)
+        if not ok:
+            all_pass = False
+
+    print()
+    if all_pass:
+        print("All oracle benchmarks PASSED.")
+    else:
+        print("Some oracle benchmarks FAILED — check data or oracle implementation.")
+
+    # Save report (without per_well detail for brevity)
+    save_report = {k: v for k, v in report.items() if k != "per_well"}
+    args.save_report.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.save_report, "w") as f:
+        json.dump(save_report, f, indent=2)
+    print(f"Report saved → {args.save_report}")
+
+    return 0 if all_pass else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+========================================================================
+# FILE: mtpnet/__init__.py
+========================================================================
+"""MTPNet — Offset-State Decoder for TVT prediction.
+
+Architecture:
+    candidate generator  : K-segment offset posterior (LightGBM multiclass)
+    state prior          : top-event / top-direction teacher
+    decoder              : DP/beam over offset states
+    selector             : path scorer + dictionary prior
+    materializer         : TVT = anchor + cumsum(-dZ + decoded_offset_state)
+
+Modules:
+    offsets   — canonical physical integrators (THE source of truth)
+    data      — OffsetSample dataclass + data loader
+    oracle    — oracle ceiling computation (global + K-segment)
+    metrics   — row RMSE, top-k oracle, scoreboard
+    features  — well-level + segment feature engineering
+    models    — LightGBM/CatBoost offset bin classifier
+    decode    — Viterbi DP + beam search decoder
+    eval      — OOF evaluation pipeline
+"""
+from __future__ import annotations
+
+========================================================================
+# FILE: mtpnet/data.py
+========================================================================
+"""OffsetSample dataclass and data loader for the MTPNet offset-state decoder.
+
+Each OffsetSample captures:
+  - Full per-row arrays (MD, X, Y, Z, GR, TVT_input, TVT_true)
+  - Anchor information (last known row, anchor TVT/Z)
+  - Hidden row indices
+  - c0 drift (from known prefix, test-safe)
+  - Train-only oracle targets (global_offset_star, kseg_offset_star)
+
+Loading:
+    samples = load_offset_samples("data/train")
+    folds   = make_group_kfold(samples, n_folds=5)
+"""
+from __future__ import annotations
+
+import pickle
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import GroupKFold
+
+# Last-N-rows window for anchor statistics (test-safe)
+LAST_KNOWN_WINDOW: int = 512
+
+
+@dataclass
+class OffsetSample:
+    """Single-well data for the offset-state decoder."""
+
+    well_id: str
+
+    # ---- per-row arrays (full well, length N) ----
+    md: np.ndarray           # (N,) float32 — measured depth [ft]
+    x: np.ndarray            # (N,) float32 — easting
+    y: np.ndarray            # (N,) float32 — northing
+    z: np.ndarray            # (N,) float32 — TVD (negative = deeper in sign convention)
+    gr: np.ndarray           # (N,) float32 — gamma ray, may contain NaN
+    tvt_input: np.ndarray    # (N,) float32 — TVT_input, NaN for hidden rows
+    tvt_true: np.ndarray | None  # (N,) float32 — true TVT, None for test split
+
+    # ---- anchor (last row with finite TVT_input) ----
+    anchor_row: int
+    anchor_tvt: float
+    anchor_z: float
+
+    # ---- hidden rows ----
+    hidden_rows: np.ndarray  # (H,) int64 — indices of rows to predict
+
+    # ---- test-safe C-field drift ----
+    c0: float   # median dC = median d(TVT_input + Z) over last LAST_KNOWN_WINDOW known rows
+
+    # ---- known C-field statistics (from known prefix) ----
+    dC_last64_median: float = 0.0
+    dC_last128_median: float = 0.0
+    dC_last256_median: float = 0.0
+    dC_last512_median: float = 0.0
+    dC_last512_mean: float = 0.0
+    dC_last512_std: float = 0.0
+    dC_last512_slope: float = 0.0
+    anchor_C: float = 0.0   # TVT_anchor + Z_anchor
+
+    # ---- train-only oracle targets (populated by oracle.py) ----
+    global_offset_star: float | None = None
+    kseg_offset_star: dict[int, np.ndarray] = field(default_factory=dict)
+
+    @property
+    def n_hidden(self) -> int:
+        return len(self.hidden_rows)
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.md)
+
+    @property
+    def has_true(self) -> bool:
+        return self.tvt_true is not None
+
+    @property
+    def tvt_hidden_true(self) -> np.ndarray | None:
+        """True TVT for hidden rows, or None if not available."""
+        if self.tvt_true is None:
+            return None
+        return self.tvt_true[self.hidden_rows]
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _compute_c0_and_stats(
+    tvt_input: np.ndarray,
+    z: np.ndarray,
+    anchor_row: int,
+    window: int = LAST_KNOWN_WINDOW,
+) -> dict[str, float]:
+    """Compute C-field drift statistics from known prefix (test-safe)."""
+    known = np.flatnonzero(np.isfinite(tvt_input))
+    if len(known) < 2:
+        return {
+            "c0": 0.0,
+            "dC_last64_median": 0.0,
+            "dC_last128_median": 0.0,
+            "dC_last256_median": 0.0,
+            "dC_last512_median": 0.0,
+            "dC_last512_mean": 0.0,
+            "dC_last512_std": 0.0,
+            "dC_last512_slope": 0.0,
+        }
+
+    # Restrict to window before anchor
+    win_start = max(0, anchor_row - window + 1)
+    known_in_win = known[known >= win_start]
+
+    def _dC_stats(n: int) -> tuple[float, float, float, float]:
+        k_recent = known_in_win[-n:] if len(known_in_win) >= 2 else known_in_win
+        if len(k_recent) < 2:
+            return 0.0, 0.0, 0.0, 0.0
+        C = (tvt_input[k_recent] + z[k_recent]).astype(np.float64)
+        dC = np.diff(C)
+        dC = dC[np.isfinite(dC)]
+        if len(dC) == 0:
+            return 0.0, 0.0, 0.0, 0.0
+        med = float(np.median(dC))
+        mn = float(np.mean(dC))
+        std = float(np.std(dC)) if len(dC) > 1 else 0.0
+        if len(dC) >= 3:
+            xs = np.arange(len(dC), dtype=np.float64)
+            slope = float(np.polyfit(xs, dC, 1)[0])
+        else:
+            slope = 0.0
+        return med, mn, std, slope
+
+    med512, mean512, std512, slope512 = _dC_stats(512)
+    med256, _, _, _ = _dC_stats(256)
+    med128, _, _, _ = _dC_stats(128)
+    med64, _, _, _ = _dC_stats(64)
+
+    return {
+        "c0": med512,
+        "dC_last64_median": med64,
+        "dC_last128_median": med128,
+        "dC_last256_median": med256,
+        "dC_last512_median": med512,
+        "dC_last512_mean": mean512,
+        "dC_last512_std": std512,
+        "dC_last512_slope": slope512,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Single-well builder
+# ---------------------------------------------------------------------------
+
+def load_offset_sample(
+    well_id: str,
+    horizontal: pd.DataFrame,
+) -> OffsetSample | None:
+    """Build an OffsetSample from a raw horizontal well DataFrame.
+
+    Returns None if the well is degenerate (no known rows, no hidden rows,
+    or missing anchor).
+    """
+    n = len(horizontal)
+    if n < 8:
+        return None
+
+    def _col(name: str) -> np.ndarray:
+        if name in horizontal.columns:
+            return pd.to_numeric(horizontal[name], errors="coerce").to_numpy(np.float32)
+        return np.full(n, np.nan, dtype=np.float32)
+
+    md = _col("MD")
+    x = _col("X")
+    y = _col("Y")
+    z = _col("Z")
+    gr = _col("GR")
+    tvt_input = _col("TVT_input")
+    tvt_true: np.ndarray | None = _col("TVT") if "TVT" in horizontal.columns else None
+
+    # If all TVT values are NaN, it's a test file
+    if tvt_true is not None and not np.any(np.isfinite(tvt_true)):
+        tvt_true = None
+
+    known_mask = np.isfinite(tvt_input)
+    hidden_mask = ~known_mask
+    known_idx = np.flatnonzero(known_mask)
+    hidden_idx = np.flatnonzero(hidden_mask)
+
+    if len(known_idx) == 0 or len(hidden_idx) == 0:
+        return None
+
+    anchor_row = int(known_idx[-1])
+    anchor_tvt = float(tvt_input[anchor_row])
+    anchor_z = float(z[anchor_row])
+
+    if not (np.isfinite(anchor_tvt) and np.isfinite(anchor_z)):
+        return None
+
+    # Only hidden rows AFTER anchor matter for prediction
+    post_anchor_hidden = hidden_idx[hidden_idx > anchor_row]
+    if len(post_anchor_hidden) == 0:
+        return None
+
+    stats = _compute_c0_and_stats(tvt_input, z, anchor_row)
+
+    return OffsetSample(
+        well_id=well_id,
+        md=md, x=x, y=y, z=z, gr=gr,
+        tvt_input=tvt_input,
+        tvt_true=tvt_true,
+        anchor_row=anchor_row,
+        anchor_tvt=anchor_tvt,
+        anchor_z=anchor_z,
+        hidden_rows=post_anchor_hidden.astype(np.int64),
+        c0=stats["c0"],
+        dC_last64_median=stats["dC_last64_median"],
+        dC_last128_median=stats["dC_last128_median"],
+        dC_last256_median=stats["dC_last256_median"],
+        dC_last512_median=stats["dC_last512_median"],
+        dC_last512_mean=stats["dC_last512_mean"],
+        dC_last512_std=stats["dC_last512_std"],
+        dC_last512_slope=stats["dC_last512_slope"],
+        anchor_C=anchor_tvt + anchor_z,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dataset loader
+# ---------------------------------------------------------------------------
+
+def load_offset_samples(
+    data_dir: Path | str,
+    k_wells: int = -1,
+    cache_path: Path | str | None = None,
+    verbose: bool = True,
+) -> list[OffsetSample]:
+    """Load all training wells as OffsetSample objects.
+
+    Args:
+        data_dir   : directory containing *__horizontal_well.csv files
+        k_wells    : if > 0, load only the first k_wells (for smoke tests)
+        cache_path : if given, load from / save to a pickle cache
+        verbose    : print progress
+
+    Returns:
+        List of OffsetSample objects (one per well), sorted by well_id.
+    """
+    data_dir = Path(data_dir)
+
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        if cache_path.exists():
+            if verbose:
+                print(f"Loading cached samples from {cache_path}")
+            with open(cache_path, "rb") as f:
+                return pickle.load(f)
+
+    horizontal_files = sorted(data_dir.glob("*__horizontal_well.csv"))
+    if not horizontal_files:
+        raise FileNotFoundError(f"No horizontal well files in {data_dir}")
+
+    if k_wells > 0:
+        horizontal_files = horizontal_files[:k_wells]
+
+    samples: list[OffsetSample] = []
+    skipped = 0
+    for path in horizontal_files:
+        well_id = path.name.split("__horizontal_well")[0]
+        try:
+            horizontal = pd.read_csv(path)
+        except Exception as e:
+            if verbose:
+                print(f"  [warn] Could not load {path}: {e}")
+            skipped += 1
+            continue
+
+        sample = load_offset_sample(well_id, horizontal)
+        if sample is None:
+            skipped += 1
+            continue
+        samples.append(sample)
+
+    if verbose:
+        print(
+            f"Loaded {len(samples)} wells from {data_dir}"
+            + (f" (skipped {skipped})" if skipped > 0 else "")
+        )
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump(samples, f)
+        if verbose:
+            print(f"Saved cache → {cache_path}")
+
+    return samples
+
+
+# ---------------------------------------------------------------------------
+# Cross-validation split
+# ---------------------------------------------------------------------------
+
+def make_group_kfold(
+    samples: list[OffsetSample],
+    n_folds: int = 5,
+    seed: int = 42,
+) -> list[tuple[list[int], list[int]]]:
+    """Return fold splits with GroupKFold by well_id.
+
+    Each well appears in exactly one validation fold.
+
+    Args:
+        samples : list of OffsetSample
+        n_folds : number of folds
+        seed    : random seed (for reproducibility with shuffle)
+
+    Returns:
+        List of (train_indices, val_indices) tuples.
+    """
+    n = len(samples)
+    X = np.zeros((n, 1))
+    # Each well is its own group → GroupKFold ≡ KFold here,
+    # but GroupKFold makes the intent explicit.
+    groups = np.arange(n)
+
+    gkf = GroupKFold(n_splits=n_folds)
+    splits: list[tuple[list[int], list[int]]] = []
+    for tr_idx, va_idx in gkf.split(X, groups=groups):
+        splits.append((tr_idx.tolist(), va_idx.tolist()))
+    return splits
+
+
+# ---------------------------------------------------------------------------
+# Convenience: load folds from JSON cache
+# ---------------------------------------------------------------------------
+
+def save_folds(folds: list[tuple[list[int], list[int]]], path: Path | str) -> None:
+    import json
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [{"train": tr, "val": va} for tr, va in folds]
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_folds(path: Path | str) -> list[tuple[list[int], list[int]]]:
+    import json
+    with open(path) as f:
+        data = json.load(f)
+    return [(d["train"], d["val"]) for d in data]
+
+========================================================================
+# FILE: mtpnet/decode.py
+========================================================================
+"""Viterbi and beam-search decoders for the offset-state TVT prediction.
+
+The decoder takes a soft probability distribution over offset bins at each
+step (row or segment) and finds the most probable sequence of offset states
+subject to smooth-transition constraints.
+
+Two regimes:
+  1. Well-level (global): single step, argmax or posterior mean (no Viterbi needed)
+  2. K-segment: K steps, Viterbi over segment-level probabilities
+  3. Per-row: N_hidden steps, Viterbi over row-level probabilities (expensive,
+     use beam for large N_hidden)
+
+Transition model:
+  - log_transition[i, j] = -alpha * |i - j|  (exponential penalty for bin jumps)
+  - alpha controls smoothness: larger = more penalisation of bin changes
+
+Usage:
+    from mtpnet.decode import viterbi_decode, beam_decode
+
+    # K-segment: proba shape (K, N_BINS)
+    bins = viterbi_decode(log_proba, alpha=1.0)          # (K,) bin indices
+    bins = beam_decode(log_proba, alpha=1.0, beam=32)    # (K,) bin indices
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from .offsets import (
+    N_OFFSET_BINS,
+    make_offset_grid,
+    tvt_from_ksegment_offsets,
+    tvt_from_offset_per_row,
+    expand_segment_offsets,
+)
+
+
+# ---------------------------------------------------------------------------
+# Transition cost
+# ---------------------------------------------------------------------------
+
+def make_log_transition(
+    n_bins: int = N_OFFSET_BINS,
+    alpha: float = 10.0,
+    step: float = 0.001,
+) -> np.ndarray:
+    """Build the log-transition matrix (n_bins x n_bins).
+
+    log_T[i, j] = -alpha * |grid[i] - grid[j]|
+                = -alpha * |i - j| * step
+
+    Larger alpha → more penalisation of large bin jumps.
+    step = offset grid step size (0.001 ft/row by default).
+
+    Args:
+        n_bins : number of offset bins (321)
+        alpha  : smoothness penalty (>0)
+        step   : grid step size (ft/row)
+
+    Returns:
+        (n_bins, n_bins) float32 log-transition matrix
+    """
+    diff = np.abs(np.arange(n_bins)[:, None] - np.arange(n_bins)[None, :]).astype(np.float32)
+    log_T = -alpha * diff * step
+    return log_T
+
+
+# ---------------------------------------------------------------------------
+# Viterbi decoder (exact, O(T * N^2) — practical for K ≤ 15, N ≤ 321)
+# ---------------------------------------------------------------------------
+
+def viterbi_decode(
+    log_proba: np.ndarray,
+    alpha: float = 10.0,
+    step: float = 0.001,
+    log_transition: np.ndarray | None = None,
+) -> np.ndarray:
+    """Viterbi decoding over a sequence of log-probability arrays.
+
+    Finds the most probable bin sequence under:
+        score(b_1, ..., b_T) = sum_t log_proba[t, b_t]
+                             + sum_{t>1} log_T[b_{t-1}, b_t]
+
+    Args:
+        log_proba      : (T, N_BINS) log-probability array (can also be proba,
+                         will be log-transformed if values are in [0,1])
+        alpha          : transition smoothness penalty
+        step           : grid step (ft/row), used to scale transition
+        log_transition : pre-computed (N_BINS, N_BINS) matrix; if None, computed
+                         from alpha and step
+
+    Returns:
+        (T,) int32 array of most probable bin indices
+    """
+    log_p = np.asarray(log_proba, dtype=np.float64)
+    T, N = log_p.shape
+
+    # Convert proba → log-proba if needed
+    if log_p.max() <= 1.0 + 1e-6 and log_p.min() >= -1e-6:
+        log_p = np.log(np.clip(log_p, 1e-30, None))
+
+    if log_transition is None:
+        log_T = make_log_transition(N, alpha, step).astype(np.float64)
+    else:
+        log_T = np.asarray(log_transition, dtype=np.float64)
+
+    # Forward pass
+    delta = np.empty((T, N), dtype=np.float64)
+    psi   = np.zeros((T, N), dtype=np.int32)
+
+    delta[0] = log_p[0]
+
+    for t in range(1, T):
+        # (N,) + (N, N) → best previous for each current bin
+        scores = delta[t - 1][:, None] + log_T      # (N_prev, N_curr)
+        psi[t]   = np.argmax(scores, axis=0)         # (N_curr,)
+        delta[t] = scores[psi[t], np.arange(N)] + log_p[t]
+
+    # Backtrack
+    path = np.empty(T, dtype=np.int32)
+    path[T - 1] = int(np.argmax(delta[T - 1]))
+    for t in range(T - 2, -1, -1):
+        path[t] = psi[t + 1, path[t + 1]]
+
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Beam search decoder (O(T * beam * N) — practical for large T)
+# ---------------------------------------------------------------------------
+
+def beam_decode(
+    log_proba: np.ndarray,
+    alpha: float = 10.0,
+    step: float = 0.001,
+    beam_width: int = 32,
+    log_transition: np.ndarray | None = None,
+) -> np.ndarray:
+    """Beam-search decoding (approximate Viterbi for large T).
+
+    Maintains a beam of the top-`beam_width` partial sequences at each step.
+
+    Args:
+        log_proba  : (T, N_BINS)
+        alpha      : transition smoothness penalty
+        step       : grid step (ft/row)
+        beam_width : number of hypotheses to keep
+        log_transition : pre-computed log-transition matrix
+
+    Returns:
+        (T,) int32 best bin path
+    """
+    log_p = np.asarray(log_proba, dtype=np.float64)
+    T, N = log_p.shape
+
+    if log_p.max() <= 1.0 + 1e-6 and log_p.min() >= -1e-6:
+        log_p = np.log(np.clip(log_p, 1e-30, None))
+
+    if log_transition is None:
+        log_T = make_log_transition(N, alpha, step).astype(np.float64)
+    else:
+        log_T = np.asarray(log_transition, dtype=np.float64)
+
+    # Beam: list of (score, path_list)
+    # Seed: top-beam_width bins at t=0
+    init_scores = log_p[0]
+    top_init = np.argsort(init_scores)[::-1][:beam_width]
+    beam: list[tuple[float, list[int]]] = [
+        (float(init_scores[b]), [int(b)]) for b in top_init
+    ]
+
+    for t in range(1, T):
+        candidates: list[tuple[float, list[int]]] = []
+        obs = log_p[t]  # (N,)
+        for score, path in beam:
+            last_bin = path[-1]
+            trans = log_T[last_bin]       # (N,)
+            extended = score + trans + obs  # (N,)
+            # Top candidates from this beam hypothesis
+            top_bins = np.argsort(extended)[::-1][:beam_width]
+            for b in top_bins:
+                candidates.append((float(extended[b]), path + [int(b)]))
+        # Prune beam
+        candidates.sort(key=lambda x: -x[0])
+        beam = candidates[:beam_width]
+
+    best_score, best_path = max(beam, key=lambda x: x[0])
+    return np.array(best_path, dtype=np.int32)
+
+
+# ---------------------------------------------------------------------------
+# Greedy / argmax decoder (baseline, no smoothing)
+# ---------------------------------------------------------------------------
+
+def greedy_decode(
+    proba: np.ndarray,
+) -> np.ndarray:
+    """Simple argmax decoder (no transition constraints).
+
+    Args:
+        proba : (T, N_BINS) or (N_BINS,) probability array
+
+    Returns:
+        (T,) or scalar int32 bin index
+    """
+    p = np.asarray(proba)
+    if p.ndim == 1:
+        return np.int32(np.argmax(p))
+    return np.argmax(p, axis=1).astype(np.int32)
+
+
+def smooth_decode(
+    proba: np.ndarray,
+    sigma_bins: float = 5.0,
+) -> np.ndarray:
+    """Smooth proba with a Gaussian before argmax (soft prior).
+
+    Equivalent to a very weak Viterbi without sequence constraints.
+    Useful for the global single-offset case.
+
+    Args:
+        proba      : (N_BINS,) probability vector
+        sigma_bins : Gaussian smoothing width in bins
+
+    Returns:
+        scalar int32 best bin after smoothing
+    """
+    from scipy.ndimage import gaussian_filter1d  # type: ignore
+    p = np.asarray(proba, dtype=np.float64)
+    p_smooth = gaussian_filter1d(p, sigma=sigma_bins)
+    return np.int32(np.argmax(p_smooth))
+
+
+# ---------------------------------------------------------------------------
+# Full well decode: K-segment → TVT predictions
+# ---------------------------------------------------------------------------
+
+def decode_kseg_predictions(
+    samples: list,          # list[OffsetSample]
+    proba_list: list[np.ndarray],   # per-well (K, N_BINS) proba arrays
+    K: int,
+    grid: np.ndarray | None = None,
+    decoder: str = "viterbi",
+    alpha: float = 10.0,
+    beam_width: int = 32,
+) -> list[np.ndarray]:
+    """Decode K-segment proba arrays → TVT predictions for each well.
+
+    Args:
+        samples    : list of OffsetSample
+        proba_list : list of (K, N_BINS) arrays (one per well)
+        K          : number of segments
+        grid       : offset grid; defaults to make_offset_grid()
+        decoder    : "viterbi", "beam", or "greedy"
+        alpha      : Viterbi/beam transition penalty
+        beam_width : beam size for beam decoder
+
+    Returns:
+        List of (H_i,) float32 TVT prediction arrays (one per well)
+    """
+    if grid is None:
+        grid = make_offset_grid()
+
+    step = float(grid[1] - grid[0]) if len(grid) > 1 else 0.001
+    log_T = make_log_transition(len(grid), alpha, step)
+
+    predictions = []
+    for s, proba_k in zip(samples, proba_list):
+        proba_k = np.asarray(proba_k, dtype=np.float64)   # (K, N_BINS)
+
+        if decoder == "viterbi":
+            bins = viterbi_decode(proba_k, alpha=alpha, step=step, log_transition=log_T)
+        elif decoder == "beam":
+            bins = beam_decode(proba_k, alpha=alpha, step=step, beam_width=beam_width, log_transition=log_T)
+        else:  # greedy
+            bins = greedy_decode(proba_k)
+
+        offsets = grid[bins]  # (K,)
+        pred = tvt_from_ksegment_offsets(
+            s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, offsets
+        )
+        predictions.append(pred)
+
+    return predictions
+
+
+def decode_global_predictions(
+    samples: list,          # list[OffsetSample]
+    proba_list: list[np.ndarray],   # per-well (N_BINS,) arrays
+    grid: np.ndarray | None = None,
+    mode: str = "argmax",
+) -> list[np.ndarray]:
+    """Decode global proba arrays → TVT predictions for each well.
+
+    Args:
+        samples    : list of OffsetSample
+        proba_list : list of (N_BINS,) arrays
+        grid       : offset grid
+        mode       : "argmax" or "mean"
+
+    Returns:
+        List of (H_i,) float32 TVT prediction arrays
+    """
+    from .offsets import tvt_from_global_offset
+    if grid is None:
+        grid = make_offset_grid()
+
+    predictions = []
+    for s, proba in zip(samples, proba_list):
+        p = np.asarray(proba, dtype=np.float64)
+        if mode == "mean":
+            c = float(np.dot(p / (p.sum() + 1e-30), grid))
+        else:
+            c = float(grid[np.argmax(p)])
+        pred = tvt_from_global_offset(s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, c)
+        predictions.append(pred)
+
+    return predictions
+
+========================================================================
+# FILE: mtpnet/eval.py
+========================================================================
+"""Out-of-fold evaluation pipeline for offset-state decoder experiments.
+
+run_oof() is the core evaluation loop:
+  - Takes a list of OffsetSample, fold splits, and a model-building function
+  - For each fold: builds features, trains model, predicts on val, decodes TVT
+  - Returns pooled RMSE + per-fold breakdown
+
+Usage:
+    from mtpnet.eval import run_oof, OOFResult
+
+    def build_model_fn(X_tr, y_tr, X_va, y_va):
+        return train_offset_classifier(X_tr, y_tr, X_va, y_va)
+
+    result = run_oof(samples, folds, build_model_fn, mode="global")
+    print(result.pooled_rmse)
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable, Any
+
+import numpy as np
+
+from .offsets import make_offset_grid, tvt_from_global_offset, tvt_from_ksegment_offsets
+from .metrics import row_rmse, collect_predictions_and_targets
+from .features import (
+    make_well_features,
+    make_segment_features,
+    make_global_offset_labels,
+    make_kseg_offset_labels,
+)
+from .models import predict_offset_proba
+from .decode import decode_global_predictions, decode_kseg_predictions, viterbi_decode
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OOFResult:
+    """Results from a single OOF evaluation run."""
+    experiment: str
+    mode: str               # "global" | "kseg"
+    K: int                  # 1 for global
+    decoder: str
+    alpha: float
+
+    pooled_rmse: float
+    fold_rmses: list[float] = field(default_factory=list)
+
+    # Per-well predictions (aligned with samples order)
+    all_predictions: list[np.ndarray] = field(default_factory=list)
+    all_true: list[np.ndarray] = field(default_factory=list)
+    well_ids: list[str] = field(default_factory=list)
+
+    # Optional soft probabilities (for diagnostics)
+    all_proba: list[np.ndarray] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (
+            f"OOFResult(experiment={self.experiment!r}, "
+            f"mode={self.mode!r}, K={self.K}, "
+            f"pooled_rmse={self.pooled_rmse:.4f}, "
+            f"n_folds={len(self.fold_rmses)})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# OOF for global offset classifier
+# ---------------------------------------------------------------------------
+
+def run_oof_global(
+    samples: list,
+    folds: list[tuple[list[int], list[int]]],
+    build_model_fn: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], Any],
+    experiment: str = "global_offset",
+    decode_mode: str = "argmax",
+    grid: np.ndarray | None = None,
+    verbose: bool = True,
+) -> OOFResult:
+    """OOF evaluation for global (single-offset) classifier.
+
+    Args:
+        samples        : all training OffsetSample objects (with oracle labels)
+        folds          : list of (train_idx, val_idx) splits
+        build_model_fn : fn(X_tr, y_tr, X_va, y_va) → fitted model
+        experiment     : name for this run
+        decode_mode    : "argmax" or "mean"
+        grid           : offset grid; defaults to make_offset_grid()
+        verbose        : print fold progress
+
+    Returns:
+        OOFResult with pooled_rmse and per-fold details
+    """
+    if grid is None:
+        grid = make_offset_grid()
+
+    # Build full feature matrix and labels once
+    X_all = make_well_features(samples)
+    y_all = make_global_offset_labels(samples, grid)
+
+    all_predictions = [None] * len(samples)
+    all_proba       = [None] * len(samples)
+    fold_rmses      = []
+
+    for fold_i, (tr_idx, va_idx) in enumerate(folds):
+        tr_idx = list(tr_idx)
+        va_idx = list(va_idx)
+
+        X_tr, y_tr = X_all[tr_idx], y_all[tr_idx]
+        X_va, y_va = X_all[va_idx], y_all[va_idx]
+
+        model = build_model_fn(X_tr, y_tr, X_va, y_va)
+
+        # Predict probabilities for val set
+        proba_va = predict_offset_proba(model, X_va)  # (|va|, N_BINS)
+
+        val_samples = [samples[i] for i in va_idx]
+        proba_list  = [proba_va[j] for j in range(len(va_idx))]
+
+        preds = decode_global_predictions(val_samples, proba_list, grid, mode=decode_mode)
+        trues = [s.tvt_hidden_true for s in val_samples]
+
+        fold_preds_flat = np.concatenate([p.astype(np.float64) for p in preds])
+        fold_true_flat  = np.concatenate([t.astype(np.float64) for t in trues])
+        fold_rmse = row_rmse(fold_preds_flat, fold_true_flat)
+        fold_rmses.append(fold_rmse)
+
+        for j, i in enumerate(va_idx):
+            all_predictions[i] = preds[j]
+            all_proba[i]       = proba_list[j]
+
+        if verbose:
+            print(f"  fold {fold_i + 1}/{len(folds)}  val_rmse={fold_rmse:.4f}")
+
+    # Pooled RMSE
+    all_preds_flat = np.concatenate([p.astype(np.float64) for p in all_predictions])
+    all_true_flat  = np.concatenate([
+        s.tvt_hidden_true.astype(np.float64) for s in samples
+    ])
+    pooled = row_rmse(all_preds_flat, all_true_flat)
+
+    if verbose:
+        print(f"  [global OOF]  pooled={pooled:.4f}  folds={[f'{r:.4f}' for r in fold_rmses]}")
+
+    return OOFResult(
+        experiment=experiment,
+        mode="global",
+        K=1,
+        decoder=decode_mode,
+        alpha=0.0,
+        pooled_rmse=pooled,
+        fold_rmses=fold_rmses,
+        all_predictions=all_predictions,
+        all_true=[s.tvt_hidden_true for s in samples],
+        well_ids=[s.well_id for s in samples],
+        all_proba=all_proba,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OOF for K-segment classifier
+# ---------------------------------------------------------------------------
+
+def run_oof_kseg(
+    samples: list,
+    folds: list[tuple[list[int], list[int]]],
+    build_model_fn: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], Any],
+    K: int,
+    experiment: str | None = None,
+    decoder: str = "viterbi",
+    alpha: float = 10.0,
+    beam_width: int = 32,
+    grid: np.ndarray | None = None,
+    verbose: bool = True,
+) -> OOFResult:
+    """OOF evaluation for K-segment classifier.
+
+    For each well, the model predicts K soft distributions (one per segment),
+    then Viterbi/beam decode finds the best-scoring segment sequence.
+
+    Args:
+        samples        : all training OffsetSample objects (with oracle labels)
+        folds          : list of (train_idx, val_idx) splits
+        build_model_fn : fn(X_tr, y_tr, X_va, y_va) → fitted model
+        K              : number of equal-spaced segments
+        experiment     : run name (defaults to "kseg_K{K}")
+        decoder        : "viterbi", "beam", or "greedy"
+        alpha          : Viterbi/beam transition penalty
+        beam_width     : beam width for beam decoder
+        grid           : offset grid
+        verbose        : print fold progress
+
+    Returns:
+        OOFResult with pooled_rmse and per-fold details
+    """
+    if grid is None:
+        grid = make_offset_grid()
+    if experiment is None:
+        experiment = f"kseg_K{K}_{decoder}"
+
+    # Build per-segment features and labels
+    # X_all shape: (N_wells * K, F)
+    # y_all shape: (N_wells * K,)
+    X_all = make_segment_features(samples, K)
+    y_all = make_kseg_offset_labels(samples, K, grid)
+
+    all_predictions = [None] * len(samples)
+    all_proba       = [None] * len(samples)  # list of (K, N_BINS)
+    fold_rmses      = []
+
+    for fold_i, (tr_idx, va_idx) in enumerate(folds):
+        tr_idx = list(tr_idx)
+        va_idx = list(va_idx)
+
+        # Select segment rows for this fold
+        # Well i → rows [i*K, i*K+1, ..., i*K+K-1]
+        tr_seg_rows = np.concatenate([np.arange(i * K, i * K + K) for i in tr_idx])
+        va_seg_rows = np.concatenate([np.arange(i * K, i * K + K) for i in va_idx])
+
+        X_tr = X_all[tr_seg_rows]
+        y_tr = y_all[tr_seg_rows]
+        X_va = X_all[va_seg_rows]
+        y_va = y_all[va_seg_rows]
+
+        model = build_model_fn(X_tr, y_tr, X_va, y_va)
+
+        # Predict probabilities for val segments
+        proba_va = predict_offset_proba(model, X_va)  # (|va| * K, N_BINS)
+
+        # Reshape to (|va|, K, N_BINS)
+        n_va = len(va_idx)
+        proba_va_3d = proba_va.reshape(n_va, K, -1)  # (n_va, K, N_BINS)
+
+        val_samples = [samples[i] for i in va_idx]
+        proba_list  = [proba_va_3d[j] for j in range(n_va)]  # list of (K, N_BINS)
+
+        preds = decode_kseg_predictions(
+            val_samples, proba_list, K,
+            grid=grid, decoder=decoder, alpha=alpha, beam_width=beam_width,
+        )
+        trues = [s.tvt_hidden_true for s in val_samples]
+
+        fold_preds_flat = np.concatenate([p.astype(np.float64) for p in preds])
+        fold_true_flat  = np.concatenate([t.astype(np.float64) for t in trues])
+        fold_rmse = row_rmse(fold_preds_flat, fold_true_flat)
+        fold_rmses.append(fold_rmse)
+
+        for j, i in enumerate(va_idx):
+            all_predictions[i] = preds[j]
+            all_proba[i]       = proba_list[j]
+
+        if verbose:
+            print(f"  fold {fold_i + 1}/{len(folds)}  val_rmse={fold_rmse:.4f}")
+
+    # Pooled RMSE
+    all_preds_flat = np.concatenate([p.astype(np.float64) for p in all_predictions])
+    all_true_flat  = np.concatenate([
+        s.tvt_hidden_true.astype(np.float64) for s in samples
+    ])
+    pooled = row_rmse(all_preds_flat, all_true_flat)
+
+    if verbose:
+        print(f"  [{experiment}]  pooled={pooled:.4f}  folds={[f'{r:.4f}' for r in fold_rmses]}")
+
+    return OOFResult(
+        experiment=experiment,
+        mode="kseg",
+        K=K,
+        decoder=decoder,
+        alpha=alpha,
+        pooled_rmse=pooled,
+        fold_rmses=fold_rmses,
+        all_predictions=all_predictions,
+        all_true=[s.tvt_hidden_true for s in samples],
+        well_ids=[s.well_id for s in samples],
+        all_proba=all_proba,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Convenience: dispatch by mode
+# ---------------------------------------------------------------------------
+
+def run_oof(
+    samples: list,
+    folds: list[tuple[list[int], list[int]]],
+    build_model_fn: Callable,
+    mode: str = "global",
+    K: int = 3,
+    experiment: str | None = None,
+    decoder: str = "viterbi",
+    alpha: float = 10.0,
+    beam_width: int = 32,
+    grid: np.ndarray | None = None,
+    verbose: bool = True,
+) -> OOFResult:
+    """Dispatch to run_oof_global or run_oof_kseg based on mode.
+
+    Args:
+        mode : "global" or "kseg"
+        (all other args as in run_oof_global / run_oof_kseg)
+    """
+    if mode == "global":
+        return run_oof_global(
+            samples, folds, build_model_fn,
+            experiment=experiment or "global_offset",
+            decode_mode=decoder if decoder in ("argmax", "mean") else "argmax",
+            grid=grid, verbose=verbose,
+        )
+    elif mode == "kseg":
+        return run_oof_kseg(
+            samples, folds, build_model_fn,
+            K=K, experiment=experiment,
+            decoder=decoder, alpha=alpha, beam_width=beam_width,
+            grid=grid, verbose=verbose,
+        )
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}. Use 'global' or 'kseg'.")
+
+
+# ---------------------------------------------------------------------------
+# Baseline (c0 drift, no model)
+# ---------------------------------------------------------------------------
+
+def run_c0_baseline(samples: list, verbose: bool = True) -> float:
+    """Compute pooled RMSE for the c0 drift baseline (no model).
+
+    Equivalent to predicting: TVT[h] = anchor - (Z[h] - Z_anchor) + c0 * row_delta
+
+    Returns:
+        Pooled row RMSE (ft)
+    """
+    from .offsets import tvt_base
+    all_preds = []
+    all_trues = []
+    for s in samples:
+        if s.tvt_hidden_true is None:
+            continue
+        pred = tvt_base(s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, c0=s.c0)
+        all_preds.append(pred.astype(np.float64))
+        all_trues.append(s.tvt_hidden_true.astype(np.float64))
+
+    if not all_preds:
+        return float("nan")
+
+    rmse = row_rmse(np.concatenate(all_preds), np.concatenate(all_trues))
+    if verbose:
+        print(f"  [c0_baseline]  pooled_rmse={rmse:.4f}")
+    return rmse
+
+
+# ---------------------------------------------------------------------------
+# Save / load OOF results
+# ---------------------------------------------------------------------------
+
+def save_oof_result(result: OOFResult, path: str) -> None:
+    """Persist an OOFResult to disk (pickle)."""
+    import pickle
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(result, f)
+
+
+def load_oof_result(path: str) -> OOFResult:
+    """Load an OOFResult from disk."""
+    import pickle
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+========================================================================
+# FILE: mtpnet/features.py
+========================================================================
+"""Feature engineering for the offset-state decoder models.
+
+Feature philosophy:
+- ALL features must be test-safe (computable from known prefix only)
+- No future information from hidden rows (except geometry: MD/X/Y/Z/GR)
+- GR, X, Y, Z at hidden rows ARE allowed — they are measured, not predicted
+
+Well-level features (one row per well) — used for global offset classifier:
+    - C-field drift statistics: c0, std, slope, multi-window medians
+    - Anchor geometry: Z_anchor, MD_anchor, anchor_C
+    - Trajectory geometry: total dip change, azimuth change, MD/Z/XY ranges
+    - GR statistics from known prefix
+    - Hidden segment geometry summary
+
+Per-segment features (one row per segment) — used for K-segment classifier:
+    - All well-level features
+    - Segment position (normalized: 0=first, 1=last)
+    - Segment mean Z, dZ, MD delta
+    - GR at segment center/start/end
+
+Usage:
+    feats = make_well_features(samples)            # shape (N_wells, n_features)
+    feats = make_segment_features(samples, K=3)    # shape (N_wells*K, n_features)
+"""
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import numpy as np
+import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Feature name lists (for reproducibility / feature importance)
+# ---------------------------------------------------------------------------
+
+WELL_FEATURE_NAMES: list[str] = []   # populated below
+SEG_EXTRA_FEATURE_NAMES: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _safe_stat(arr: np.ndarray, fn) -> float:
+    """Apply fn to arr, return 0.0 on error or empty."""
+    v = arr[np.isfinite(arr)]
+    if len(v) == 0:
+        return 0.0
+    try:
+        return float(fn(v))
+    except Exception:
+        return 0.0
+
+
+def _slope(x: np.ndarray) -> float:
+    """Linear slope of a 1-D array via polyfit (robust)."""
+    x = x[np.isfinite(x)]
+    if len(x) < 2:
+        return 0.0
+    t = np.arange(len(x), dtype=np.float64)
+    try:
+        return float(np.polyfit(t, x, 1)[0])
+    except Exception:
+        return 0.0
+
+
+def _percentile(arr: np.ndarray, q: float) -> float:
+    v = arr[np.isfinite(arr)]
+    return float(np.percentile(v, q)) if len(v) > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Well-level features
+# ---------------------------------------------------------------------------
+
+def make_well_feature_dict(sample) -> dict[str, float]:
+    """Extract all well-level features from an OffsetSample into a flat dict."""
+    z = sample.z.astype(np.float64)
+    md = sample.md.astype(np.float64)
+    gr = sample.gr.astype(np.float64)
+    tvt_input = sample.tvt_input.astype(np.float64)
+    hidden_rows = sample.hidden_rows
+    anchor_row = sample.anchor_row
+    anchor_tvt = float(sample.anchor_tvt)
+    anchor_z = float(sample.anchor_z)
+    n_hidden = sample.n_hidden
+    n_known = int(np.sum(np.isfinite(tvt_input)))
+
+    # Known row indices
+    known_idx = np.flatnonzero(np.isfinite(tvt_input))
+
+    # --- C-field drift statistics (test-safe) ---
+    feats: dict[str, float] = {
+        "c0":                   sample.c0,
+        "dC_last64_median":     sample.dC_last64_median,
+        "dC_last128_median":    sample.dC_last128_median,
+        "dC_last256_median":    sample.dC_last256_median,
+        "dC_last512_median":    sample.dC_last512_median,
+        "dC_last512_mean":      sample.dC_last512_mean,
+        "dC_last512_std":       sample.dC_last512_std,
+        "dC_last512_slope":     sample.dC_last512_slope,
+        "anchor_C":             sample.anchor_C,
+    }
+
+    # --- Multi-window c0 differences (trend indicators) ---
+    feats["dC_64_vs_512"]  = sample.dC_last64_median  - sample.dC_last512_median
+    feats["dC_128_vs_512"] = sample.dC_last128_median - sample.dC_last512_median
+    feats["dC_256_vs_512"] = sample.dC_last256_median - sample.dC_last512_median
+
+    # --- Geometry: anchor and well totals ---
+    feats["anchor_z"]   = anchor_z
+    feats["anchor_tvt"] = anchor_tvt
+    feats["anchor_md"]  = float(md[anchor_row]) if np.isfinite(md[anchor_row]) else 0.0
+
+    z_range = float(np.nanmax(z[:anchor_row + 1]) - np.nanmin(z[:anchor_row + 1]))
+    md_range = float(np.nanmax(md[:anchor_row + 1]) - np.nanmin(md[:anchor_row + 1]))
+    feats["z_range_known"]  = z_range
+    feats["md_range_known"] = md_range
+
+    x = sample.x.astype(np.float64)
+    y = sample.y.astype(np.float64)
+    feats["anchor_x"] = float(x[anchor_row]) if np.isfinite(x[anchor_row]) else 0.0
+    feats["anchor_y"] = float(y[anchor_row]) if np.isfinite(y[anchor_row]) else 0.0
+
+    # Horizontal displacement (well reach)
+    if len(known_idx) >= 2:
+        dx = x[anchor_row] - x[known_idx[0]]
+        dy = y[anchor_row] - y[known_idx[0]]
+        feats["lateral_reach"] = float(np.sqrt(dx**2 + dy**2))
+    else:
+        feats["lateral_reach"] = 0.0
+
+    # --- Trajectory: dip and build rates (over last known 64 rows) ---
+    win_start = max(0, anchor_row - 64)
+    known_win = known_idx[known_idx >= win_start]
+    if len(known_win) >= 2:
+        dz_win = np.diff(z[known_win])
+        dmd_win = np.diff(md[known_win])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dip_win = np.where(np.abs(dmd_win) > 0, dz_win / dmd_win, 0.0)
+        feats["dip_last64_mean"]   = _safe_stat(dip_win, np.mean)
+        feats["dip_last64_std"]    = _safe_stat(dip_win, np.std)
+        feats["dip_last64_slope"]  = _slope(dip_win)
+    else:
+        feats["dip_last64_mean"]   = 0.0
+        feats["dip_last64_std"]    = 0.0
+        feats["dip_last64_slope"]  = 0.0
+
+    # --- GR statistics from known prefix (last 256 rows) ---
+    win256_start = max(0, anchor_row - 256)
+    known_win256 = known_idx[known_idx >= win256_start]
+    if len(known_win256) > 0:
+        gr_win = gr[known_win256]
+        feats["gr_mean"]   = _safe_stat(gr_win, np.mean)
+        feats["gr_std"]    = _safe_stat(gr_win, np.std)
+        feats["gr_p10"]    = _percentile(gr_win, 10)
+        feats["gr_p50"]    = _percentile(gr_win, 50)
+        feats["gr_p90"]    = _percentile(gr_win, 90)
+        feats["gr_slope"]  = _slope(gr_win)
+    else:
+        feats["gr_mean"]  = 0.0
+        feats["gr_std"]   = 0.0
+        feats["gr_p10"]   = 0.0
+        feats["gr_p50"]   = 0.0
+        feats["gr_p90"]   = 0.0
+        feats["gr_slope"] = 0.0
+
+    # --- GR at anchor row ---
+    feats["gr_anchor"] = float(gr[anchor_row]) if np.isfinite(gr[anchor_row]) else feats["gr_mean"]
+
+    # --- Hidden segment geometry summary ---
+    feats["n_hidden"]   = float(n_hidden)
+    feats["n_known"]    = float(n_known)
+    feats["frac_hidden"] = float(n_hidden) / max(1.0, float(n_hidden + n_known))
+
+    if n_hidden > 0:
+        h_z    = z[hidden_rows]
+        h_md   = md[hidden_rows]
+        h_gr   = gr[hidden_rows]
+
+        feats["hidden_dz_total"]  = float(h_z[-1] - anchor_z)
+        feats["hidden_dmd_total"] = float(h_md[-1] - md[anchor_row]) if np.isfinite(md[anchor_row]) else 0.0
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dip_hidden = float(feats["hidden_dz_total"] / max(abs(feats["hidden_dmd_total"]), 1e-6))
+        feats["hidden_dip_approx"] = dip_hidden
+
+        feats["hidden_z_mean"]  = _safe_stat(h_z, np.mean)
+        feats["hidden_z_std"]   = _safe_stat(h_z, np.std)
+        feats["hidden_gr_mean"] = _safe_stat(h_gr, np.mean)
+        feats["hidden_gr_std"]  = _safe_stat(h_gr, np.std)
+        feats["hidden_gr_p50"]  = _percentile(h_gr, 50)
+
+        # Rate of Z change per row in hidden segment
+        feats["hidden_dz_per_row"] = feats["hidden_dz_total"] / max(n_hidden, 1)
+    else:
+        for k in ["hidden_dz_total", "hidden_dmd_total", "hidden_dip_approx",
+                  "hidden_z_mean", "hidden_z_std", "hidden_gr_mean",
+                  "hidden_gr_std", "hidden_gr_p50", "hidden_dz_per_row"]:
+            feats[k] = 0.0
+
+    # --- Ratio: C-drift std relative to c0 ---
+    feats["c0_snr"] = abs(feats["c0"]) / (feats["dC_last512_std"] + 1e-6)
+
+    # --- Last known C-value relative to anchor_C ---
+    if n_known >= 2:
+        C_vals = (tvt_input[known_idx] + z[known_idx])
+        dC_vals = np.diff(C_vals[np.isfinite(C_vals)])
+        feats["dC_last1"]  = float(dC_vals[-1]) if len(dC_vals) >= 1 else 0.0
+        feats["dC_last3"]  = _safe_stat(dC_vals[-3:], np.mean) if len(dC_vals) >= 1 else 0.0
+        feats["dC_last10"] = _safe_stat(dC_vals[-10:], np.mean) if len(dC_vals) >= 1 else 0.0
+    else:
+        feats["dC_last1"]  = 0.0
+        feats["dC_last3"]  = 0.0
+        feats["dC_last10"] = 0.0
+
+    # --- Short-window dC stats (added for residual learning) ---
+    if n_known >= 2:
+        C_vals = (tvt_input[known_idx] + z[known_idx])
+        dC_vals = np.diff(C_vals[np.isfinite(C_vals)])
+
+        # Short-window medians (16, 32 rows)
+        for w in (16, 32):
+            w_vals = dC_vals[-w:] if len(dC_vals) >= w else dC_vals
+            feats[f"dC_last{w}_median"] = _safe_stat(w_vals, np.median)
+            feats[f"dC_last{w}_std"]    = _safe_stat(w_vals, np.std)
+
+        # Short-window vs long-window difference (drift acceleration)
+        feats["dC_16_vs_512"]  = feats["dC_last16_median"] - feats["dC_last512_median"]
+        feats["dC_32_vs_512"]  = feats["dC_last32_median"] - feats["dC_last512_median"]
+        feats["dC_16_vs_128"]  = feats["dC_last16_median"] - feats["dC_last128_median"]
+
+        # Slope of short-window dC (drift 2nd derivative)
+        feats["dC_slope_last32"]  = _slope(dC_vals[-32:])  if len(dC_vals) >= 4 else 0.0
+        feats["dC_slope_last128"] = _slope(dC_vals[-128:]) if len(dC_vals) >= 8 else 0.0
+
+        # Lag-1 autocorrelation of recent dC (persistence / mean-reversion)
+        w_ac = min(128, len(dC_vals))
+        if w_ac >= 4:
+            ac_vals = dC_vals[-w_ac:]
+            ac_vals_d = ac_vals - ac_vals.mean()
+            denom = np.dot(ac_vals_d, ac_vals_d)
+            if denom > 0:
+                feats["dC_autocorr1"] = float(np.dot(ac_vals_d[:-1], ac_vals_d[1:]) / denom)
+            else:
+                feats["dC_autocorr1"] = 0.0
+        else:
+            feats["dC_autocorr1"] = 0.0
+
+        # IQR of dC in last 128 rows (drift variability / regime stability)
+        w128 = dC_vals[-128:] if len(dC_vals) >= 8 else dC_vals
+        feats["dC_iqr_last128"] = float(np.percentile(w128, 75) - np.percentile(w128, 25)) if len(w128) >= 4 else 0.0
+
+        # Fraction of recent rows where dC > c0 (directional bias)
+        c0_val = feats["c0"]
+        feats["dC_frac_above_c0_last64"] = float(np.mean(dC_vals[-64:] > c0_val)) if len(dC_vals) >= 4 else 0.5
+    else:
+        for k in ["dC_last16_median", "dC_last16_std", "dC_last32_median", "dC_last32_std",
+                  "dC_16_vs_512", "dC_32_vs_512", "dC_16_vs_128",
+                  "dC_slope_last32", "dC_slope_last128",
+                  "dC_autocorr1", "dC_iqr_last128", "dC_frac_above_c0_last64"]:
+            feats[k] = 0.0
+
+    # --- GR regime change near anchor (last 32 vs 256 rows) ---
+    win32_start = max(0, anchor_row - 32)
+    known_win32 = known_idx[known_idx >= win32_start]
+    if len(known_win32) > 0:
+        gr_win32 = gr[known_win32]
+        feats["gr_last32_mean"]    = _safe_stat(gr_win32, np.mean)
+        feats["gr_last32_std"]     = _safe_stat(gr_win32, np.std)
+        feats["gr_last32_vs_256"]  = feats["gr_last32_mean"] - feats.get("gr_mean", 0.0)
+    else:
+        feats["gr_last32_mean"]   = feats.get("gr_mean", 0.0)
+        feats["gr_last32_std"]    = 0.0
+        feats["gr_last32_vs_256"] = 0.0
+
+    # --- dip change over last 32 vs last 64 rows ---
+    win32_dip_start = max(0, anchor_row - 32)
+    known_win32_dip = known_idx[known_idx >= win32_dip_start]
+    if len(known_win32_dip) >= 2:
+        dz32  = np.diff(z[known_win32_dip])
+        dmd32 = np.diff(md[known_win32_dip])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dip32 = np.where(np.abs(dmd32) > 0, dz32 / dmd32, 0.0)
+        feats["dip_last32_mean"]  = _safe_stat(dip32, np.mean)
+        feats["dip_32_vs_64"]     = feats["dip_last32_mean"] - feats.get("dip_last64_mean", 0.0)
+    else:
+        feats["dip_last32_mean"] = feats.get("dip_last64_mean", 0.0)
+        feats["dip_32_vs_64"]    = 0.0
+
+    return feats
+
+
+def make_well_features(
+    samples: list,
+    return_df: bool = False,
+) -> np.ndarray | pd.DataFrame:
+    """Build a feature matrix from a list of OffsetSample objects.
+
+    Args:
+        samples   : list of OffsetSample
+        return_df : if True, return a DataFrame instead of ndarray
+
+    Returns:
+        (N, F) float32 array or DataFrame
+    """
+    dicts = [make_well_feature_dict(s) for s in samples]
+    df = pd.DataFrame(dicts)
+    # Coerce to float32, fill NaN with 0
+    df = df.fillna(0.0).astype(np.float32)
+    if return_df:
+        return df
+    return df.values
+
+
+# ---------------------------------------------------------------------------
+# Per-segment features (extends well features with segment-specific info)
+# ---------------------------------------------------------------------------
+
+def make_segment_feature_dict(
+    sample,
+    k: int,
+    K: int,
+) -> dict[str, float]:
+    """Features for a specific segment k (0-indexed) of K total segments.
+
+    Includes all well-level features plus segment-specific geometry.
+    """
+    feats = make_well_feature_dict(sample)
+
+    n_hidden = sample.n_hidden
+    z = sample.z.astype(np.float64)
+    md = sample.md.astype(np.float64)
+    gr = sample.gr.astype(np.float64)
+    hidden_rows = sample.hidden_rows
+
+    # Segment position
+    feats["seg_k"]             = float(k)
+    feats["seg_K"]             = float(K)
+    feats["seg_pos_norm"]      = float(k) / max(K - 1, 1)     # 0 = first, 1 = last
+
+    # Segment row range
+    from .offsets import segment_assignment
+    seg_assign = segment_assignment(n_hidden, K)
+    seg_mask = seg_assign == k
+    seg_rows = hidden_rows[seg_mask]
+
+    if len(seg_rows) > 0:
+        feats["seg_n_rows"]    = float(len(seg_rows))
+        seg_z  = z[seg_rows]
+        seg_md = md[seg_rows]
+        seg_gr = gr[seg_rows]
+
+        feats["seg_z_start"]   = float(z[seg_rows[0]])
+        feats["seg_z_end"]     = float(z[seg_rows[-1]])
+        feats["seg_dz"]        = float(z[seg_rows[-1]] - z[seg_rows[0]])
+        feats["seg_z_mean"]    = _safe_stat(seg_z, np.mean)
+        feats["seg_dz_per_row"] = feats["seg_dz"] / max(len(seg_rows), 1)
+
+        # Z relative to anchor
+        feats["seg_z_start_rel"] = feats["seg_z_start"] - float(sample.anchor_z)
+        feats["seg_z_end_rel"]   = feats["seg_z_end"]   - float(sample.anchor_z)
+
+        feats["seg_md_start"]  = float(md[seg_rows[0]])
+        feats["seg_md_end"]    = float(md[seg_rows[-1]])
+        feats["seg_md_delta"]  = float(md[seg_rows[-1]] - md[seg_rows[0]])
+
+        feats["seg_gr_mean"]   = _safe_stat(seg_gr, np.mean)
+        feats["seg_gr_std"]    = _safe_stat(seg_gr, np.std)
+        feats["seg_gr_p50"]    = _percentile(seg_gr, 50)
+
+        # GR comparison vs recent known section (formation change indicator)
+        feats["seg_gr_vs_anchor"]  = feats["seg_gr_mean"] - feats.get("gr_anchor", 0.0)
+        feats["seg_gr_vs_recent"]  = feats["seg_gr_mean"] - feats.get("gr_last32_mean", 0.0)
+        feats["seg_gr_vs_known"]   = feats["seg_gr_mean"] - feats.get("gr_mean", 0.0)
+    else:
+        for key in ["seg_n_rows", "seg_z_start", "seg_z_end", "seg_dz",
+                    "seg_z_mean", "seg_dz_per_row", "seg_z_start_rel",
+                    "seg_z_end_rel", "seg_md_start", "seg_md_end",
+                    "seg_md_delta", "seg_gr_mean", "seg_gr_std", "seg_gr_p50",
+                    "seg_gr_vs_anchor", "seg_gr_vs_recent", "seg_gr_vs_known"]:
+            feats[key] = 0.0
+
+    return feats
+
+
+def make_segment_features(
+    samples: list,
+    K: int,
+    return_df: bool = False,
+) -> np.ndarray | pd.DataFrame:
+    """Build per-segment feature matrix.
+
+    For each well, produce K rows (one per segment), stacking all wells.
+
+    Args:
+        samples   : list of OffsetSample
+        K         : number of segments
+        return_df : if True, return DataFrame with well_id and seg_k columns
+
+    Returns:
+        If return_df: DataFrame with N_wells*K rows
+        Else: (N_wells*K, F) float32 array
+    """
+    dicts = []
+    for s in samples:
+        for k in range(K):
+            d = make_segment_feature_dict(s, k, K)
+            if return_df:
+                d["_well_id"] = s.well_id
+                d["_seg_k"]   = k
+            dicts.append(d)
+
+    df = pd.DataFrame(dicts)
+    if return_df:
+        meta_cols = ["_well_id", "_seg_k"]
+        feat_cols = [c for c in df.columns if c not in meta_cols]
+        df[feat_cols] = df[feat_cols].fillna(0.0).astype(np.float32)
+        return df
+    df = df.fillna(0.0).astype(np.float32)
+    return df.values
+
+
+# ---------------------------------------------------------------------------
+# Label extraction helpers
+# ---------------------------------------------------------------------------
+
+def make_global_offset_labels(
+    samples: list,
+    grid: np.ndarray,
+) -> np.ndarray:
+    """Extract oracle global offset bin labels from samples.
+
+    Args:
+        samples : training samples with global_offset_star set
+        grid    : offset grid
+
+    Returns:
+        (N,) int array of bin indices
+    """
+    from .offsets import offset_to_bin
+    labels = []
+    for s in samples:
+        if s.global_offset_star is None:
+            raise ValueError(f"Oracle not computed for well {s.well_id}")
+        labels.append(offset_to_bin(s.global_offset_star, grid))
+    return np.array(labels, dtype=np.int32)
+
+
+def make_kseg_offset_labels(
+    samples: list,
+    K: int,
+    grid: np.ndarray,
+) -> np.ndarray:
+    """Extract per-segment oracle bin labels.
+
+    Returns:
+        (N_wells * K,) int array (same row order as make_segment_features)
+    """
+    from .offsets import offset_to_bin
+    labels = []
+    for s in samples:
+        if K not in s.kseg_offset_star:
+            raise ValueError(f"K={K} oracle not computed for well {s.well_id}")
+        offsets_k = s.kseg_offset_star[K]
+        for k in range(K):
+            c_k = offsets_k[k] if k < len(offsets_k) else offsets_k[-1]
+            labels.append(offset_to_bin(float(c_k), grid))
+    return np.array(labels, dtype=np.int32)
+
+========================================================================
+# FILE: mtpnet/metrics.py
+========================================================================
+"""Evaluation metrics for the offset-state TVT decoder.
+
+Primary metric: pooled row-level RMSE (in feet) over all hidden rows across
+all wells.  This is the competition metric and must NOT be replaced by offset
+MAE or per-well RMSE.
+
+Usage:
+    from mtpnet.metrics import row_rmse, make_scoreboard
+
+    rmse = row_rmse(preds_flat, trues_flat)
+    board = make_scoreboard(results_dict)
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Core metric
+# ---------------------------------------------------------------------------
+
+def row_rmse(
+    predictions: np.ndarray | list[float],
+    targets: np.ndarray | list[float],
+) -> float:
+    """Pooled row-level RMSE (ft).
+
+    Both arrays are 1-D and correspond to hidden rows across all wells.
+    NaN entries in either array are excluded.
+
+    Args:
+        predictions : predicted TVT values (H_total,)
+        targets     : true TVT values (H_total,)
+
+    Returns:
+        RMSE in feet (float).  Returns nan if no valid rows.
+    """
+    p = np.asarray(predictions, dtype=np.float64).ravel()
+    t = np.asarray(targets, dtype=np.float64).ravel()
+    if len(p) != len(t):
+        raise ValueError(f"Length mismatch: predictions={len(p)}, targets={len(t)}")
+    valid = np.isfinite(p) & np.isfinite(t)
+    if not np.any(valid):
+        return float("nan")
+    return float(np.sqrt(np.mean((p[valid] - t[valid]) ** 2)))
+
+
+def per_well_rmse(
+    predictions: list[np.ndarray],
+    targets: list[np.ndarray],
+    well_ids: list[str] | None = None,
+) -> pd.DataFrame:
+    """Compute per-well RMSE and return a sorted DataFrame.
+
+    Args:
+        predictions : list of (H_i,) arrays (one per well)
+        targets     : list of (H_i,) arrays (one per well)
+        well_ids    : optional list of well ID strings
+
+    Returns:
+        DataFrame with columns [well_id, n_hidden, rmse], sorted by rmse desc.
+    """
+    rows = []
+    for i, (p, t) in enumerate(zip(predictions, targets)):
+        wid = well_ids[i] if well_ids is not None else str(i)
+        p_ = np.asarray(p, dtype=np.float64)
+        t_ = np.asarray(t, dtype=np.float64)
+        valid = np.isfinite(p_) & np.isfinite(t_)
+        n = int(np.sum(valid))
+        rmse = float(np.sqrt(np.mean((p_[valid] - t_[valid]) ** 2))) if n > 0 else float("nan")
+        rows.append({"well_id": wid, "n_hidden": n, "rmse": rmse})
+    df = pd.DataFrame(rows).sort_values("rmse", ascending=False).reset_index(drop=True)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Top-K oracle RMSE (upper bound from model's soft distribution)
+# ---------------------------------------------------------------------------
+
+def top_k_oracle_rmse(
+    proba: np.ndarray,
+    offset_grid: np.ndarray,
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    tvt_true: np.ndarray,
+    k: int = 20,
+) -> float:
+    """Oracle RMSE achievable if we pick the best offset from the top-K predicted bins.
+
+    This is an upper-bound diagnostic: if the true offset bin is consistently
+    in the top-K, the model has learned the right distribution.
+
+    Args:
+        proba        : (N_OFFSET_BINS,) soft probability over offset bins for this well
+        offset_grid  : offset values (N_OFFSET_BINS,)
+        z, anchor_row, anchor_tvt, hidden_rows : well geometry
+        tvt_true     : (H,) true TVT for hidden rows
+        k            : how many top bins to check
+
+    Returns:
+        Best RMSE over top-K bins (float).
+    """
+    from .offsets import tvt_from_global_offset
+
+    top_bins = np.argsort(proba)[::-1][:k]
+    best = float("inf")
+    for b in top_bins:
+        pred = tvt_from_global_offset(z, anchor_row, anchor_tvt, hidden_rows, offset_grid[b])
+        r = row_rmse(pred, tvt_true)
+        if r < best:
+            best = r
+    return best
+
+
+def posterior_mean_rmse(
+    proba: np.ndarray,
+    offset_grid: np.ndarray,
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    tvt_true: np.ndarray,
+) -> float:
+    """RMSE using the posterior-mean offset (E[c | proba]).
+
+    Args:
+        proba : (N_OFFSET_BINS,) soft probability distribution
+        (rest as above)
+
+    Returns:
+        RMSE from posterior-mean offset (float).
+    """
+    from .offsets import tvt_from_global_offset
+
+    p = np.asarray(proba, dtype=np.float64)
+    p = p / (p.sum() + 1e-30)
+    c_mean = float(np.dot(p, offset_grid))
+    pred = tvt_from_global_offset(z, anchor_row, anchor_tvt, hidden_rows, c_mean)
+    return row_rmse(pred, tvt_true)
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard
+# ---------------------------------------------------------------------------
+
+def make_scoreboard(results: dict[str, float | dict]) -> pd.DataFrame:
+    """Format a scoreboard DataFrame from a results dict.
+
+    Args:
+        results : mapping of experiment_name → rmse (float) or dict with 'rmse' key
+
+    Returns:
+        DataFrame with columns [experiment, rmse] sorted by rmse ascending.
+    """
+    rows = []
+    for name, val in results.items():
+        if isinstance(val, dict):
+            rmse = val.get("rmse", float("nan"))
+        else:
+            rmse = float(val)
+        rows.append({"experiment": name, "rmse": rmse})
+    df = pd.DataFrame(rows).sort_values("rmse").reset_index(drop=True)
+    return df
+
+
+def print_scoreboard(results: dict[str, float | dict], title: str = "Scoreboard") -> None:
+    """Pretty-print the scoreboard."""
+    df = make_scoreboard(results)
+    print(f"\n{'='*50}")
+    print(f"  {title}")
+    print(f"{'='*50}")
+    for _, row in df.iterrows():
+        print(f"  {row['experiment']:<40s}  {row['rmse']:.4f} ft")
+    print(f"{'='*50}\n")
+
+
+# ---------------------------------------------------------------------------
+# Aggregate helpers
+# ---------------------------------------------------------------------------
+
+def collect_predictions_and_targets(
+    samples: list,   # list[OffsetSample]
+    predictions: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten per-well predictions and targets into 1-D arrays.
+
+    Args:
+        samples     : list of OffsetSample (must have tvt_true set)
+        predictions : list of (H_i,) predicted TVT arrays
+
+    Returns:
+        (all_preds, all_trues) — concatenated float64 arrays
+    """
+    all_preds: list[np.ndarray] = []
+    all_trues: list[np.ndarray] = []
+    for s, p in zip(samples, predictions):
+        t = s.tvt_hidden_true
+        if t is None:
+            continue
+        all_preds.append(np.asarray(p, dtype=np.float64))
+        all_trues.append(np.asarray(t, dtype=np.float64))
+    return np.concatenate(all_preds), np.concatenate(all_trues)
+
+========================================================================
+# FILE: mtpnet/models.py
+========================================================================
+"""LightGBM/CatBoost multiclass classifier for offset bin prediction.
+
+Design:
+  - Both global (1 pred per well) and per-segment (K preds per well) use the
+    same classifier interface: train_offset_classifier / predict_offset_proba
+  - Output is a soft probability distribution over N_OFFSET_BINS bins
+  - Default backend: LightGBM (faster iteration); CatBoost available as fallback
+  - Hyperparameters are reasonable defaults; tuning happens in experiment scripts
+
+Usage:
+    from mtpnet.models import train_offset_classifier, predict_offset_proba
+
+    model = train_offset_classifier(X_train, y_train)
+    proba = predict_offset_proba(model, X_test)   # (N_test, N_BINS)
+    bins  = np.argmax(proba, axis=1)
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+
+from .offsets import N_OFFSET_BINS
+
+# ---------------------------------------------------------------------------
+# LightGBM defaults
+# ---------------------------------------------------------------------------
+
+LGBM_DEFAULTS: dict[str, Any] = {
+    "objective":       "multiclass",
+    "num_class":       N_OFFSET_BINS,
+    "n_estimators":    500,
+    "learning_rate":   0.05,
+    "num_leaves":      63,
+    "max_depth":       -1,
+    "min_child_samples": 5,
+    "subsample":       0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha":       0.1,
+    "reg_lambda":      0.1,
+    "n_jobs":          -1,
+    "verbose":         -1,
+    "random_state":    42,
+}
+
+# CatBoost defaults (lower iteration count — slower but often better on small data)
+CATBOOST_DEFAULTS: dict[str, Any] = {
+    "loss_function":   "MultiClass",
+    "classes_count":   N_OFFSET_BINS,
+    "iterations":      300,
+    "learning_rate":   0.05,
+    "depth":           6,
+    "l2_leaf_reg":     3.0,
+    "random_seed":     42,
+    "verbose":         0,
+}
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+def train_offset_classifier(
+    X: np.ndarray,
+    y: np.ndarray,
+    X_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+    backend: str = "lgbm",
+    params: dict | None = None,
+    early_stopping_rounds: int = 50,
+    verbose: bool = True,
+) -> Any:
+    """Train a multiclass offset classifier.
+
+    Args:
+        X       : (N, F) float32 feature matrix
+        y       : (N,) int32 bin labels in [0, N_OFFSET_BINS)
+        X_val   : optional validation features for early stopping
+        y_val   : optional validation labels for early stopping
+        backend : "lgbm" (default) or "catboost"
+        params  : override default hyper-parameters (merged, not replaced)
+        early_stopping_rounds: 0 to disable
+        verbose : print training progress
+
+    Returns:
+        Fitted model object (LGBMClassifier or CatBoostClassifier)
+    """
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y, dtype=np.int32)
+
+    if backend == "lgbm":
+        return _train_lgbm(
+            X, y, X_val, y_val, params, early_stopping_rounds, verbose
+        )
+    elif backend == "catboost":
+        return _train_catboost(
+            X, y, X_val, y_val, params, early_stopping_rounds, verbose
+        )
+    else:
+        raise ValueError(f"Unknown backend: {backend!r}. Use 'lgbm' or 'catboost'.")
+
+
+# ---------------------------------------------------------------------------
+# Thin wrapper for native LightGBM booster to expose sklearn-style API
+# ---------------------------------------------------------------------------
+
+class _LGBMWrapper:
+    """Wraps lgb.Booster to expose predict_proba() + feature_importances_."""
+
+    def __init__(self, booster):
+        self.booster = booster
+        self.feature_importances_ = booster.feature_importance(importance_type="gain")
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=np.float32)
+        raw = self.booster.predict(X)   # (N, N_BINS) for multiclass
+        if raw.ndim == 1:
+            # Binary edge case: shouldn't happen but guard it
+            raw = np.column_stack([1 - raw, raw])
+        return raw.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# LightGBM training
+# ---------------------------------------------------------------------------
+
+def _train_lgbm(
+    X, y, X_val, y_val, params, early_stopping_rounds, verbose
+):
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        raise ImportError("lightgbm is required: pip install lightgbm")
+
+    kw = {**LGBM_DEFAULTS}
+    if params:
+        kw.update(params)
+
+    # Use native API to avoid sklearn label-encoding issues
+    # (the sklearn wrapper breaks when val has bins not seen in train)
+    n_estimators = kw.pop("n_estimators", 500)
+    kw.pop("random_state", None)
+    kw["seed"] = kw.pop("seed", 42) if "seed" in kw else 42
+    kw["n_jobs"] = kw.pop("n_jobs", -1)
+    kw["verbosity"] = -1
+
+    train_data = lgb.Dataset(X, label=y)
+    callbacks = []
+    valid_sets = [train_data]
+    valid_names = ["train"]
+
+    if X_val is not None and y_val is not None and early_stopping_rounds > 0:
+        val_data = lgb.Dataset(
+            np.asarray(X_val, np.float32),
+            label=np.asarray(y_val, np.int32),
+            reference=train_data,
+        )
+        valid_sets.append(val_data)
+        valid_names.append("val")
+        callbacks.append(lgb.early_stopping(early_stopping_rounds, verbose=False))
+        if verbose:
+            callbacks.append(lgb.log_evaluation(period=100))
+
+    booster = lgb.train(
+        kw,
+        train_data,
+        num_boost_round=n_estimators,
+        valid_sets=valid_sets,
+        valid_names=valid_names,
+        callbacks=callbacks if callbacks else None,
+    )
+
+    # Wrap in a thin object that has .predict_proba() and .feature_importances_
+    return _LGBMWrapper(booster)
+
+
+def _train_catboost(
+    X, y, X_val, y_val, params, early_stopping_rounds, verbose
+):
+    try:
+        from catboost import CatBoostClassifier, Pool
+    except ImportError:
+        raise ImportError("catboost is required: pip install catboost")
+
+    kw = {**CATBOOST_DEFAULTS}
+    if params:
+        kw.update(params)
+
+    model = CatBoostClassifier(**kw)
+
+    eval_set = None
+    if X_val is not None and y_val is not None:
+        eval_set = Pool(np.asarray(X_val, np.float32), label=y_val)
+
+    model.fit(
+        Pool(X, label=y),
+        eval_set=eval_set,
+        early_stopping_rounds=early_stopping_rounds if early_stopping_rounds > 0 else None,
+    )
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
+
+def predict_offset_proba(
+    model: Any,
+    X: np.ndarray,
+) -> np.ndarray:
+    """Predict soft probability distribution over offset bins.
+
+    Args:
+        model : fitted classifier (LGBMClassifier or CatBoostClassifier)
+        X     : (N, F) feature matrix
+
+    Returns:
+        (N, N_OFFSET_BINS) float32 probability array (rows sum to ~1)
+    """
+    X = np.asarray(X, dtype=np.float32)
+    proba = model.predict_proba(X)
+    return proba.astype(np.float32)
+
+
+def predict_offset_bin(
+    model: Any,
+    X: np.ndarray,
+) -> np.ndarray:
+    """Predict the argmax offset bin (hard assignment).
+
+    Returns:
+        (N,) int32 array of bin indices
+    """
+    proba = predict_offset_proba(model, X)
+    return np.argmax(proba, axis=1).astype(np.int32)
+
+
+def predict_offset_value(
+    model: Any,
+    X: np.ndarray,
+    grid: np.ndarray,
+    mode: str = "argmax",
+) -> np.ndarray:
+    """Predict offset value for each sample.
+
+    Args:
+        mode : "argmax" (MAP estimate) or "mean" (posterior mean)
+
+    Returns:
+        (N,) float32 array of offset values
+    """
+    proba = predict_offset_proba(model, X)
+    if mode == "argmax":
+        bins = np.argmax(proba, axis=1)
+        return grid[bins].astype(np.float32)
+    elif mode == "mean":
+        g = np.asarray(grid, dtype=np.float64)
+        return (proba.astype(np.float64) @ g).astype(np.float32)
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}")
+
+
+# ---------------------------------------------------------------------------
+# Feature importance
+# ---------------------------------------------------------------------------
+
+def get_feature_importance(
+    model: Any,
+    feature_names: list[str] | None = None,
+) -> dict[str, float] | None:
+    """Extract feature importance from a fitted model (if available).
+
+    Returns:
+        Dict mapping feature_name → importance (or None if not available).
+    """
+    backend = type(model).__module__.split(".")[0]
+
+    if isinstance(model, _LGBMWrapper) or backend == "lightgbm":
+        imp = model.feature_importances_
+        names = feature_names or [f"f{i}" for i in range(len(imp))]
+        return dict(sorted(zip(names, imp), key=lambda x: -x[1]))
+
+    elif backend == "catboost":
+        try:
+            imp = model.get_feature_importance()
+            names = feature_names or [f"f{i}" for i in range(len(imp))]
+            return dict(sorted(zip(names, imp), key=lambda x: -x[1]))
+        except Exception:
+            return None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Model persistence
+# ---------------------------------------------------------------------------
+
+def save_model(model: Any, path: str) -> None:
+    """Save a fitted model to disk (pickle for LGBM, native for CatBoost)."""
+    import pickle
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(model, _LGBMWrapper):
+        model.booster.save_model(path)
+        return
+    backend = type(model).__module__.split(".")[0]
+    if backend == "catboost":
+        model.save_model(path)
+    else:
+        with open(path, "wb") as f:
+            pickle.dump(model, f)
+
+
+def load_model(path: str, backend: str = "lgbm") -> Any:
+    """Load a model from disk."""
+    import pickle
+    if backend == "catboost":
+        try:
+            from catboost import CatBoostClassifier
+        except ImportError:
+            raise ImportError("catboost required")
+        model = CatBoostClassifier()
+        model.load_model(path)
+        return model
+    else:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+========================================================================
+# FILE: mtpnet/offsets.py
+========================================================================
+"""Canonical physical integrators for the offset-state TVT decoder.
+
+Convention (canonical — never change):
+    dtvt[k] = -(z[h[k]] - z[prev[k]]) + offset_per_row[k]
+    pred_tvt  = anchor_tvt + cumsum(dtvt)
+
+    where h[k] = hidden_rows[k], prev[0] = anchor_row, prev[k] = h[k-1]
+
+For constant global offset c:
+    pred_tvt[i] = anchor_tvt - (z[h[i]] - z[anchor_row]) + c * row_delta[i]
+    row_delta[i] = h[i] - anchor_row
+
+This is the "TVT ≈ -Z + C" decomposition where C is the cumulative formation offset.
+
+Do NOT mix these two expressions:
+    (a) global offset c → row_delta scale
+    (b) per-row offset c_k → cumsum(-dZ + c_k)
+Both are implemented here; (b) reduces to (a) when c_k = c for all k.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Offset grid constants
+# ---------------------------------------------------------------------------
+
+OFFSET_LO: float = -0.16      # ft/row  (minimum grid value)
+OFFSET_HI: float = 0.16       # ft/row  (maximum grid value)
+OFFSET_STEP: float = 0.001    # ft/row
+N_OFFSET_BINS: int = 321       # len(np.arange(-0.16, 0.1601, 0.001))
+
+
+def make_offset_grid(
+    lo: float = OFFSET_LO,
+    hi: float = OFFSET_HI,
+    step: float = OFFSET_STEP,
+) -> np.ndarray:
+    """Return the canonical offset grid (float64)."""
+    grid = np.arange(lo, hi + step * 0.5, step)
+    return grid.astype(np.float64)
+
+
+def offset_to_bin(offset: float, grid: np.ndarray) -> int:
+    """Map a float offset value to the nearest grid bin index (0-indexed)."""
+    idx = int(np.argmin(np.abs(grid - offset)))
+    return int(np.clip(idx, 0, len(grid) - 1))
+
+
+def bin_to_offset(bin_idx: int | np.ndarray, grid: np.ndarray) -> float | np.ndarray:
+    """Map bin index (or array of indices) back to offset values."""
+    return grid[bin_idx]
+
+
+# ---------------------------------------------------------------------------
+# Integration function 1: global constant offset
+# ---------------------------------------------------------------------------
+
+def tvt_from_global_offset(
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    offset: float,
+) -> np.ndarray:
+    """Predict TVT for hidden rows using a single global offset (ft/row).
+
+    Formula:
+        pred[i] = anchor_tvt
+                  - (z[hidden_rows[i]] - z[anchor_row])
+                  + offset * (hidden_rows[i] - anchor_row)
+
+    Args:
+        z           : full-well Z array (N,)
+        anchor_row  : index of the last known row
+        anchor_tvt  : TVT at the anchor row
+        hidden_rows : indices of hidden rows to predict (H,)
+        offset      : global offset in ft/row
+
+    Returns:
+        pred : (H,) float32 predicted TVT values
+    """
+    rows = np.asarray(hidden_rows, dtype=np.int64)
+    row_delta = (rows - anchor_row).astype(np.float64)
+    z_f = np.asarray(z, dtype=np.float64)
+    pred = (
+        float(anchor_tvt)
+        - (z_f[rows] - float(z_f[anchor_row]))
+        + float(offset) * row_delta
+    )
+    return pred.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Integration function 2: per-hidden-row offsets (cumsum form)
+# ---------------------------------------------------------------------------
+
+def tvt_from_offset_per_row(
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    offset_per_row: np.ndarray,
+) -> np.ndarray:
+    """Predict TVT using per-hidden-row offsets via cumulative integration.
+
+    Formula:
+        dtvt[k] = -(z[h[k]] - z[prev[k]]) + offset_per_row[k]
+        pred     = anchor_tvt + cumsum(dtvt)
+
+    where prev[0] = anchor_row, prev[k] = h[k-1]
+
+    This is the canonical form. For constant offset c the result equals
+    tvt_from_global_offset when hidden_rows are consecutive integers
+    starting at anchor_row + 1.
+
+    Args:
+        z              : full-well Z array (N,)
+        anchor_row     : index of the last known row
+        anchor_tvt     : TVT at the anchor row
+        hidden_rows    : indices of hidden rows (H,) — need not be consecutive
+        offset_per_row : per-row offset values (H,) in ft/row
+
+    Returns:
+        pred : (H,) float32 predicted TVT values
+    """
+    rows = np.asarray(hidden_rows, dtype=np.int64)
+    H = len(rows)
+    if H == 0:
+        return np.array([], dtype=np.float32)
+
+    z_f = np.asarray(z, dtype=np.float64)
+    prev_rows = np.empty(H, dtype=np.int64)
+    prev_rows[0] = anchor_row
+    prev_rows[1:] = rows[:-1]
+
+    dz = z_f[rows] - z_f[prev_rows]
+    dtvt = -dz + np.asarray(offset_per_row, dtype=np.float64)
+    return (float(anchor_tvt) + np.cumsum(dtvt)).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Segment expansion
+# ---------------------------------------------------------------------------
+
+def expand_segment_offsets(n_hidden: int, offsets: np.ndarray) -> np.ndarray:
+    """Map K segment offsets to n_hidden per-row offsets.
+
+    Equal-spaced segments: hidden row i belongs to segment k where
+        k = floor(i / (n_hidden - 1) * K)  clipped to [0, K-1]
+
+    Args:
+        n_hidden : number of hidden rows
+        offsets  : (K,) segment offset values
+
+    Returns:
+        (n_hidden,) per-row offset array (float64)
+    """
+    K = len(offsets)
+    if n_hidden == 0 or K == 0:
+        return np.array([], dtype=np.float64)
+    pos = np.arange(n_hidden, dtype=np.float64) / max(n_hidden - 1, 1)
+    seg = np.minimum((pos * K).astype(np.int64), K - 1)
+    return np.asarray(offsets, dtype=np.float64)[seg]
+
+
+def segment_assignment(n_hidden: int, K: int) -> np.ndarray:
+    """Return the segment index for each of the n_hidden hidden rows.
+
+    Args:
+        n_hidden : number of hidden rows
+        K        : number of segments
+
+    Returns:
+        (n_hidden,) int array with values in [0, K-1]
+    """
+    if n_hidden == 0:
+        return np.array([], dtype=np.int64)
+    pos = np.arange(n_hidden, dtype=np.float64) / max(n_hidden - 1, 1)
+    return np.minimum((pos * K).astype(np.int64), K - 1)
+
+
+def tvt_from_ksegment_offsets(
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    offsets: np.ndarray,
+) -> np.ndarray:
+    """Predict TVT using K equal-spaced segment constant offsets.
+
+    Convenience wrapper: expand_segment_offsets → tvt_from_offset_per_row.
+
+    Args:
+        z           : full-well Z array (N,)
+        anchor_row  : index of the last known row
+        anchor_tvt  : TVT at the anchor row
+        hidden_rows : indices of hidden rows (H,)
+        offsets     : (K,) per-segment offsets in ft/row
+
+    Returns:
+        pred : (H,) float32 predicted TVT values
+    """
+    H = len(hidden_rows)
+    offset_per_row = expand_segment_offsets(H, offsets)
+    return tvt_from_offset_per_row(z, anchor_row, anchor_tvt, hidden_rows, offset_per_row)
+
+
+# ---------------------------------------------------------------------------
+# Base TVT (zero-offset physical baseline)
+# ---------------------------------------------------------------------------
+
+def tvt_base(
+    z: np.ndarray,
+    anchor_row: int,
+    anchor_tvt: float,
+    hidden_rows: np.ndarray,
+    c0: float = 0.0,
+) -> np.ndarray:
+    """Physical baseline TVT (zero residual / known c0 drift).
+
+    pred[i] = anchor_tvt - (z[h[i]] - z[anchor_row]) + c0 * (h[i] - anchor_row)
+
+    This is tvt_from_global_offset with offset = c0.
+
+    Args:
+        c0 : known drift of C = TVT + Z per row (from prefix statistics)
+    """
+    return tvt_from_global_offset(z, anchor_row, anchor_tvt, hidden_rows, offset=c0)
+
+========================================================================
+# FILE: mtpnet/oracle.py
+========================================================================
+"""Oracle ceiling computation for the offset-state decoder.
+
+Computes the best possible TVT RMSE for a given well under:
+  - global single offset (grid search)
+  - K-segment constant offsets (least squares, exact optimum)
+
+These oracle numbers establish the achievable ceiling. The oracle values
+MUST match the established benchmarks:
+  K=1  (global): ~7.64 RMSE
+  K=3:            ~3.02 RMSE
+  K=5:            ~1.82 RMSE
+  K=15:           ~0.65 RMSE
+
+Usage:
+    from mtpnet.oracle import compute_oracle_report, find_global_offset_oracle
+
+    samples = load_offset_samples("data/train")
+    report  = compute_oracle_report(samples, ks=[1, 3, 5, 15])
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import NamedTuple
+
+import numpy as np
+
+from .offsets import (
+    make_offset_grid,
+    segment_assignment,
+    tvt_from_global_offset,
+    tvt_from_ksegment_offsets,
+    tvt_from_offset_per_row,
+    expand_segment_offsets,
+)
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+class GlobalOracleResult(NamedTuple):
+    offset: float       # best offset value (ft/row)
+    bin_idx: int        # index in the offset grid
+    rmse: float         # oracle RMSE (ft)
+
+
+class KSegOracleResult(NamedTuple):
+    K: int
+    offsets: np.ndarray  # (K,) oracle per-segment offsets
+    rmse: float          # oracle RMSE (ft) — should match known ceilings
+
+
+# ---------------------------------------------------------------------------
+# Row-RMSE helper
+# ---------------------------------------------------------------------------
+
+def _rmse(pred: np.ndarray, true: np.ndarray) -> float:
+    p = np.asarray(pred, dtype=np.float64)
+    t = np.asarray(true, dtype=np.float64)
+    valid = np.isfinite(p) & np.isfinite(t)
+    if not np.any(valid):
+        return float("nan")
+    return float(np.sqrt(np.mean((p[valid] - t[valid]) ** 2)))
+
+
+# ---------------------------------------------------------------------------
+# 1. Global offset oracle (grid search)
+# ---------------------------------------------------------------------------
+
+def find_global_offset_oracle(
+    sample,  # OffsetSample
+    grid: np.ndarray | None = None,
+) -> GlobalOracleResult:
+    """Find the best single global offset by exhaustive grid search.
+
+    Args:
+        sample : OffsetSample with has_true = True
+        grid   : offset grid; defaults to make_offset_grid()
+
+    Returns:
+        GlobalOracleResult(offset, bin_idx, rmse)
+    """
+    if grid is None:
+        grid = make_offset_grid()
+
+    tvt_true = sample.tvt_hidden_true
+    if tvt_true is None:
+        raise ValueError(f"Well {sample.well_id} has no true TVT")
+
+    z = sample.z
+    anchor_row = sample.anchor_row
+    anchor_tvt = sample.anchor_tvt
+    hidden_rows = sample.hidden_rows
+
+    best_rmse = float("inf")
+    best_i = 0
+
+    for i, c in enumerate(grid):
+        pred = tvt_from_global_offset(z, anchor_row, anchor_tvt, hidden_rows, c)
+        r = _rmse(pred, tvt_true)
+        if r < best_rmse:
+            best_rmse = r
+            best_i = i
+
+    return GlobalOracleResult(
+        offset=float(grid[best_i]),
+        bin_idx=best_i,
+        rmse=best_rmse,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. K-segment oracle (least squares — exact optimum)
+# ---------------------------------------------------------------------------
+
+def _build_segment_design_matrix(
+    n_hidden: int,
+    K: int,
+) -> np.ndarray:
+    """Build the cumulative design matrix M (n_hidden x K).
+
+    M[i, k] = number of hidden rows in segment k up to and including row i.
+
+    This satisfies: (M @ c)[i] = cumulative offset = sum_{j<=i} c_seg(j)
+    where c_seg(j) is the constant offset of segment k for row j.
+    """
+    seg = segment_assignment(n_hidden, K)   # (n_hidden,) in [0, K-1]
+    one_hot = np.zeros((n_hidden, K), dtype=np.float64)
+    one_hot[np.arange(n_hidden), seg] = 1.0
+    M = np.cumsum(one_hot, axis=0)          # cumulative count
+    return M
+
+
+def find_kseg_oracle_ls(
+    sample,  # OffsetSample
+    K: int,
+) -> KSegOracleResult:
+    """Find K-segment oracle offsets by least squares (exact optimum).
+
+    Solves:
+        min_c || M @ c - y ||^2
+    where:
+        y[i] = TVT_true[h[i]] - base_TVT[h[i]]
+             = TVT_true[h[i]] - (anchor_tvt - (z[h[i]] - z_anchor))
+             = C_true[h[i]] - C_anchor
+        M    = cumulative segment design matrix
+
+    This is the exact minimiser of TVT RMSE over the K-segment family.
+
+    Args:
+        sample : OffsetSample with has_true = True
+        K      : number of equal-spaced segments
+
+    Returns:
+        KSegOracleResult(K, offsets, rmse)
+    """
+    tvt_true = sample.tvt_hidden_true
+    if tvt_true is None:
+        raise ValueError(f"Well {sample.well_id} has no true TVT")
+
+    H = sample.n_hidden
+    # If fewer hidden rows than segments, clamp K to H
+    K_eff = max(1, min(K, H))
+
+    z = sample.z.astype(np.float64)
+    anchor_row = sample.anchor_row
+    anchor_tvt = float(sample.anchor_tvt)
+    anchor_z = float(sample.anchor_z)
+    hidden_rows = sample.hidden_rows
+
+    # Residual to integrate: y[i] = C_true[h[i]] - C_anchor
+    #  = (tvt_true[h[i]] + z[h[i]]) - (anchor_tvt + anchor_z)
+    tvt_t = np.asarray(tvt_true, dtype=np.float64)
+    y = (tvt_t + z[hidden_rows]) - (anchor_tvt + anchor_z)
+
+    M = _build_segment_design_matrix(H, K_eff)
+
+    # Ridge-smoothed least squares (same as RACFormer's compute_segment_oracle)
+    D = np.zeros((K_eff - 1, K_eff), dtype=np.float64)
+    for j in range(K_eff - 1):
+        D[j, j] = -1.0
+        D[j, j + 1] = 1.0
+    lhs = M.T @ M + 1e-3 * D.T @ D + 1e-6 * np.eye(K_eff)
+    rhs = M.T @ y
+    c = np.linalg.solve(lhs, rhs)
+
+    pred = tvt_from_ksegment_offsets(
+        z=np.asarray(z, dtype=np.float32),
+        anchor_row=anchor_row,
+        anchor_tvt=anchor_tvt,
+        hidden_rows=hidden_rows,
+        offsets=c,
+    )
+    rmse = _rmse(pred, tvt_t)
+
+    return KSegOracleResult(K=K, offsets=c.astype(np.float64), rmse=rmse)
+
+
+# ---------------------------------------------------------------------------
+# 3. dC-mean oracle (fast approximation — used for sanity checks)
+# ---------------------------------------------------------------------------
+
+def find_kseg_oracle_dc_mean(
+    sample,  # OffsetSample
+    K: int,
+) -> KSegOracleResult:
+    """K-segment oracle via mean dC per segment (fast approximation).
+
+    This is NOT the exact optimum (unlike the LS approach), but it's
+    simpler and gives a sanity check. The LS approach should give equal
+    or better RMSE.
+
+    true_offset_per_row[k] = d(TVT_true + Z)[k] = dC_true[k]
+    oracle_offset_k        = mean(dC_true[rows in segment k])
+    """
+    tvt_true = sample.tvt_hidden_true
+    if tvt_true is None:
+        raise ValueError(f"Well {sample.well_id} has no true TVT")
+
+    H = sample.n_hidden
+    if H == 0:
+        return KSegOracleResult(K=K, offsets=np.zeros(K), rmse=float("nan"))
+
+    z = sample.z.astype(np.float64)
+    tvt_t = np.asarray(tvt_true, dtype=np.float64)
+    hidden_rows = sample.hidden_rows
+    anchor_row = sample.anchor_row
+
+    # Per-row true offset: dC = d(TVT + Z)
+    prev_rows = np.concatenate([[anchor_row], hidden_rows[:-1]])
+    prev_tvt = np.where(
+        prev_rows == anchor_row,
+        float(sample.anchor_tvt),
+        tvt_t[np.searchsorted(hidden_rows, prev_rows)],
+    )
+    # Safer: build prev TVT array explicitly
+    prev_tvt_arr = np.empty(H, dtype=np.float64)
+    prev_tvt_arr[0] = float(sample.anchor_tvt)
+    prev_tvt_arr[1:] = tvt_t[:-1]
+
+    dtvt = tvt_t - prev_tvt_arr
+    dz = z[hidden_rows] - z[np.concatenate([[anchor_row], hidden_rows[:-1]])]
+    true_offset_per_row = dtvt + dz   # = dC per row
+
+    # Segment mean
+    seg = segment_assignment(H, K)
+    c = np.zeros(K, dtype=np.float64)
+    for k in range(K):
+        mask = seg == k
+        if np.any(mask):
+            vals = true_offset_per_row[mask]
+            finite = vals[np.isfinite(vals)]
+            c[k] = float(np.mean(finite)) if len(finite) > 0 else 0.0
+
+    pred = tvt_from_ksegment_offsets(
+        z=np.asarray(sample.z, dtype=np.float32),
+        anchor_row=anchor_row,
+        anchor_tvt=float(sample.anchor_tvt),
+        hidden_rows=hidden_rows,
+        offsets=c,
+    )
+    rmse = _rmse(pred, tvt_t)
+    return KSegOracleResult(K=K, offsets=c, rmse=rmse)
+
+
+# ---------------------------------------------------------------------------
+# 4. Populate oracle targets into samples
+# ---------------------------------------------------------------------------
+
+def compute_and_attach_oracles(
+    samples: list,  # list[OffsetSample]
+    ks: list[int] | None = None,
+    grid: np.ndarray | None = None,
+    verbose: bool = True,
+) -> None:
+    """Compute and store oracle offsets into samples in-place.
+
+    After calling this, each sample will have:
+        sample.global_offset_star  : float
+        sample.kseg_offset_star    : {K: np.ndarray}
+
+    Only run on training samples (sample.has_true = True).
+
+    Args:
+        samples : list of OffsetSample
+        ks      : which K values to compute (default [1, 3, 5, 15])
+        grid    : offset grid for global oracle
+        verbose : print progress
+    """
+    if ks is None:
+        ks = [1, 3, 5, 15]
+    if grid is None:
+        grid = make_offset_grid()
+
+    train_samples = [s for s in samples if s.has_true]
+    if verbose:
+        print(f"Computing oracles for {len(train_samples)} training wells, K={ks}")
+
+    for i, s in enumerate(train_samples):
+        if verbose and (i % 100 == 0 or i == len(train_samples) - 1):
+            print(f"  oracle {i + 1}/{len(train_samples)} — {s.well_id}")
+
+        # Global oracle
+        result = find_global_offset_oracle(s, grid)
+        s.global_offset_star = result.offset
+
+        # K-segment oracles
+        s.kseg_offset_star = {}
+        for K in ks:
+            kseg_result = find_kseg_oracle_ls(s, K)
+            s.kseg_offset_star[K] = kseg_result.offsets
+
+
+# ---------------------------------------------------------------------------
+# 5. Oracle report: pooled RMSE across all training wells
+# ---------------------------------------------------------------------------
+
+def compute_oracle_report(
+    samples: list,  # list[OffsetSample]
+    ks: list[int] | None = None,
+    grid: np.ndarray | None = None,
+    verbose: bool = True,
+) -> dict:
+    """Compute pooled oracle RMSE for each K across all training wells.
+
+    Returns a dict with keys like "global_grid_oracle", "K1_oracle", etc.,
+    and also per-well breakdowns.
+
+    Expected values (from audit):
+        global_grid_oracle : ~7.64 ft
+        K1_oracle          : ~7.59 ft  (same as global with LS)
+        K3_oracle          : ~3.02 ft
+        K5_oracle          : ~1.82 ft
+        K15_oracle         : ~0.65 ft
+    """
+    if ks is None:
+        ks = [1, 3, 5, 15]
+    if grid is None:
+        grid = make_offset_grid()
+
+    train_samples = [s for s in samples if s.has_true]
+    if not train_samples:
+        return {"error": "no training samples"}
+
+    if verbose:
+        print(f"Oracle report: {len(train_samples)} wells, K={ks}")
+
+    # Collect all predictions
+    all_true: list[float] = []
+    all_base: list[float] = []
+    all_global: list[float] = []
+    kseg_preds: dict[int, list[float]] = {K: [] for K in ks}
+    kseg_true_grouped: dict[int, list[float]] = {K: [] for K in ks}
+
+    per_well = []
+
+    for s in train_samples:
+        tvt_true = s.tvt_hidden_true
+        if tvt_true is None:
+            continue
+        H = s.n_hidden
+
+        # Base TVT (c0 drift)
+        from .offsets import tvt_base
+        base = tvt_base(s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, c0=s.c0)
+
+        # Global grid oracle
+        g_result = find_global_offset_oracle(s, grid)
+
+        # K-segment oracles
+        kseg_results: dict[int, KSegOracleResult] = {}
+        for K in ks:
+            kseg_results[K] = find_kseg_oracle_ls(s, K)
+
+        all_true.extend(tvt_true.tolist())
+        all_base.extend(base.tolist())
+        all_global.extend(
+            tvt_from_global_offset(
+                s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, g_result.offset
+            ).tolist()
+        )
+
+        well_row = {
+            "well_id": s.well_id,
+            "n_hidden": H,
+            "base_rmse": _rmse(base, tvt_true),
+            "global_grid_oracle_rmse": g_result.rmse,
+            "global_grid_oracle_offset": g_result.offset,
+        }
+        for K in ks:
+            r = kseg_results[K]
+            well_row[f"K{K}_oracle_rmse"] = r.rmse
+            pred_k = tvt_from_ksegment_offsets(
+                s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, r.offsets
+            )
+            kseg_preds[K].extend(pred_k.tolist())
+            kseg_true_grouped[K].extend(tvt_true.tolist())
+        per_well.append(well_row)
+
+    def _pooled_rmse(preds: list[float], trues: list[float]) -> float:
+        p = np.array(preds, dtype=np.float64)
+        t = np.array(trues, dtype=np.float64)
+        valid = np.isfinite(p) & np.isfinite(t)
+        if not np.any(valid):
+            return float("nan")
+        return float(np.sqrt(np.mean((p[valid] - t[valid]) ** 2)))
+
+    all_true_arr = np.array(all_true, dtype=np.float64)
+
+    report: dict = {
+        "n_wells": len(train_samples),
+        "base_c0_rmse": _pooled_rmse(all_base, all_true),
+        "global_grid_oracle_rmse": _pooled_rmse(all_global, all_true),
+    }
+    for K in ks:
+        report[f"K{K}_oracle_rmse"] = _pooled_rmse(kseg_preds[K], kseg_true_grouped[K])
+
+    report["per_well"] = per_well
+
+    if verbose:
+        print("\n=== Oracle Report ===")
+        print(f"  n_wells              : {report['n_wells']}")
+        print(f"  base_c0_rmse         : {report['base_c0_rmse']:.4f}")
+        print(f"  global_grid_oracle   : {report['global_grid_oracle_rmse']:.4f}  (expect ~7.64)")
+        for K in ks:
+            expect = {1: "~7.59", 3: "~3.02", 5: "~1.82", 15: "~0.65"}.get(K, "?")
+            print(f"  K{K:2d}_oracle          : {report[f'K{K}_oracle_rmse']:.4f}  (expect {expect})")
+
+    return report
+
+========================================================================
+# FILE: pyproject.toml
+========================================================================
+[project]
+name = "mtpnet"
+version = "0.1.0"
+description = "MTPNet — Offset-State Decoder for wellbore TVT prediction."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "catboost>=1.2",
+    "pytest>=8.0",
+    "jupyter>=1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+========================================================================
+# FILE: run_beam_eval.py
+========================================================================
+#!/usr/bin/env python3
+"""Experiments D/E: Beam-search decoder comparison on K-segment results.
+
+Loads saved OOF results and re-decodes with different alpha values and beam
+widths to find the best decoder configuration.
+
+Also performs a sweep over alpha to find the sweet spot for Viterbi.
+
+Run:
+    python run_beam_eval.py --result-dir artifacts/results [--ks 3 5]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import numpy as np
+
+from mtpnet.data import load_offset_samples, make_group_kfold
+from mtpnet.offsets import make_offset_grid
+from mtpnet.oracle import compute_and_attach_oracles
+from mtpnet.eval import run_oof_kseg, run_c0_baseline, save_oof_result, load_oof_result
+from mtpnet.models import train_offset_classifier
+from mtpnet.decode import decode_kseg_predictions, make_log_transition
+from mtpnet.metrics import row_rmse, print_scoreboard
+
+
+# ---------------------------------------------------------------------------
+# Re-decode from saved proba arrays
+# ---------------------------------------------------------------------------
+
+def redecode_oof_result(
+    result,           # OOFResult (loaded from disk, has all_proba + samples)
+    samples: list,
+    K: int,
+    grid: np.ndarray,
+    decoder: str = "viterbi",
+    alpha: float = 10.0,
+    beam_width: int = 32,
+) -> float:
+    """Re-run decoding on saved OOF proba arrays with new decoder settings.
+
+    Returns pooled row RMSE.
+    """
+    from mtpnet.decode import decode_kseg_predictions
+    preds = decode_kseg_predictions(
+        samples,
+        result.all_proba,   # list of (K, N_BINS) arrays
+        K=K,
+        grid=grid,
+        decoder=decoder,
+        alpha=alpha,
+        beam_width=beam_width,
+    )
+    trues = [s.tvt_hidden_true for s in samples]
+    all_p = np.concatenate([p.astype(np.float64) for p in preds])
+    all_t = np.concatenate([t.astype(np.float64) for t in trues])
+    return row_rmse(all_p, all_t)
+
+
+# ---------------------------------------------------------------------------
+# Alpha sweep
+# ---------------------------------------------------------------------------
+
+def alpha_sweep(
+    result,
+    samples: list,
+    K: int,
+    grid: np.ndarray,
+    decoder: str = "viterbi",
+    alphas: list[float] | None = None,
+) -> dict[float, float]:
+    """Sweep alpha values and return {alpha: rmse} dict."""
+    if alphas is None:
+        alphas = [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+
+    results = {}
+    for a in alphas:
+        rmse = redecode_oof_result(result, samples, K, grid, decoder=decoder, alpha=a)
+        results[a] = rmse
+        print(f"  alpha={a:6.1f}  {decoder}_rmse={rmse:.4f}")
+
+    best_alpha = min(results, key=results.get)
+    print(f"  → best alpha={best_alpha}  rmse={results[best_alpha]:.4f}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Experiments D/E: Beam decoder sweep")
+    parser.add_argument(
+        "--data-dir", type=Path,
+        default=Path("/Users/alexander/Desktop/rogii/MTPNet/data/train"),
+    )
+    parser.add_argument("--cache-dir", type=Path, default=Path("artifacts/mtpnet_cache"))
+    parser.add_argument("--result-dir", type=Path, default=Path("artifacts/results"))
+    parser.add_argument("--ks", type=int, nargs="+", default=[3, 5])
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--k-wells", type=int, default=-1)
+    parser.add_argument("--backend", choices=["lgbm", "catboost"], default="lgbm")
+    parser.add_argument(
+        "--alphas", type=float, nargs="+",
+        default=[0.0, 1.0, 5.0, 10.0, 20.0, 50.0],
+    )
+    parser.add_argument("--beam-widths", type=int, nargs="+", default=[16, 32, 64])
+    args = parser.parse_args()
+
+    cache_path = args.cache_dir / "samples.pkl" if args.k_wells < 0 else None
+    print(f"\nLoading wells …")
+    samples = load_offset_samples(
+        args.data_dir, k_wells=args.k_wells, cache_path=cache_path, verbose=True
+    )
+    train_samples = [s for s in samples if s.has_true]
+    print(f"Training wells: {len(train_samples)}")
+
+    grid = make_offset_grid()
+    folds = make_group_kfold(train_samples, n_folds=args.n_folds)
+    scoreboard: dict[str, float] = {}
+
+    # c0 baseline
+    c0_rmse = run_c0_baseline(train_samples, verbose=True)
+    scoreboard["c0_baseline"] = c0_rmse
+
+    for K in args.ks:
+        # Try to load saved result (avoid re-training)
+        result_path = args.result_dir / f"kseg_K{K}_{args.backend}_viterbi.pkl"
+        if result_path.exists():
+            print(f"\nLoading saved result: {result_path}")
+            result = load_oof_result(str(result_path))
+        else:
+            print(f"\nNo saved result for K={K}; training fresh …")
+            # Compute oracles if needed
+            if any(K not in s.kseg_offset_star for s in train_samples):
+                compute_and_attach_oracles(train_samples, ks=[K], verbose=True)
+
+            def _build(X_tr, y_tr, X_va, y_va):
+                return train_offset_classifier(
+                    X_tr, y_tr, X_va, y_va,
+                    backend=args.backend,
+                    early_stopping_rounds=50,
+                    verbose=False,
+                )
+
+            result = run_oof_kseg(
+                train_samples, folds, _build,
+                K=K, decoder="viterbi", alpha=10.0, verbose=True,
+            )
+            save_oof_result(result, str(result_path))
+
+        # Check that proba arrays are saved
+        if not result.all_proba or result.all_proba[0] is None:
+            print(f"  [warn] No proba arrays in saved result for K={K}; skipping sweep")
+            continue
+
+        # Alpha sweep — Viterbi
+        print(f"\n  === K={K}: Viterbi alpha sweep ===")
+        vit_sweep = alpha_sweep(result, train_samples, K, grid, decoder="viterbi", alphas=args.alphas)
+        best_alpha = min(vit_sweep, key=vit_sweep.get)
+        scoreboard[f"K{K}_viterbi_best_alpha={best_alpha}"] = vit_sweep[best_alpha]
+
+        # Beam width sweep with best alpha
+        print(f"\n  === K={K}: Beam width sweep (alpha={best_alpha}) ===")
+        for bw in args.beam_widths:
+            rmse = redecode_oof_result(
+                result, train_samples, K, grid,
+                decoder="beam", alpha=best_alpha, beam_width=bw,
+            )
+            print(f"  beam_width={bw:3d}  rmse={rmse:.4f}")
+            scoreboard[f"K{K}_beam_bw{bw}_a{best_alpha}"] = rmse
+
+    print_scoreboard(scoreboard, title="Experiments D/E Results")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+========================================================================
+# FILE: train_global_offset.py
+========================================================================
+#!/usr/bin/env python3
+"""Experiment A: Global offset classifier (single offset per well).
+
+Model: LightGBM multiclass over N_OFFSET_BINS = 321 bins
+Features: well-level (C-drift statistics, geometry, GR)
+Labels: oracle global offset bin (grid-search best offset)
+Evaluation: OOF row-RMSE after physical integration
+
+Expected output:
+    c0_baseline_rmse    : ~14.8 ft  (no model, just known c0 drift)
+    global_offset_rmse  : ??? ft    (should be better than c0 baseline)
+
+Run:
+    python train_global_offset.py [--data-dir DATA_DIR] [--n-folds 5]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import numpy as np
+
+from mtpnet.data import load_offset_samples, make_group_kfold
+from mtpnet.offsets import make_offset_grid
+from mtpnet.oracle import compute_and_attach_oracles
+from mtpnet.eval import run_oof_global, run_c0_baseline, save_oof_result
+from mtpnet.models import train_offset_classifier
+from mtpnet.metrics import print_scoreboard
+
+
+def build_model_fn(backend="lgbm", params=None):
+    """Return a model-building closure for OOF."""
+    def fn(X_tr, y_tr, X_va, y_va):
+        return train_offset_classifier(
+            X_tr, y_tr,
+            X_val=X_va, y_val=y_va,
+            backend=backend,
+            params=params,
+            early_stopping_rounds=50,
+            verbose=False,
+        )
+    return fn
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Experiment A: Global offset classifier")
+    parser.add_argument(
+        "--data-dir", type=Path,
+        default=Path("/Users/alexander/Desktop/rogii/MTPNet/data/train"),
+    )
+    parser.add_argument("--cache-dir", type=Path, default=Path("artifacts/mtpnet_cache"))
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--k-wells", type=int, default=-1,
+                        help="Smoke-test: use only first k wells")
+    parser.add_argument("--backend", choices=["lgbm", "catboost"], default="lgbm")
+    parser.add_argument("--decode-mode", choices=["argmax", "mean"], default="argmax")
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("artifacts/results"),
+    )
+    args = parser.parse_args()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Load data ----
+    cache_path = args.cache_dir / "samples.pkl" if args.k_wells < 0 else None
+    print(f"\nLoading wells …")
+    samples = load_offset_samples(
+        args.data_dir, k_wells=args.k_wells, cache_path=cache_path, verbose=True
+    )
+    train_samples = [s for s in samples if s.has_true]
+    print(f"Training wells: {len(train_samples)}")
+
+    # ---- Compute oracles (if not cached) ----
+    needs_oracle = any(s.global_offset_star is None for s in train_samples)
+    if needs_oracle:
+        print("\nComputing global oracles …")
+        grid = make_offset_grid()
+        compute_and_attach_oracles(train_samples, ks=[1], grid=grid, verbose=True)
+    else:
+        print("Oracle labels already present.")
+
+    # ---- Folds ----
+    folds = make_group_kfold(train_samples, n_folds=args.n_folds)
+    print(f"Folds: {args.n_folds}")
+
+    # ---- c0 baseline ----
+    print("\n--- c0 baseline ---")
+    c0_rmse = run_c0_baseline(train_samples, verbose=True)
+
+    # ---- Global offset OOF ----
+    print(f"\n--- Experiment A: global offset [{args.backend}, decode={args.decode_mode}] ---")
+    result = run_oof_global(
+        train_samples,
+        folds,
+        build_model_fn(args.backend),
+        experiment=f"global_offset_{args.backend}_{args.decode_mode}",
+        decode_mode=args.decode_mode,
+        verbose=True,
+    )
+
+    # ---- Scoreboard ----
+    scoreboard = {
+        "c0_baseline":       c0_rmse,
+        result.experiment:   result.pooled_rmse,
+    }
+    print_scoreboard(scoreboard, title="Experiment A Results")
+
+    # ---- Save ----
+    out_path = args.output_dir / f"{result.experiment}.pkl"
+    save_oof_result(result, str(out_path))
+    print(f"Saved → {out_path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+========================================================================
+# FILE: train_ksegment_offset.py
+========================================================================
+#!/usr/bin/env python3
+"""Experiments B: K-segment offset classifier (K=3 and K=5).
+
+Model: LightGBM multiclass over N_OFFSET_BINS = 321 bins
+Features: per-segment (well-level + segment position/geometry)
+Labels: oracle K-segment LS offsets per segment
+Decoder: Viterbi DP over K steps
+Evaluation: OOF row-RMSE after physical integration
+
+Expected output:
+    K3_kseg_viterbi_rmse : < 3.02 ft  (K3 oracle ceiling)
+    K5_kseg_viterbi_rmse : < 1.82 ft  (K5 oracle ceiling)
+
+Run:
+    python train_ksegment_offset.py [--ks 3 5] [--data-dir DATA_DIR]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import numpy as np
+
+from mtpnet.data import load_offset_samples, make_group_kfold
+from mtpnet.offsets import make_offset_grid
+from mtpnet.oracle import compute_and_attach_oracles
+from mtpnet.eval import run_oof_kseg, run_c0_baseline, save_oof_result
+from mtpnet.models import train_offset_classifier
+from mtpnet.metrics import print_scoreboard
+
+
+def build_model_fn(backend="lgbm", params=None):
+    def fn(X_tr, y_tr, X_va, y_va):
+        return train_offset_classifier(
+            X_tr, y_tr,
+            X_val=X_va, y_val=y_va,
+            backend=backend,
+            params=params,
+            early_stopping_rounds=50,
+            verbose=False,
+        )
+    return fn
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Experiments B: K-segment classifiers")
+    parser.add_argument(
+        "--data-dir", type=Path,
+        default=Path("/Users/alexander/Desktop/rogii/MTPNet/data/train"),
+    )
+    parser.add_argument("--cache-dir", type=Path, default=Path("artifacts/mtpnet_cache"))
+    parser.add_argument("--ks", type=int, nargs="+", default=[3, 5],
+                        help="Which K values to run (e.g. --ks 3 5 15)")
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--k-wells", type=int, default=-1)
+    parser.add_argument("--backend", choices=["lgbm", "catboost"], default="lgbm")
+    parser.add_argument("--decoder", choices=["viterbi", "beam", "greedy"], default="viterbi")
+    parser.add_argument("--alpha", type=float, default=10.0,
+                        help="Viterbi/beam transition smoothness penalty")
+    parser.add_argument("--beam-width", type=int, default=32)
+    parser.add_argument("--output-dir", type=Path, default=Path("artifacts/results"))
+    args = parser.parse_args()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Load data ----
+    cache_path = args.cache_dir / "samples.pkl" if args.k_wells < 0 else None
+    print(f"\nLoading wells …")
+    samples = load_offset_samples(
+        args.data_dir, k_wells=args.k_wells, cache_path=cache_path, verbose=True
+    )
+    train_samples = [s for s in samples if s.has_true]
+    print(f"Training wells: {len(train_samples)}")
+
+    # ---- Compute oracles ----
+    all_ks_needed = [k for k in args.ks if any(k not in s.kseg_offset_star for s in train_samples)]
+    if all_ks_needed:
+        print(f"\nComputing K-segment oracles for K={all_ks_needed} …")
+        compute_and_attach_oracles(train_samples, ks=all_ks_needed, verbose=True)
+    else:
+        print("Oracle labels already present.")
+
+    # ---- Folds ----
+    folds = make_group_kfold(train_samples, n_folds=args.n_folds)
+    print(f"Folds: {args.n_folds}")
+
+    # ---- c0 baseline ----
+    print("\n--- c0 baseline ---")
+    c0_rmse = run_c0_baseline(train_samples, verbose=True)
+    scoreboard = {"c0_baseline": c0_rmse}
+
+    # ---- Run each K ----
+    for K in args.ks:
+        exp_name = f"kseg_K{K}_{args.backend}_{args.decoder}"
+        print(f"\n--- K={K}: [{args.backend}, decoder={args.decoder}, alpha={args.alpha}] ---")
+
+        result = run_oof_kseg(
+            train_samples,
+            folds,
+            build_model_fn(args.backend),
+            K=K,
+            experiment=exp_name,
+            decoder=args.decoder,
+            alpha=args.alpha,
+            beam_width=args.beam_width,
+            verbose=True,
+        )
+
+        scoreboard[exp_name] = result.pooled_rmse
+
+        out_path = args.output_dir / f"{exp_name}.pkl"
+        save_oof_result(result, str(out_path))
+        print(f"Saved → {out_path}")
+
+    # ---- Final scoreboard ----
+    print_scoreboard(scoreboard, title=f"Experiments B Results  [decoder={args.decoder}]")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+========================================================================
+# FILE: train_regression.py
+========================================================================
+"""
+Experiment R — Regression-based offset prediction with residual learning.
+
+Key differences from the earlier classifier approach:
+  - Regression (not 321-class multiclass) eliminates hard-bin discretisation errors
+  - Residual target: predict (oracle_offset - c0) instead of raw oracle_offset
+    · Reduces target std from 0.0344 → 0.0121 ft/row (3x tighter signal)
+    · Keeps model focused on *corrections* to the c0 heuristic
+  - Stronger regularisation (min_data_in_leaf=50, lambda_l2=1.0)
+    · Addresses 1.43x train/val overfit seen in baseline regression
+  - Extended features (dC short-window slopes, autocorr, GR regime change)
+
+Models trained:
+  R_global  — single global offset per well
+  R_K3      — K=3 segments, residual from per-segment c0
+  R_K5      — K=5 segments, residual from per-segment c0
+
+Results saved to artifacts/results/
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import pickle
+import time
+
+import lightgbm as lgb
+import numpy as np
+
+# -- project imports --
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+
+from mtpnet.data   import load_offset_samples, make_group_kfold
+from mtpnet.eval   import run_c0_baseline
+from mtpnet.features import make_well_features, make_segment_features
+from mtpnet.metrics  import row_rmse, per_well_rmse, print_scoreboard
+from mtpnet.offsets  import (make_offset_grid, segment_assignment,
+                              tvt_from_global_offset, tvt_from_ksegment_offsets)
+from mtpnet.oracle   import compute_and_attach_oracles
+
+
+# ---------------------------------------------------------------------------
+# LightGBM regression wrapper
+# ---------------------------------------------------------------------------
+
+def _train_lgbm_regressor(
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    X_va: np.ndarray,
+    y_va: np.ndarray,
+    *,
+    num_leaves: int = 63,
+    min_data_in_leaf: int = 50,
+    lambda_l2: float = 1.0,
+    n_estimators: int = 1000,
+    lr: float = 0.05,
+    early_stop: int = 50,
+) -> lgb.Booster:
+    dtrain = lgb.Dataset(X_tr, label=y_tr)
+    dval   = lgb.Dataset(X_va, label=y_va, reference=dtrain)
+    params = dict(
+        objective        = "regression",
+        n_jobs           = -1,
+        verbosity        = -1,
+        num_leaves       = num_leaves,
+        min_data_in_leaf = min_data_in_leaf,
+        lambda_l2        = lambda_l2,
+        learning_rate    = lr,
+        subsample        = 0.8,
+        colsample_bytree = 0.8,
+        feature_fraction_bynode = 0.8,
+    )
+    cb = [lgb.early_stopping(early_stop, verbose=False)]
+    bst = lgb.train(params, dtrain, n_estimators, valid_sets=[dval], callbacks=cb)
+    return bst
+
+
+# ---------------------------------------------------------------------------
+# Global regression (K=1)
+# ---------------------------------------------------------------------------
+
+def run_global_regression(train: list, folds) -> dict:
+    """OOF global regression with residual learning."""
+    print("\n=== Experiment R_global — regression + residual learning ===")
+    t0 = time.time()
+
+    X_all    = make_well_features(train)
+    oracle   = np.array([s.global_offset_star for s in train], dtype=np.float64)
+    c0_arr   = np.array([s.c0                 for s in train], dtype=np.float64)
+    y_resid  = (oracle - c0_arr).astype(np.float32)   # residual target
+
+    print(f"  features: {X_all.shape[1]}  |  target std: {y_resid.std():.5f} ft/row "
+          f"(oracle std: {oracle.std():.5f})")
+
+    oof_preds_raw = np.zeros(len(train), dtype=np.float64)   # predicted residual
+    fi = np.zeros(X_all.shape[1], dtype=np.float64)
+
+    for fold_i, (tr_idx, va_idx) in enumerate(folds):
+        tr_idx, va_idx = list(tr_idx), list(va_idx)
+        bst = _train_lgbm_regressor(
+            X_all[tr_idx], y_resid[tr_idx],
+            X_all[va_idx], y_resid[va_idx],
+        )
+        oof_preds_raw[va_idx] = bst.predict(X_all[va_idx])
+        fi += bst.feature_importance(importance_type="gain")
+        print(f"    fold {fold_i}: best_iter={bst.best_iteration}")
+
+    # Final prediction = c0 + predicted_residual
+    oof_offset = c0_arr + oof_preds_raw
+
+    # Decode to TVT and compute RMSE
+    all_pred, all_true = [], []
+    for i, s in enumerate(train):
+        pred = tvt_from_global_offset(
+            s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, float(oof_offset[i])
+        )
+        all_pred.append(pred.astype(np.float64))
+        all_true.append(s.tvt_hidden_true.astype(np.float64))
+
+    rmse = row_rmse(np.concatenate(all_pred), np.concatenate(all_true))
+    elapsed = time.time() - t0
+    print(f"\n  R_global OOF RMSE = {rmse:.4f} ft  ({elapsed:.0f}s)")
+
+    # Feature importance (top 15)
+    df_fi = sorted(zip(make_well_features([train[0]], return_df=True).columns,
+                       fi / fi.sum()), key=lambda x: -x[1])
+    print("  Top-15 features by gain:")
+    for name, imp in df_fi[:15]:
+        print(f"    {name:35s}: {imp:.4f}")
+
+    return dict(
+        experiment   = "R_global",
+        oof_rmse     = float(rmse),
+        oof_offset   = oof_offset.tolist(),
+        elapsed_s    = elapsed,
+        well_rmse    = per_well_rmse(all_pred, all_true, [s.well_id for s in train]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# K-segment regression
+# ---------------------------------------------------------------------------
+
+def _seg_c0(sample, k: int, K: int) -> float:
+    """Approximate c0 for segment k: use c0 of the well (conservative fallback)."""
+    # For early segments, the best local estimate is still c0 of the full prefix,
+    # since we cannot observe the hidden section's drift.  A future improvement
+    # would use depth-correlated sub-windows, but that requires knowing segment
+    # depth range relative to the known suffix.
+    return float(sample.c0)
+
+
+def run_kseg_regression(train: list, folds, K: int) -> dict:
+    """OOF K-segment regression with residual learning."""
+    print(f"\n=== Experiment R_K{K} — K={K} segment regression + residual ===")
+    t0 = time.time()
+
+    X_seg = make_segment_features(train, K)
+
+    # Per-segment oracle and c0
+    oracle_flat = np.zeros(len(train) * K, dtype=np.float64)
+    c0_flat     = np.zeros(len(train) * K, dtype=np.float64)
+    for i, s in enumerate(train):
+        offsets_k = s.kseg_offset_star.get(K, np.zeros(K))
+        for k in range(K):
+            oracle_flat[i * K + k] = offsets_k[k] if k < len(offsets_k) else offsets_k[-1]
+            c0_flat[i * K + k]     = _seg_c0(s, k, K)
+
+    y_resid = (oracle_flat - c0_flat).astype(np.float32)
+    print(f"  features: {X_seg.shape[1]}  |  target std: {y_resid.std():.5f} ft/row")
+
+    oof_resid = np.zeros(len(train) * K, dtype=np.float64)
+    for fold_i, (tr_idx, va_idx) in enumerate(folds):
+        tr_idx, va_idx = list(tr_idx), list(va_idx)
+        tr_seg = np.concatenate([np.arange(i * K, i * K + K) for i in tr_idx])
+        va_seg = np.concatenate([np.arange(i * K, i * K + K) for i in va_idx])
+        bst = _train_lgbm_regressor(
+            X_seg[tr_seg], y_resid[tr_seg],
+            X_seg[va_seg], y_resid[va_seg],
+        )
+        oof_resid[va_seg] = bst.predict(X_seg[va_seg])
+        print(f"    fold {fold_i}: best_iter={bst.best_iteration}")
+
+    oof_offset = c0_flat + oof_resid   # final per-segment offset
+
+    all_pred, all_true = [], []
+    for i, s in enumerate(train):
+        offsets = oof_offset[i * K: i * K + K]
+        pred = tvt_from_ksegment_offsets(
+            s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, offsets
+        )
+        all_pred.append(pred.astype(np.float64))
+        all_true.append(s.tvt_hidden_true.astype(np.float64))
+
+    rmse = row_rmse(np.concatenate(all_pred), np.concatenate(all_true))
+    elapsed = time.time() - t0
+    print(f"\n  R_K{K} OOF RMSE = {rmse:.4f} ft  ({elapsed:.0f}s)")
+
+    return dict(
+        experiment = f"R_K{K}",
+        oof_rmse   = float(rmse),
+        elapsed_s  = elapsed,
+        well_rmse  = per_well_rmse(all_pred, all_true, [s.well_id for s in train]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-dir",   default="/Users/alexander/Desktop/rogii/MTPNet/data/train")
+    ap.add_argument("--cache-path", default="artifacts/mtpnet_cache/samples.pkl")
+    ap.add_argument("--out-dir",    default="artifacts/results")
+    ap.add_argument("--k-wells",    type=int, default=0, help="0=all wells")
+    ap.add_argument("--ks",         nargs="+", type=int, default=[1, 3, 5],
+                    help="Which K values to run (1=global, 3=K3, 5=K5)")
+    ap.add_argument("--n-folds",    type=int, default=5)
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Load data
+    samples = load_offset_samples(
+        args.data_dir, k_wells=args.k_wells,
+        cache_path=args.cache_path, verbose=True,
+    )
+    train = [s for s in samples if s.has_true]
+    print(f"\n{len(train)} training wells loaded")
+
+    # Oracle labels
+    grid = make_offset_grid()
+    ks_oracle = sorted(set(args.ks) | {1})   # always need K=1 for global
+    compute_and_attach_oracles(train, ks=ks_oracle, grid=grid, verbose=False)
+
+    folds = make_group_kfold(train, n_folds=args.n_folds)
+
+    # Baselines
+    c0_rmse = run_c0_baseline(train, verbose=False)
+    print(f"\nBaseline c0 RMSE: {c0_rmse:.4f} ft")
+    print(f"Oracle K=1: 7.5875  K=3: 3.0241  K=5: 1.8234")
+
+    results = []
+
+    # --- Global (K=1) ---
+    if 1 in args.ks:
+        res = run_global_regression(train, folds)
+        results.append(res)
+        out = os.path.join(args.out_dir, "R_global_regression.pkl")
+        with open(out, "wb") as f:
+            pickle.dump(res, f)
+        print(f"  Saved → {out}")
+
+    # --- K-segment ---
+    for K in args.ks:
+        if K == 1:
+            continue
+        if K not in [s.kseg_offset_star for s in train[:1]][0]:
+            compute_and_attach_oracles(train, ks=[K], grid=grid, verbose=False)
+        res = run_kseg_regression(train, folds, K)
+        results.append(res)
+        out = os.path.join(args.out_dir, f"R_K{K}_regression.pkl")
+        with open(out, "wb") as f:
+            pickle.dump(res, f)
+        print(f"  Saved → {out}")
+
+    # --- Scoreboard ---
+    print("\n" + "=" * 55)
+    print("SCOREBOARD")
+    print("=" * 55)
+    print(f"  {'c0_baseline':40s}: {c0_rmse:.4f} ft")
+    for res in results:
+        print(f"  {res['experiment']:40s}: {res['oof_rmse']:.4f} ft")
+    print(f"  {'oracle_K1':40s}: 7.5875 ft")
+    print(f"  {'oracle_K3':40s}: 3.0241 ft")
+    print(f"  {'oracle_K5':40s}: 1.8234 ft")
+
+
+if __name__ == "__main__":
+    main()
+
+========================================================================
+# FILE: train_top_state.py
+========================================================================
+#!/usr/bin/env python3
+"""Experiment C: Top-state teacher model using ANCC formation labels.
+
+ANCC (available train-only) correlates with dTVT + dZ (r≈0.9991).
+We use it as a label to teach the model which formation state (offset bin)
+applies to each row — this is a much stronger label than the LS oracle.
+
+Model: LightGBM multiclass per-row classifier
+Features: per-row (well-level stats + current row MD/Z/GR + prefix C-field)
+Labels: ANCC-derived offset bin per hidden row
+Decoder: Viterbi or beam over per-row probabilities → TVT
+
+Since ANCC is train-only, this is a supervised teacher model:
+  - At test time, the model receives per-row proba from features alone
+  - Viterbi smooths the sequence
+
+Note: top-state teacher is NOT a K-segment model — it produces per-row
+predictions, making the Viterbi more powerful but also more expensive.
+
+Run:
+    python train_top_state.py [--data-dir DATA_DIR]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import numpy as np
+import pandas as pd
+
+from mtpnet.data import load_offset_samples, make_group_kfold
+from mtpnet.offsets import (
+    make_offset_grid, offset_to_bin, N_OFFSET_BINS,
+    tvt_from_offset_per_row,
+)
+from mtpnet.eval import run_c0_baseline, save_oof_result
+from mtpnet.models import train_offset_classifier, predict_offset_proba
+from mtpnet.decode import viterbi_decode, beam_decode, make_log_transition
+from mtpnet.metrics import row_rmse, print_scoreboard
+
+
+# ---------------------------------------------------------------------------
+# ANCC-derived per-row offset labels
+# ---------------------------------------------------------------------------
+
+def make_top_state_labels(
+    samples: list,
+    grid: np.ndarray,
+) -> list[np.ndarray]:
+    """Compute true per-row offset bin from ANCC + Z.
+
+    true_offset_per_row[k] = d(TVT_true + Z)[k] = dC_true[k]
+
+    The offset label for hidden row k is the nearest grid bin to dC_true[k].
+
+    Args:
+        samples : training OffsetSample objects (must have tvt_true and ANCC)
+        grid    : offset grid
+
+    Returns:
+        List of (H_i,) int32 bin arrays, one per well
+    """
+    labels_per_well = []
+    for s in samples:
+        tvt_true = s.tvt_hidden_true
+        if tvt_true is None:
+            labels_per_well.append(np.zeros(s.n_hidden, dtype=np.int32))
+            continue
+
+        H = s.n_hidden
+        hidden_rows = s.hidden_rows
+        z = s.z.astype(np.float64)
+        tvt_t = tvt_true.astype(np.float64)
+
+        # Previous TVT: anchor for row 0, row k-1 for row k
+        prev_tvt = np.empty(H, dtype=np.float64)
+        prev_tvt[0] = float(s.anchor_tvt)
+        prev_tvt[1:] = tvt_t[:-1]
+
+        # Previous Z
+        prev_z = np.empty(H, dtype=np.float64)
+        prev_z[0] = float(s.anchor_z)
+        prev_z[1:] = z[hidden_rows[:-1]]
+
+        # dC = d(TVT + Z) = (dTVT + dZ)
+        dtvt = tvt_t - prev_tvt
+        dz   = z[hidden_rows] - prev_z
+        dC   = dtvt + dz
+
+        bins = np.array([offset_to_bin(float(v), grid) for v in dC], dtype=np.int32)
+        labels_per_well.append(bins)
+
+    return labels_per_well
+
+
+# ---------------------------------------------------------------------------
+# Per-row features for top-state model
+# ---------------------------------------------------------------------------
+
+def make_per_row_features(
+    samples: list,
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """Build a feature matrix with one row per hidden row.
+
+    Returns:
+        X         : (N_total_hidden_rows, F) float32 array
+        well_segs : list of (start_idx, end_idx) into X for each well
+    """
+    from mtpnet.features import make_well_feature_dict
+
+    rows = []
+    well_segs = []
+    offset = 0
+
+    for s in samples:
+        well_feats = make_well_feature_dict(s)
+        H = s.n_hidden
+        hidden_rows = s.hidden_rows
+        z = s.z.astype(np.float64)
+        md = s.md.astype(np.float64)
+        gr = s.gr.astype(np.float64)
+
+        for k, h in enumerate(hidden_rows):
+            d = dict(well_feats)  # copy well-level features
+
+            # Row-specific features
+            d["row_z"]        = float(z[h])
+            d["row_md"]       = float(md[h])
+            d["row_gr"]       = float(gr[h]) if np.isfinite(gr[h]) else well_feats.get("gr_mean", 0.0)
+            d["row_pos_norm"] = float(k) / max(H - 1, 1)   # 0 = first hidden, 1 = last
+            d["row_dz"]       = float(z[h] - (z[hidden_rows[k-1]] if k > 0 else s.anchor_z))
+            d["row_dmd"]      = float(md[h] - (md[hidden_rows[k-1]] if k > 0 else md[s.anchor_row]))
+            d["row_z_rel"]    = float(z[h] - s.anchor_z)
+            d["row_md_rel"]   = float(md[h] - md[s.anchor_row])
+
+            rows.append(d)
+
+        well_segs.append((offset, offset + H))
+        offset += H
+
+    df = pd.DataFrame(rows).fillna(0.0).astype(np.float32)
+    return df.values, well_segs
+
+
+# ---------------------------------------------------------------------------
+# OOF for top-state model
+# ---------------------------------------------------------------------------
+
+def run_oof_top_state(
+    samples: list,
+    folds: list,
+    grid: np.ndarray,
+    backend: str = "lgbm",
+    decoder: str = "viterbi",
+    alpha: float = 20.0,
+    beam_width: int = 32,
+    verbose: bool = True,
+) -> dict:
+    """OOF evaluation for per-row top-state teacher model."""
+
+    log_T = make_log_transition(len(grid), alpha, grid[1] - grid[0] if len(grid) > 1 else 0.001)
+
+    # Build full features and labels
+    X_all, well_segs = make_per_row_features(samples)
+    labels_per_well  = make_top_state_labels(samples, grid)
+
+    # Flatten labels
+    y_all = np.concatenate(labels_per_well).astype(np.int32)
+
+    # Row-index groups (each group = one well's rows)
+    all_predictions = [None] * len(samples)
+    fold_rmses: list[float] = []
+
+    def _well_row_indices(well_idx_list):
+        idxs = []
+        for i in well_idx_list:
+            start, end = well_segs[i]
+            idxs.extend(range(start, end))
+        return np.array(idxs, dtype=np.int64)
+
+    for fold_i, (tr_idx, va_idx) in enumerate(folds):
+        tr_row_idx = _well_row_indices(tr_idx)
+        va_row_idx = _well_row_indices(va_idx)
+
+        X_tr = X_all[tr_row_idx]
+        y_tr = y_all[tr_row_idx]
+        X_va = X_all[va_row_idx]
+        y_va = y_all[va_row_idx]
+
+        model = train_offset_classifier(
+            X_tr, y_tr, X_va, y_va,
+            backend=backend,
+            early_stopping_rounds=30,
+            verbose=False,
+        )
+
+        proba_va = predict_offset_proba(model, X_va)  # (N_va_rows, N_BINS)
+
+        fold_preds_flat: list[np.ndarray] = []
+        fold_true_flat:  list[np.ndarray] = []
+
+        row_cursor = 0
+        for i in va_idx:
+            s = samples[i]
+            H = s.n_hidden
+            tvt_true = s.tvt_hidden_true
+            if tvt_true is None or H == 0:
+                row_cursor += H
+                continue
+
+            proba_well = proba_va[row_cursor: row_cursor + H]  # (H, N_BINS)
+            row_cursor += H
+
+            # Decode
+            if decoder == "viterbi":
+                bins = viterbi_decode(proba_well, alpha=alpha, log_transition=log_T)
+            elif decoder == "beam":
+                bins = beam_decode(proba_well, alpha=alpha, beam_width=beam_width, log_transition=log_T)
+            else:
+                bins = np.argmax(proba_well, axis=1).astype(np.int32)
+
+            offsets = grid[bins]   # (H,)
+            pred = tvt_from_offset_per_row(
+                s.z, s.anchor_row, s.anchor_tvt, s.hidden_rows, offsets
+            )
+            all_predictions[i] = pred
+            fold_preds_flat.append(pred.astype(np.float64))
+            fold_true_flat.append(tvt_true.astype(np.float64))
+
+        fold_rmse = row_rmse(
+            np.concatenate(fold_preds_flat),
+            np.concatenate(fold_true_flat),
+        )
+        fold_rmses.append(fold_rmse)
+        if verbose:
+            print(f"  fold {fold_i + 1}/{len(folds)}  val_rmse={fold_rmse:.4f}")
+
+    # Pooled RMSE
+    all_p = np.concatenate([p.astype(np.float64) for p in all_predictions if p is not None])
+    all_t = np.concatenate([
+        s.tvt_hidden_true.astype(np.float64)
+        for s in samples if s.tvt_hidden_true is not None
+    ])
+    pooled = row_rmse(all_p, all_t)
+    if verbose:
+        print(f"  [top_state]  pooled={pooled:.4f}  folds={[f'{r:.4f}' for r in fold_rmses]}")
+
+    return {
+        "pooled_rmse": pooled,
+        "fold_rmses":  fold_rmses,
+        "all_predictions": all_predictions,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Experiment C: Top-state teacher")
+    parser.add_argument(
+        "--data-dir", type=Path,
+        default=Path("/Users/alexander/Desktop/rogii/MTPNet/data/train"),
+    )
+    parser.add_argument("--cache-dir", type=Path, default=Path("artifacts/mtpnet_cache"))
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--k-wells", type=int, default=-1)
+    parser.add_argument("--backend", choices=["lgbm", "catboost"], default="lgbm")
+    parser.add_argument("--decoder", choices=["viterbi", "beam", "greedy"], default="viterbi")
+    parser.add_argument("--alpha", type=float, default=20.0)
+    parser.add_argument("--beam-width", type=int, default=32)
+    parser.add_argument("--output-dir", type=Path, default=Path("artifacts/results"))
+    args = parser.parse_args()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_path = args.cache_dir / "samples.pkl" if args.k_wells < 0 else None
+    print(f"\nLoading wells …")
+    samples = load_offset_samples(
+        args.data_dir, k_wells=args.k_wells, cache_path=cache_path, verbose=True
+    )
+    train_samples = [s for s in samples if s.has_true]
+    print(f"Training wells: {len(train_samples)}")
+
+    folds = make_group_kfold(train_samples, n_folds=args.n_folds)
+    grid  = make_offset_grid()
+
+    print("\n--- c0 baseline ---")
+    c0_rmse = run_c0_baseline(train_samples, verbose=True)
+
+    exp_name = f"top_state_{args.backend}_{args.decoder}_a{args.alpha:.0f}"
+    print(f"\n--- Experiment C: {exp_name} ---")
+    result = run_oof_top_state(
+        train_samples, folds, grid,
+        backend=args.backend,
+        decoder=args.decoder,
+        alpha=args.alpha,
+        beam_width=args.beam_width,
+        verbose=True,
+    )
+
+    scoreboard = {
+        "c0_baseline": c0_rmse,
+        exp_name:      result["pooled_rmse"],
+    }
+    print_scoreboard(scoreboard, title="Experiment C Results")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

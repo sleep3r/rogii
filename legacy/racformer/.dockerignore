@@ -1,6 +1,7 @@
 # Ignore everything heavy / non-reproducible in the Docker context
 .git/
 .venv/
+**/.venv/
 __pycache__/
 **/__pycache__/
 *.pyc
@@ -10,8 +11,7 @@ __pycache__/
 # Local dev artifacts
 .DS_Store
 *.log
-artifacts/racformer_*/
-artifacts/clearml/
+artifacts/
 .kaggle_mining/
 catboost_info/
 

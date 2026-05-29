@@ -1,0 +1,42 @@
+# Tiny overfit config for the Karpathy recipe.
+# Goal: prove the data/model/loss path can fit two wells before scaling up.
+
+data_dir: data
+k_wells: 2
+cache_dir: null
+
+run:
+  name: bphwt_overfit
+  output_dir: artifacts/bphwt_overfit
+  log_every: 1
+
+data:
+  max_seq_len: 256
+  val_max_seq_len: 0
+  random_train_crop: false
+  gr_smooth_sigmas: [5.0]
+  tw_offsets: [-40.0, -20.0, 0.0, 20.0, 40.0]
+  use_hmm_prior: false
+  hmm_tvt_step: 4.0
+  hmm_tvt_margin: 40.0
+
+train:
+  n_folds: 2
+  epochs: 1000
+  batch_size: 1
+  grad_accum: 1
+  validate_every_steps: 1
+  early_stop_patience: 1000
+  device: cpu
+  num_workers: 0
+  mixed_precision: false
+  use_ema: false
+
+surface:
+  enabled: false
+
+neighbor:
+  enabled: false
+
+data_clearml:
+  max_workers: 8

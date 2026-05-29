@@ -1,0 +1,132 @@
+inherits: stack.yml
+
+features:
+  num_workers: 8
+  direct_path:
+    allow_current_well_formations: false
+  kaggle_top:
+    robust_expert_enabled: false
+
+model:
+  base_models:
+    - id: cat_lr025
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr020
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: cat_lr030
+      name: catboost
+      params:
+        task_type: GPU
+        devices: "0"
+        iterations: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        depth: 7
+        l2_leaf_reg: 2.0
+        min_data_in_leaf: 15
+        border_count: 254
+        random_strength: 0.2
+        bootstrap_type: Bernoulli
+        subsample: 0.8
+    - id: xgb_lr025
+      name: xgboost
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.025
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
+        subsample: 0.8
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: xgb_lr020
+      name: xgboost
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.020
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
+        subsample: 0.8
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+    - id: xgb_lr030
+      name: xgboost
+      params:
+        n_estimators: 8000
+        early_stopping_rounds: 300
+        learning_rate: 0.030
+        max_depth: 7
+        min_child_weight: 15
+        max_bin: 256
+        tree_method: hist
+        device: cuda
+        sampling_method: gradient_based
+        subsample: 0.8
+        colsample_bytree: 0.8
+        reg_alpha: 0.05
+        reg_lambda: 3.0
+
+validation:
+  final_model_strategy: full_context
+
+postprocess:
+  search_method: optuna
+  optuna_trials: 500
+  optuna_seed: 42
+  progress_interval: 50
+  residual_weight: 1.0
+  residual_weight_grid: []
+  notebook_blend:
+    pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
+    alpha_range: [0.95, 1.05, 0.01]
+    tau_range: [40, 120, 5]
+    w_pf_ancc_range: [0, 0.20, 0.01]
+    w_pf_z_range: [0, 0.10, 0.01]
+    w_pf_total_max: 0.30
+  smoothing:
+    enabled: true
+    window: 17
+    polyorder: 3
+    candidates: []
+
+tracking:
+  clearml:
+    tags: [rogii, kaggle, stack, dwt, gpu]

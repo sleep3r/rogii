@@ -1,0 +1,136 @@
+# BPHWT v1: first non-baseline run.
+# Full validation, longer train windows, forward-GR physics and auxiliary heads.
+
+data_dir: data
+k_wells: -1
+cache_dir: artifacts/bphwt_v1/cache
+
+run:
+  name: bphwt_v1
+  output_dir: artifacts/bphwt_v1
+  log_every: 10
+  log_first_steps: 5
+
+data:
+  max_seq_len: 1024
+  val_max_seq_len: 0
+  stride: 1
+  random_train_crop: true
+  gr_smooth_sigmas: [5.0, 15.0, 50.0, 200.0]
+  gr_fill_method: linear
+  tw_offsets: [-160.0, -120.0, -80.0, -40.0, -20.0, 0.0, 20.0, 40.0, 80.0, 120.0, 160.0]
+  use_hmm_prior: false
+  hmm_tvt_step: 4.0
+  hmm_tvt_margin: 80.0
+  hmm_velocity_sigma: 0.025
+  hmm_gr_sigma: 15.0
+  hmm_max_velocity: 0.12
+  normalise: true
+
+model:
+  in_channels: 64
+  stage_channels: [48, 96, 160, 224]
+  stage_strides: [2, 2, 2, 2]
+  n_blocks: 1
+  max_params: 5000000
+  use_bottleneck_attn: true
+  attn_heads: 4
+  attn_window: 256
+  use_typewell_cross_attn: false
+  tw_channels: 32
+  decoder_channels: [160, 112, 80, 48]
+  dropout: 0.05
+  stoch_depth: 0.02
+  predict_velocity: true
+  predict_dip_sign: true
+  predict_seg_boundary: true
+
+augmentation:
+  enabled: true
+  gr_dropout_prob: 0.20
+  gr_dropout_frac: 0.30
+  gr_scale_range: [0.85, 1.15]
+  gr_shift_range: [-10.0, 10.0]
+  gr_noise_std: 3.0
+  tw_smooth_prob: 0.10
+  tw_noise_std: 2.0
+  pseudo_anchor_prob: 0.20
+  pseudo_anchor_lo: 0.40
+  pseudo_anchor_hi: 0.80
+  feature_noise_std: 0.005
+
+loss:
+  w_tvt: 1.0
+  tvt_huber_delta: 5.0
+  w_forward_gr: 0.03
+  gr_huber_delta: 10.0
+  w_gr_grad: 0.25
+  w_gr_corr: 0.0
+  gr_corr_window: 64
+  w_anchor: 0.05
+  w_velocity: 0.02
+  w_dip_sign: 0.01
+  w_seg_boundary: 0.005
+  w_smooth: 0.005
+  w_nll: 0.005
+  w_distill: 0.01
+  hidden_weight: 1.0
+  known_weight: 0.15
+
+train:
+  n_folds: 5
+  cv_group: well_id
+  seed: 42
+  optimizer: adamw
+  lr: 2.0e-4
+  lr_min: 2.0e-5
+  weight_decay: 1.0e-3
+  clip_grad_norm: 5.0
+  epochs: 20
+  warmup_epochs: 1
+  batch_size: 1
+  grad_accum: 4
+  use_ema: true
+  ema_decay: 0.999
+  ema_start_epoch: 3
+  validate_every_steps: 250
+  early_stop_patience: 30
+  device: auto
+  num_workers: 2
+  mixed_precision: true
+  curriculum_enabled: false
+
+infer:
+  batch_size: 1
+  device: auto
+  use_ema: true
+  run_postopt: false
+  blend_nn_opt: 0.70
+  blend_nn_raw: 0.20
+  blend_hmm: 0.00
+  blend_linear: 0.10
+  blend_neighbor: 0.0
+
+surface:
+  enabled: false
+
+neighbor:
+  enabled: false
+
+tracking:
+  enabled: true
+  project: ROGII/Wellbore/BPHWT
+  task_name: bphwt_v1
+  output_uri: s3://s3-basket-cold.wb.ru/ds-experiments
+  tags: [bphwt, v1, full-val, forward-gr]
+  log_artifacts: true
+  log_model: true
+  fail_on_error: true
+
+data_clearml:
+  enabled: true
+  project: ROGII/Wellbore
+  name: rogii-wellbore-geology-prediction
+  version: 20260519_s3
+  cache_dir: ~/.cache/clearml/rogii
+  max_workers: 8

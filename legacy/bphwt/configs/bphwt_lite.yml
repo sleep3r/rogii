@@ -1,0 +1,121 @@
+# BPHWT-lite: Karpathy-recipe starter config.
+# Purpose: trusted small end-to-end loop before adding fancy priors/losses.
+#
+# Full-data run: set k_wells: -1 and train.n_folds: 5.
+# Debug run: keep k_wells small and rebuild cache.
+
+data_dir: data
+k_wells: -1
+cache_dir: artifacts/bphwt_lite/cache
+
+run:
+  name: bphwt_lite
+  output_dir: artifacts/bphwt_lite
+  log_every: 1
+
+data:
+  max_seq_len: 512
+  val_max_seq_len: 0
+  stride: 1
+  random_train_crop: true
+  gr_smooth_sigmas: [5.0, 15.0]
+  gr_fill_method: linear
+  tw_offsets: [-80.0, -40.0, -20.0, 0.0, 20.0, 40.0, 80.0]
+  use_hmm_prior: false
+  hmm_tvt_step: 4.0
+  hmm_tvt_margin: 60.0
+  hmm_velocity_sigma: 0.025
+  hmm_gr_sigma: 15.0
+  hmm_max_velocity: 0.12
+  normalise: true
+
+model:
+  in_channels: 64
+  stage_channels: [32, 64, 96]
+  stage_strides: [2, 2, 2]
+  n_blocks: 1
+  max_params: 500000
+  use_bottleneck_attn: false
+  attn_heads: 4
+  attn_window: 128
+  use_typewell_cross_attn: false
+  tw_channels: 32
+  decoder_channels: [64, 48, 32]
+  dropout: 0.0
+  stoch_depth: 0.0
+  predict_velocity: false
+  predict_dip_sign: false
+  predict_seg_boundary: false
+
+augmentation:
+  enabled: false
+
+loss:
+  w_tvt: 1.0
+  tvt_huber_delta: 5.0
+  w_forward_gr: 0.0
+  w_anchor: 0.05
+  w_velocity: 0.0
+  w_dip_sign: 0.0
+  w_seg_boundary: 0.0
+  w_smooth: 0.0
+  w_nll: 0.0
+  w_distill: 0.0
+  hidden_weight: 1.0
+  known_weight: 0.15
+
+train:
+  n_folds: 2
+  cv_group: well_id
+  seed: 42
+  optimizer: adamw
+  lr: 3.0e-4
+  lr_min: 3.0e-4
+  weight_decay: 0.0
+  clip_grad_norm: 5.0
+  epochs: 20
+  warmup_epochs: 0
+  batch_size: 1
+  grad_accum: 1
+  use_ema: false
+  validate_every_steps: 1
+  early_stop_patience: 20
+  device: cpu
+  num_workers: 0
+  mixed_precision: false
+  curriculum_enabled: false
+
+infer:
+  batch_size: 1
+  device: cpu
+  use_ema: false
+  run_postopt: false
+  blend_nn_opt: 0.70
+  blend_nn_raw: 0.20
+  blend_hmm: 0.00
+  blend_linear: 0.10
+  blend_neighbor: 0.0
+
+surface:
+  enabled: false
+
+neighbor:
+  enabled: false
+
+tracking:
+  enabled: false
+  project: ROGII/Wellbore/BPHWT
+  task_name: ""
+  output_uri: ""
+  tags: [bphwt, recipe]
+  log_artifacts: true
+  log_model: true
+  fail_on_error: false
+
+data_clearml:
+  enabled: false
+  project: ROGII/Wellbore
+  name: rogii-wellbore-geology-prediction
+  version: 20260519_s3
+  cache_dir: ~/.cache/clearml/rogii
+  max_workers: 8

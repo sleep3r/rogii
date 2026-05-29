@@ -1,0 +1,26 @@
+# PathPolicy v5 smoke — fast 2-epoch sanity check for rmse_regressor mode
+head_type: rmse_regressor
+d_model: 32
+n_layers: 1
+nhead: 2
+dim_ff: 64
+dropout: 0.1
+batch_size: 64
+n_epochs: 2
+lr: 1.0e-4
+weight_decay: 1.0e-3
+lambda_v: 0.1
+huber_delta: 2.0
+lambda_rank: 0.3
+rank_margin: 0.2
+early_stop_patience: 0
+tail_oversample: 1
+val_frac: 0.2
+seed: 42
+output_dir: artifacts/pathpolicy_v5_smoke
+oracle_chunks: artifacts/oracle_v2_strict/oracle_chunks.parquet
+data_dir: data/train
+base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+mtp_path: artifacts/mtp_v3_gr_forced/track_row_predictions.parquet

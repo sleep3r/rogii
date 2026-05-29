@@ -1,0 +1,13 @@
+inherits: quick.yml
+
+features:
+  k_segment_offset_predictions:
+  top_state_predictions:
+
+outputs:
+  output_dir: artifacts/quick_direct
+  submission_path: artifacts/quick_direct/submission.csv
+
+tracking:
+  clearml:
+    tags: [rogii, quick, direct]

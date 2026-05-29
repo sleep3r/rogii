@@ -1,0 +1,10 @@
+CLEAR_ML_CONF_PATH: ~/clearml.conf
+REGISTRY_USERNAME: replace-me
+
+INSTANCES:
+  gpu:
+    PORTAINER_URL: https://replace-me.example.com:9443
+    PORTAINER_ACCESS_KEY: replace-me
+
+DEVICE_IDS: [0]
+SHARED_MEMORY_SIZE: 8192

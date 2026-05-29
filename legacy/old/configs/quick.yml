@@ -1,0 +1,147 @@
+seed: 42
+project_name: ROGII/Wellbore
+output_uri: s3://s3-basket-cold.wb.ru/ds-experiments
+
+data:
+  data_dir: data
+  train_dir: data/public_train
+  test_dir: data/public_test
+  sample_submission: data/public_test/sample_submission.csv
+  max_train_wells:
+  max_test_wells:
+  target_rows: hidden_only
+  clearml:
+    enabled: false
+    project:
+    name: rogii-wellbore-geology-prediction
+    version:
+    dataset_id:
+    alias:
+    cache_dir: ~/.cache/clearml/rogii
+
+features:
+  tail_windows: [25, 100]
+  rolling_windows: [5, 25]
+  prediction_baseline: last_known_tvt
+  num_workers: 1
+  progress_interval: 1
+  cache:
+    enabled: false
+    dir: artifacts/feature_cache_quick
+  include_typewell: true
+  include_kaggle_top_signals: true
+  include_direct_path_features: true
+  k_segment_offset_predictions: ../MTPNet/artifacts/k_segment_offset_v0/k_offset_oof_predictions.parquet
+  top_state_predictions: ../MTPNet/artifacts/top_state_teacher_v0/top_state_oof_predictions.parquet
+  direct_path:
+    allow_current_well_formations: false
+    tail_rows: 240
+    cem_n_iter: 3
+    cem_pop_size: 120
+    cem_top_k: 4
+    cem_seed: 17
+    stage2_n_knots: 6
+    stage2_max_offset: 12.0
+    stage2_passes: 1
+  kaggle_top:
+    beam_configs:
+      - [10, 20.0, 144.0, 2, cons]
+      - [10, 8.0, 64.0, 2, loose]
+      - [8, 35.0, 220.0, 1, vcons]
+      - [10, 14.0, 90.0, 5, sm5]
+      - [20, 4.0, 36.0, 3, vloose]
+      - [12, 12.0, 100.0, 3, mid]
+      - [15, 25.0, 180.0, 2, stiff]
+    ncc_windows: [8, 15]
+    ncc_stride: 3
+    dtw_enabled: true
+    dtw_max_query_points: 300
+    dtw_max_ref_points: 300
+    dtw_radii: [20, 50]
+    dwt_enabled: true
+    dwt_wavelet: db4
+    dwt_level: 2
+    dwt_max_query_points: 300
+    dwt_max_ref_points: 300
+    dwt_radii: [20, 50]
+    particle_enabled: true
+    particle_count: 96
+    ancc_particle_count: 96
+    spatial_k: 2
+    dense_k: 10
+    dense_samples_per_well: 30
+    robust_expert_enabled: false
+
+model:
+  base_models:
+    - id: lgb_quick
+      name: lightgbm
+      params:
+        n_estimators: 90
+        early_stopping_rounds: 20
+        learning_rate: 0.05
+        num_leaves: 31
+        min_child_samples: 20
+    - id: xgb_quick
+      name: xgboost
+      params:
+        n_estimators: 80
+        early_stopping_rounds: 20
+        learning_rate: 0.05
+        max_depth: 4
+        min_child_weight: 4
+        tree_method: hist
+    - id: cat_quick
+      name: catboost
+      params:
+        iterations: 90
+        early_stopping_rounds: 20
+        learning_rate: 0.05
+        depth: 5
+        l2_leaf_reg: 5.0
+  blend:
+    method: hill_climb
+    alpha_grid: [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
+    iterations: 200
+    allow_negative_weights: false
+
+validation:
+  n_splits: 3
+  fold_safe_context: true
+  final_model_strategy: full_context
+
+postprocess:
+  search_method: grid
+  progress_interval: 10
+  residual_weight: 1.0
+  residual_weight_grid: []
+  residual_clip: 250.0
+  notebook_blend:
+    enabled: true
+    pf_column: pf_ancc
+    pf_columns: [pf_ancc, pf_z]
+    alpha_grid: [0.95, 1.00, 1.05]
+    tau_grid: [0, 50, 100]
+    w_pf_ancc_grid: [0, 0.10, 0.20]
+    w_pf_z_grid: [0, 0.05, 0.10]
+    w_pf_total_max: 0.30
+  smoothing:
+    enabled: true
+    window: 17
+    polyorder: 3
+    candidates: []
+
+outputs:
+  output_dir: artifacts/quick
+  submission_path: submission.csv
+
+tracking:
+  clearml:
+    enabled: false
+    project:
+    task_name:
+    output_uri:
+    tags: [rogii, quick]
+    log_artifacts: true
+    log_model: true
+    fail_on_error: false

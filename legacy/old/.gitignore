@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local data and generated outputs
+data/
+artifacts/
+catboost_info/
+submission.csv
+*.prof
+*.log
+
+# Local credentials and machine files
+clearml.conf
+portainer.yml
+.env
+.DS_Store
+
+# Kaggle/mining scratch space
+.kaggle_mining/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

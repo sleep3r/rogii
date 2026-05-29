@@ -1,0 +1,26 @@
+[project]
+name = "mtpnet"
+version = "0.1.0"
+description = "MTPNet — Offset-State Decoder for wellbore TVT prediction."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "catboost>=1.2",
+    "pytest>=8.0",
+    "jupyter>=1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

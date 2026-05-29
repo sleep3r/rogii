@@ -1,0 +1,52 @@
+FROM nvidia/cuda:12.6.0-base-ubuntu22.04 AS build
+
+ARG TORCH_CUDA=cu124
+ARG TORCH_VERSION=2.5.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    libgomp1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh \
+    && sh install-uv.sh \
+    && rm install-uv.sh
+
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --locked --no-cache --no-dev
+
+FROM nvidia/cuda:12.6.0-base-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/app/.venv/bin:/root/.local/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    clinfo \
+    curl \
+    git \
+    libgomp1 \
+    ocl-icd-libopencl1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/OpenCL/vendors \
+    && printf "libnvidia-opencl.so.1\n" > /etc/OpenCL/vendors/nvidia.icd
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+
+COPY --from=build /root/.local /root/.local
+COPY --from=build /app/.venv /app/.venv

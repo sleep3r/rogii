@@ -1,0 +1,54 @@
+[project]
+name = "bphwt"
+version = "0.1.0"
+description = "BPHWT v1 — Residual Anchored C-field Transformer for TVT prediction."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Core ML
+    "torch>=2.5,<2.8",
+    # Numerics + I/O
+    "numpy>=2.0",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.5",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    # Experiment tracking + dataset versioning (S3 backend)
+    "clearml[s3]>=1.18.0",
+    # Remote training dispatcher (mirrors old/)
+    "spacebridge>=0.1.5",
+    "pydantic>=2.13.4",
+    "numba>=0.61",
+]
+
+[tool.uv]
+package = false
+
+# Internal Nexus index for spacebridge (mirrors old/pyproject.toml).
+[[tool.uv.index]]
+name = "nexus"
+url = "https://nexus-hosted.wb.ru/repository/pypi/simple"
+explicit = true
+
+[tool.uv.sources]
+spacebridge = { index = "nexus" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.15",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+norecursedirs = ["__pycache__"]
+
+[tool.ruff]
+line-length = 110
+extend-exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

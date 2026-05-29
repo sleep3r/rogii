@@ -1,0 +1,27 @@
+{
+  "id": "nina2025/rogii-h-blend-v1",
+  "id_no": 119404683,
+  "title": "ROGII |\ud83d\udc3c h-blend v1",
+  "code_file": "rogii-h-blend-v1.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [
+    "gpu"
+  ],
+  "dataset_sources": [
+    "nina2025/rogii-03",
+    "thbdh5765/rogii-v10-fresh-artifacts",
+    "needless090/rogii-tabicl-mirror"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "rogii-wellbore-geology-prediction"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:00377cd1b3d470a605bc5b0ceca79969e369644e9b36802242a1c70e627372f9",
+  "machine_shape": "NvidiaTeslaT4"
+}

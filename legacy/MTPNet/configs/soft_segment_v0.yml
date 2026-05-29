@@ -1,0 +1,17 @@
+data_dir: data
+output_dir: artifacts/soft_segment_v0
+rows_per_step: 32
+vertical_bins: 96
+tau_bins: 1.5
+n_folds: 5
+train_fold: 0
+seed: 42
+k_wells: -1
+epochs: 8
+batch_size: 2
+hidden_channels: 32
+lr: 0.001
+weight_decay: 0.0001
+jump_penalty: 0.15
+curvature_penalty: 0.0
+device: auto

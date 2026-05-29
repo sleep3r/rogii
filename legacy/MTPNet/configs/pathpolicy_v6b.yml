@@ -1,0 +1,37 @@
+# PathPolicy v6b — pure hard CE; diagnosing v6 divergence
+# v6 divergence: val_loss exploded ep2–9 with soft_kl_alpha=0.8, tail_oversample=2, lr=2e-4
+# v6b changes:
+#   - soft_kl_alpha: 0.0  (pure hard CE; isolates whether soft KL was causing instability)
+#   - tail_oversample: 1  (removes train/val distribution mismatch)
+#   - lr: 5e-5            (lower LR; 545k params, 14k chunks — 2e-4 was likely too aggressive)
+#   - dropout: 0.3        (more regularization against overfitting)
+#   - patience: 10        (still early-stop but slightly looser)
+#   - n_epochs: 60        (enough runway given cosine schedule)
+# Primary metric: val_acc (higher = better)
+# Gate: assembled MWR gain vs B2 >= +0.15 ft
+
+head_type: classifier
+d_model: 128
+n_layers: 3
+nhead: 4
+dim_ff: 256
+dropout: 0.3
+batch_size: 64
+n_epochs: 60
+lr: 5.0e-5
+weight_decay: 1.0e-4
+lambda_v: 0.1
+label_smoothing: 0.0
+soft_kl_alpha: 0.0       # pure hard CE — isolate soft KL as a cause of v6 divergence
+kl_tau: 2.0
+early_stop_patience: 10
+tail_oversample: 1
+val_frac: 0.2
+seed: 42
+output_dir: artifacts/pathpolicy_v6b
+oracle_chunks: artifacts/oracle_v2_strict/oracle_chunks.parquet
+data_dir: data/train
+base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+mtp_path: artifacts/mtp_v3_gr_forced/track_row_predictions.parquet

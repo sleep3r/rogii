@@ -1,0 +1,29 @@
+# PathPolicy v5 — CostPolicy (rmse_regressor head, Huber + ranking margin loss)
+# Primary metric: val_mean_regret (lower = better)
+# Gate: assembled MWR gain vs B2 >= +0.15 ft
+
+head_type: rmse_regressor
+d_model: 64
+n_layers: 2
+nhead: 4
+dim_ff: 128
+dropout: 0.3
+batch_size: 64
+n_epochs: 60
+lr: 1.0e-4
+weight_decay: 1.0e-3
+lambda_v: 0.1
+huber_delta: 2.0         # Huber delta in log1p-RMSE space (~7.3 ft)
+lambda_rank: 0.3         # weight for pairwise ranking margin loss
+rank_margin: 0.2         # margin in log1p-RMSE space
+early_stop_patience: 8
+tail_oversample: 1
+val_frac: 0.2
+seed: 42
+output_dir: artifacts/pathpolicy_v5
+oracle_chunks: artifacts/oracle_v2_strict/oracle_chunks.parquet
+data_dir: data/train
+base_path: ../old/artifacts/oof_baseline/schema10_oof.parquet
+b2_path: ../old/artifacts/formation_b2_danger_guard_a2_full_schema10/guarded_predictions.parquet
+a_path: ../old/artifacts/formation_plane_knn/oof_candidates.parquet
+mtp_path: artifacts/mtp_v3_gr_forced/track_row_predictions.parquet

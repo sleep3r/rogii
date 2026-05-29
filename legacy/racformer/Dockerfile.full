@@ -1,0 +1,78 @@
+# RAC-Former v1 — full multi-stage Docker build
+#
+# Use this when pyproject.toml / uv.lock / Python / Torch deps changed.
+# For normal code-only server runs, Dockerfile overlays code on top of the
+# last pushed RAC-Former image so `spacebridge train` does not rebuild CUDA deps.
+
+# ---------------------------------------------------------------------------
+# Stage 1: build venv
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:$PATH"
+ARG PYTHON_VERSION=3.12
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libgomp1
+
+WORKDIR /app
+
+# uv (matches old/Dockerfile)
+RUN curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh \
+    && sh install-uv.sh \
+    && rm install-uv.sh
+RUN uv python install ${PYTHON_VERSION}
+
+# Resolve dependencies first (cache-friendly).
+COPY pyproject.toml .python-version ./
+COPY uv.lock* ./
+RUN uv sync --python ${PYTHON_VERSION} --no-cache --no-dev \
+    || uv sync --python ${PYTHON_VERSION} --no-cache --no-dev --no-lock
+
+# Replace any CPU torch wheel uv resolved with CUDA-enabled torch.
+ARG TORCH_CUDA=cu124
+ARG TORCH_VERSION=2.5.1
+RUN uv pip install --python /app/.venv/bin/python --no-cache \
+        --index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
+        torch==${TORCH_VERSION}
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/app/.venv/bin:/root/.local/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        libgomp1
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+
+COPY --from=build /root/.local /root/.local
+COPY --from=build /app/.venv /app/.venv
+
+# Optional ClearML config (mounted as build secret like in old/Dockerfile)
+RUN --mount=type=secret,id=CLEAR_ML_CONF_PATH,dst=/tmp/clearml.conf,required=false \
+    if [ -f /tmp/clearml.conf ]; then cp /tmp/clearml.conf /root/clearml.conf; fi
+
+# Code only — data + priors mounted as volumes at runtime (see .dockerignore).
+COPY . ./racformer/
+
+ARG CMD_ARGS="racformer/configs/racformer_sanity.yml"
+ENV CMD_ARGS=$CMD_ARGS
+
+CMD ["sh", "-c", "python -m racformer.train ${CMD_ARGS#--config=}"]

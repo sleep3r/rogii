@@ -1,0 +1,12 @@
+inherits: quick.yml
+
+features:
+  include_direct_path_features: false
+
+outputs:
+  output_dir: artifacts/quick_external
+  submission_path: artifacts/quick_external/submission.csv
+
+tracking:
+  clearml:
+    tags: [rogii, quick, external]

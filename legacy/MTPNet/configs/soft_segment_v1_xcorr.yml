@@ -1,0 +1,30 @@
+data_dir: data
+output_dir: artifacts/soft_segment_v1_xcorr
+rows_per_step: 32
+vertical_bins: 96
+tau_bins: 1.5
+n_folds: 5
+train_fold: 0
+seed: 42
+k_wells: -1
+epochs: 8
+batch_size: 2
+hidden_channels: 32
+lr: 0.001
+weight_decay: 0.0001
+
+# v1 sanity: force the model to use pattern matching, not SDF shortcuts.
+use_pointwise_gr_diff: false
+use_sdf_channels: false
+use_typewell_gr_channel: false
+xcorr_radii: [3, 5, 9, 15]
+xcorr_min_patch_points: 3
+xcorr_mad_weight: 0.15
+xcorr_raw_mad_weight: 0.02
+
+# Decode on calibrated vertical log-probs with a hard local jump window.
+jump_penalty: 0.03
+max_jump_bins: 6
+normalize_dp_scores: true
+curvature_penalty: 0.0
+device: auto

@@ -1,0 +1,17 @@
+.DS_Store
+.git/
+.kaggle_mining/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+
+artifacts/
+data/
+tmp/
+submission.csv
+
+clearml.conf
+portainer.yml

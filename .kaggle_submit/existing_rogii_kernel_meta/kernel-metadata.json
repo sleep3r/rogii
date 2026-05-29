@@ -1,0 +1,26 @@
+{
+  "id": "sleep3r/rogii-kojimar-pf-beam-tabicl-submit",
+  "id_no": 120221890,
+  "title": "ROGII Kojimar PF Beam TabICL Submit",
+  "code_file": "rogii-kojimar-pf-beam-tabicl-submit.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [
+    "gpu"
+  ],
+  "dataset_sources": [
+    "thbdh5765/rogii-v10-fresh-artifacts",
+    "needless090/rogii-tabicl-mirror"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "rogii-wellbore-geology-prediction"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:00377cd1b3d470a605bc5b0ceca79969e369644e9b36802242a1c70e627372f9",
+  "machine_shape": "NvidiaTeslaT4"
+}
